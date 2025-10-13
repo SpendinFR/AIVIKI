@@ -1,0 +1,2734 @@
+# creativity/__init__.py
+"""
+Système de Créativité Avancée de l'AGI Évolutive
+Génération d'idées, mélange conceptuel, détection d'insights et innovation intégrés
+"""
+
+import numpy as np
+import time
+from datetime import datetime, timedelta
+from typing import Dict, List, Any, Optional, Tuple, Set, Callable
+from dataclasses import dataclass, field
+from enum import Enum
+import threading
+from collections import defaultdict, deque
+import math
+import random
+import networkx as nx
+from itertools import combinations, product
+import re
+
+class CreativityMode(Enum):
+    """Modes de fonctionnement créatif"""
+    DIVERGENT_THINKING = "pensée_divergente"
+    CONVERGENT_THINKING = "pensée_convergente"
+    LATERAL_THINKING = "pensée_latérale"
+    SYSTEMS_THINKING = "pensée_systémique"
+    INTUITIVE_THINKING = "pensée_intuitive"
+
+class IdeaState(Enum):
+    """États du cycle de vie d'une idée"""
+    RAW = "brute"
+    DEVELOPED = "développée"
+    REFINED = "affinée"
+    INTEGRATED = "intégrée"
+    IMPLEMENTED = "implémentée"
+    ARCHIVED = "archivée"
+
+class InsightType(Enum):
+    """Types d'insights créatifs"""
+    ASSOCIATIVE = "associatif"
+    RESTRUCTURING = "restructuration"
+    ANALOGICAL = "analogique"
+    EMERGENT = "émergent"
+    INTUITIVE = "intuitif"
+
+@dataclass
+class CreativeIdea:
+    """Représentation complète d'une idée créative"""
+    id: str
+    concept_core: str
+    description: str
+    state: IdeaState
+    novelty: float                    # 0.0-1.0
+    usefulness: float                 # 0.0-1.0
+    feasibility: float                # 0.0-1.0
+    elaboration: float                # 0.0-1.0
+    domains: List[str]
+    components: List[str]
+    associations: List[str]
+    created_time: float
+    last_modified: float
+    development_history: List[Dict[str, Any]]
+    emotional_affinity: float         # Affinité émotionnelle avec l'idée
+    activation_level: float           # Niveau d'activation dans l'espace conceptuel
+
+@dataclass
+class ConceptualBlend:
+    """Mélange conceptuel créatif"""
+    blend_id: str
+    input_spaces: List[str]           # Espaces conceptuels d'entrée
+    generic_space: List[str]          # Espace générique commun
+    blended_space: str                # Espace conceptuel résultant
+    emergent_structure: List[str]     # Structure émergente
+    creativity_score: float
+    coherence: float
+    elaboration_potential: float
+
+@dataclass
+class CreativeInsight:
+    """Insight créatif moment "Eurêka"""
+    insight_id: str
+    type: InsightType
+    content: str
+    significance: float
+    clarity: float
+    surprise: float
+    emotional_intensity: float
+    preceding_incubation: float       # Durée d'incubation précédente
+    trigger: str
+    timestamp: float
+    related_ideas: List[str]
+    verification_status: str          # "unverified", "verified", "falsified"
+
+@dataclass
+class InnovationProject:
+    """Projet d'innovation structuré"""
+    project_id: str
+    core_idea: str
+    objectives: List[str]
+    constraints: List[str]
+    resources_needed: List[str]
+    development_phases: List[Dict[str, Any]]
+    current_phase: int
+    success_metrics: Dict[str, float]
+    risk_assessment: Dict[str, float]
+    team_dynamics: Dict[str, Any]     # Pour collaboration future
+
+class CreativitySystem:
+
+    def _ensure_idea_struct(idea):
+        if isinstance(idea, str):
+            return {'raw_text': idea, 'state': 'RAW'}
+        return idea
+    """
+    Système de créativité inspiré des processus cognitifs humains
+    Intègre génération, incubation, illumination et vérification
+    """
+    
+    def __init__(self, cognitive_architecture=None, memory_system=None, 
+                 reasoning_system=None, emotional_system=None, metacognitive_system=None):
+        self.cognitive_architecture = cognitive_architecture
+        self.memory_system = memory_system
+        self.reasoning_system = reasoning_system
+        self.emotional_system = emotional_system
+        self.metacognitive_system = metacognitive_system
+        self.creation_time = time.time()
+
+        # ——— LIAISONS INTER-MODULES ———
+        if self.cognitive_architecture:
+            self.goals = getattr(self.cognitive_architecture, "goals", None)
+            self.learning = getattr(self.cognitive_architecture, "learning", None)
+            self.perception = getattr(self.cognitive_architecture, "perception", None)
+            self.world_model = getattr(self.cognitive_architecture, "world_model", None)
+
+        
+        # === ESPACE CONCEPTUEL DYNAMIQUE ===
+        self.conceptual_space = {
+            "concept_network": nx.Graph(),
+            "semantic_density": defaultdict(float),
+            "conceptual_distance": defaultdict(float),
+            "activation_spreading": ActivationSpreadingSystem(),
+            "constraint_relaxation": ConstraintRelaxationSystem()
+        }
+        
+        # === MOTEUR DE GÉNÉRATION D'IDÉES ===
+        self.idea_generation = {
+            "divergent_thinker": DivergentThinker(),
+            "convergent_thinker": ConvergentThinker(),
+            "lateral_thinker": LateralThinker(),
+            "idea_pool": deque(maxlen=1000),
+            "idea_quality_metrics": IdeaQualityMetrics(),
+            "generation_strategies": self._initialize_generation_strategies()
+        }
+        
+        # === SYSTÈME DE MÉLANGE CONCEPTUEL ===
+        self.conceptual_blending = {
+            "blending_engine": ConceptualBlendingEngine(),
+            "cross_domain_mapper": CrossDomainMapper(),
+            "emergent_structure_detector": EmergentStructureDetector(),
+            "blend_evaluator": BlendEvaluator(),
+            "blend_history": deque(maxlen=500)
+        }
+        
+        # === MÉCANISME D'INSIGHT ===
+        self.insight_detection = {
+            "incubation_monitor": IncubationMonitor(),
+            "insight_triggers": InsightTriggerSystem(),
+            "aha_moment_detector": AhaMomentDetector(),
+            "verification_system": InsightVerificationSystem(),
+            "insight_history": deque(maxlen=200)
+        }
+        
+        # === MOTEUR D'INNOVATION ===
+        self.innovation_engine = {
+            "project_manager": InnovationProjectManager(),
+            "development_planner": DevelopmentPlanner(),
+            "risk_assessor": InnovationRiskAssessor(),
+            "collaboration_simulator": CollaborationSimulator(),
+            "innovation_pipeline": deque(maxlen=50)
+        }
+        
+        # === PROCESSUS CRÉATIFS ===
+        self.creative_processes = {
+            "preparation": PreparationPhase(),
+            "incubation": IncubationPhase(),
+            "illumination": IlluminationPhase(),
+            "verification": VerificationPhase(),
+            "current_phase": "preparation",
+            "phase_transitions": deque(maxlen=100)
+        }
+        
+        # === ÉTATS CRÉATIFS ===
+        self.creative_states = {
+            "creative_flow": 0.3,          # État de flux créatif
+            "cognitive_flexibility": 0.5,  # Flexibilité cognitive
+            "remote_associations": 0.4,    # Capacité d'associations éloignées
+            "conceptual_fluidity": 0.6,    # Fluidité conceptuelle
+            "inspiration_level": 0.4,      # Niveau d'inspiration
+            "creative_confidence": 0.5     # Confiance créative
+        }
+        
+        # === INFLUENCES CONTEXTUELLES ===
+        self.contextual_influences = {
+            "environmental_stimuli": [],
+            "cultural_constraints": [],
+            "domain_knowledge": {},
+            "emotional_climate": 0.5,
+            "cognitive_load": 0.3,
+            "time_pressure": 0.2
+        }
+        
+        # === BASE DE CONNAISSANCES CRÉATIVE ===
+        self.creative_knowledge = {
+            "heuristics": self._initialize_creative_heuristics(),
+            "analogical_sources": self._initialize_analogical_sources(),
+            "constraint_templates": self._initialize_constraint_templates(),
+            "innovation_patterns": self._initialize_innovation_patterns()
+        }
+        
+        # === HISTORIQUE CRÉATIF ===
+        self.creative_history = {
+            "ideas_generated": deque(maxlen=5000),
+            "blends_created": deque(maxlen=1000),
+            "insights_experienced": deque(maxlen=500),
+            "projects_completed": deque(maxlen=100),
+            "creative_breakthroughs": deque(maxlen=50),
+            "learning_trajectory": deque(maxlen=1000)
+        }
+        
+        # === PARAMÈTRES DE FONCTIONNEMENT ===
+        self.operational_parameters = {
+            "divergence_threshold": 0.7,       # Seuil pour la pensée divergente
+            "convergence_threshold": 0.6,      # Seuil pour la pensée convergente
+            "blending_aggressiveness": 0.5,    # Agressivité du mélange conceptuel
+            "insight_sensitivity": 0.6,        # Sensibilité aux insights
+            "risk_tolerance": 0.4,             # Tolérance au risque innovant
+            "elaboration_depth": 0.5           # Profondeur d'élaboration
+        }
+        
+        # === THREADS DE TRAITEMENT ===
+        self.processing_threads = {}
+        self.running = True
+        
+        # Initialisation des systèmes
+        self._initialize_creativity_system()
+        
+        print("🎨 Système de Créativité Initialisé")
+    
+    def _initialize_creativity_system(self):
+        """Initialise le système de créativité avec des capacités de base"""
+        
+        # Réseau conceptuel initial
+        self._initialize_basic_conceptual_network()
+        
+        # Heuristiques créatives innées
+        self._initialize_innate_creativity()
+        
+        # Démarrage des processus d'arrière-plan
+        self._start_creative_monitoring()
+        self._start_incubation_process()
+        self._start_insight_detection()
+        
+        # Premier cycle créatif
+        self._initiate_first_creative_cycle()
+    
+    def _initialize_basic_conceptual_network(self):
+        """Initialise le réseau conceptuel de base"""
+        concept_network = conceptual_space["concept_network"] if isinstance(conceptual_space, dict) else getattr(conceptual_space, "concept_network", None)
+        
+        # Concepts fondamentaux
+        basic_concepts = [
+            "espace", "temps", "mouvement", "énergie", "forme", 
+            "couleur", "son", "texture", "quantité", "qualité",
+            "relation", "causalité", "similarité", "différence",
+            "partie", "tout", "ordre", "chaos", "symétrie", "asymétrie"
+        ]
+        
+        # Ajout des concepts au réseau
+        for concept in basic_concepts:
+            concept_network.add_node(concept, activation=0.1, domain="fondamental")
+        
+        # Connexions basiques entre concepts
+        basic_connections = [
+            ("espace", "temps"), ("mouvement", "énergie"), 
+            ("forme", "couleur"), ("partie", "tout"),
+            ("ordre", "chaos"), ("symétrie", "asymétrie"),
+            ("relation", "causalité"), ("similarité", "différence")
+        ]
+        
+        for concept1, concept2 in basic_connections:
+            concept_network.add_edge(concept1, concept2, weight=0.8, type="fondamental")
+        
+        print(f"📚 Réseau conceptuel initialisé avec {len(basic_concepts)} concepts")
+    
+    def _initialize_innate_creativity(self):
+        """Initialise les capacités créatives innées"""
+        
+        # Heuristiques de génération innées
+        innate_heuristics = {
+            "analogy": {
+                "description": "Trouver des similarités entre domaines différents",
+                "effectiveness": 0.7,
+                "cognitive_cost": 0.6
+            },
+            "combination": {
+                "description": "Combiner des éléments existants de nouvelle manière",
+                "effectiveness": 0.8,
+                "cognitive_cost": 0.5
+            },
+            "transformation": {
+                "description": "Modifier les propriétés d'un concept",
+                "effectiveness": 0.6,
+                "cognitive_cost": 0.4
+            },
+            "abstraction": {
+                "description": "Extraire l'essence en ignorant les détails",
+                "effectiveness": 0.5,
+                "cognitive_cost": 0.7
+            }
+        }
+        
+        (creative_knowledge["heuristics"] if isinstance(creative_knowledge, dict) else getattr(creative_knowledge, "heuristics", None)).update(innate_heuristics)
+        
+        # Patterns d'innovation basiques
+        basic_innovation_patterns = {
+            "problem_solution": {
+                "description": "Identifier un problème et trouver une solution",
+                "success_rate": 0.6,
+                "applicability": 0.9
+            },
+            "improvement": {
+                "description": "Améliorer quelque chose d'existant",
+                "success_rate": 0.7,
+                "applicability": 0.8
+            }
+        }
+        
+        (creative_knowledge["innovation_patterns"] if isinstance(creative_knowledge, dict) else getattr(creative_knowledge, "innovation_patterns", None)).update(basic_innovation_patterns)
+    
+    def _initialize_creative_heuristics(self) -> Dict[str, Dict[str, Any]]:
+        """Initialise les heuristiques créatives"""
+        return {
+            "brainstorming": {
+                "description": "Générer beaucoup d'idées sans jugement",
+                "applicable_phases": ["preparation", "divergence"],
+                "parameters": {"quantity_focus": 0.8, "judgment_suspension": 0.9}
+            },
+            "scamper": {
+                "description": "Substituer, Combiner, Adapter, Modifier, Proposer d'autres utilisations, Éliminer, Renverser",
+                "applicable_phases": ["development", "transformation"],
+                "parameters": {"systematic_coverage": 0.7, "transformation_power": 0.6}
+            },
+            "mind_mapping": {
+                "description": "Organiser visuellement les idées autour d'un concept central",
+                "applicable_phases": ["organization", "structuration"],
+                "parameters": {"visual_support": 0.8, "association_facilitation": 0.7}
+            }
+        }
+    
+    def _initialize_analogical_sources(self) -> Dict[str, List[str]]:
+        """Initialise les sources analogiques de base"""
+        return {
+            "nature": ["écosystème", "évolution", "adaptation", "symbiose", "croissance"],
+            "technologie": ["réseau", "interface", "automatisation", "optimisation", "innovation"],
+            "art": ["composition", "harmonie", "contraste", "rythme", "expression"],
+            "science": ["hypothèse", "expérimentation", "théorie", "preuve", "découverte"]
+        }
+    
+    def _initialize_constraint_templates(self) -> Dict[str, Dict[str, Any]]:
+        """Initialise les modèles de contraintes créatives"""
+        return {
+            "resource_limitation": {
+                "description": "Limitation des ressources disponibles",
+                "creativity_boost": 0.6,
+                "applicability": 0.8
+            },
+            "time_pressure": {
+                "description": "Contrainte temporelle",
+                "creativity_boost": 0.4,
+                "applicability": 0.6
+            },
+            "functional_requirement": {
+                "description": "Exigence fonctionnelle spécifique",
+                "creativity_boost": 0.5,
+                "applicability": 0.9
+            }
+        }
+    
+    def _initialize_innovation_patterns(self) -> Dict[str, Dict[str, Any]]:
+        """Initialise les patterns d'innovation reconnus"""
+        return {
+            "disruptive_innovation": {
+                "description": "Innovation qui crée un nouveau marché",
+                "risk_level": 0.8,
+                "potential_reward": 0.9
+            },
+            "incremental_innovation": {
+                "description": "Amélioration progressive de l'existant",
+                "risk_level": 0.3,
+                "potential_reward": 0.5
+            },
+            "architectural_innovation": {
+                "description": "Reconfiguration des composants existants",
+                "risk_level": 0.5,
+                "potential_reward": 0.7
+            }
+        }
+    
+    def _initialize_generation_strategies(self) -> Dict[str, Callable]:
+        """Initialise les stratégies de génération d'idées"""
+        return {
+            "random_association": self._random_association_strategy,
+            "domain_transfer": self._domain_transfer_strategy,
+            "constraint_challenge": self._constraint_challenge_strategy,
+            "attribute_listing": self._attribute_listing_strategy,
+            "forced_relationship": self._forced_relationship_strategy
+        }
+    
+    def _start_creative_monitoring(self):
+        """Démarre la surveillance créative continue"""
+        def monitoring_loop():
+            while self.running:
+                try:
+                    # Surveillance de l'état créatif
+                    self._monitor_creative_state()
+                    
+                    # Mise à jour de l'espace conceptuel
+                    self._update_conceptual_space()
+                    
+                    # Évaluation des idées en cours
+                    self._evaluate_ongoing_ideas()
+                    
+                    # Détection d'opportunités créatives
+                    self._detect_creative_opportunities()
+                    
+                    time.sleep(2)  # Surveillance toutes les 2 secondes
+                    
+                except Exception as e:
+                    print(f"Erreur dans la surveillance créative: {e}")
+                    time.sleep(5)
+        
+        monitor_thread = threading.Thread(target=monitoring_loop, daemon=True)
+        monitor_thread.start()
+if isinstance(processing_threads, dict):
+    processing_threads['creative_monitoring'] = monitor_thread
+else:
+    setattr(processing_threads, 'creative_monitoring', monitor_thread)
+    
+    def _start_incubation_process(self):
+        """Démarre le processus d'incubation en arrière-plan"""
+        def incubation_loop():
+            while self.running:
+                try:
+                    # Traitement d'incubation des idées en attente
+                    self._process_incubation_phase()
+                    time.sleep(10)  # Traitement toutes les 10 secondes
+                    
+                except Exception as e:
+                    print(f"Erreur dans le processus d'incubation: {e}")
+                    time.sleep(30)
+        
+        incubation_thread = threading.Thread(target=incubation_loop, daemon=True)
+        incubation_thread.start()
+if isinstance(processing_threads, dict):
+    processing_threads['incubation_process'] = incubation_thread
+else:
+    setattr(processing_threads, 'incubation_process', incubation_thread)
+    
+    def _start_insight_detection(self):
+        """Démarre la détection d'insights en arrière-plan"""
+        def insight_loop():
+            while self.running:
+                try:
+                    # Surveillance des conditions d'insight
+                    self._monitor_insight_conditions()
+                    time.sleep(5)  # Surveillance toutes les 5 secondes
+                    
+                except Exception as e:
+                    print(f"Erreur dans la détection d'insights: {e}")
+                    time.sleep(20)
+        
+        insight_thread = threading.Thread(target=insight_loop, daemon=True)
+        insight_thread.start()
+if isinstance(processing_threads, dict):
+    processing_threads['insight_detection'] = insight_thread
+else:
+    setattr(processing_threads, 'insight_detection', insight_thread)
+    
+    def _initiate_first_creative_cycle(self):
+        """Initie le premier cycle créatif"""
+        # Génération d'idées initiales
+        initial_ideas = self.generate_ideas(
+            topic="créativité",
+            constraints=[],
+            num_ideas=5,
+            strategy="random_association"
+        )
+        
+        # Enregistrement du début du cycle
+if isinstance(creative_processes, dict):
+    creative_processes['current_phase'] = "preparation"
+else:
+    setattr(creative_processes, 'current_phase', "preparation")
+        (creative_history["learning_trajectory"] if isinstance(creative_history, dict) else getattr(creative_history, "learning_trajectory", None)).append({
+            "timestamp": time.time(),
+            "event": "first_creative_cycle_initiated",
+            "ideas_generated": len(initial_ideas),
+            "creative_state": self.creative_states.copy()
+        })
+    
+    def generate_ideas(self, topic: str, constraints: List[str], 
+                      num_ideas: int = 10, strategy: str = "auto") -> List[CreativeIdea]:
+        """
+        Génère de nouvelles idées créatives
+        """
+        start_time = time.time()
+        
+        # Sélection automatique de la stratégie si nécessaire
+        if strategy == "auto":
+            strategy = self._select_appropriate_strategy(topic, constraints)
+        
+        # Application de la stratégie sélectionnée
+        generation_function = (idea_generation["generation_strategies"] if isinstance(idea_generation, dict) else getattr(idea_generation, "generation_strategies", None)).get(strategy)
+        if not generation_function:
+            generation_function = self._random_association_strategy
+        
+        raw_ideas = generation_function(topic, constraints, num_ideas)
+        
+        # Transformation en objets CreativeIdea
+        developed_ideas = []
+        for i, raw_idea in enumerate(raw_ideas):
+            idea = self._develop_raw_idea(raw_idea, topic, constraints)
+            developed_ideas.append(idea)
+            
+            # Ajout au pool d'idées
+if isinstance(idea_generation, dict):
+    idea_generation['idea_pool'].append(idea)
+else:
+    getattr(idea_generation, 'idea_pool', []).append(idea)
+if isinstance(creative_history, dict):
+    creative_history['ideas_generated'].append(idea)
+else:
+    getattr(creative_history, 'ideas_generated', []).append(idea)
+        
+        # Mise à jour des métriques
+        generation_time = time.time() - start_time
+        self._update_creative_metrics(len(developed_ideas), generation_time, strategy)
+        
+        return developed_ideas
+    
+    def _select_appropriate_strategy(self, topic: str, constraints: List[str]) -> str:
+        """Sélectionne la stratégie de génération appropriée"""
+        
+        # Facteurs influençant la sélection
+        constraint_level = len(constraints) / 10.0
+        domain_familiarity = self._assess_domain_familiarity(topic)
+        creative_flow = (creative_states["creative_flow"] if isinstance(creative_states, dict) else getattr(creative_states, "creative_flow", None))
+        
+        # Logique de sélection
+        if constraint_level > 0.7:
+            return "constraint_challenge"
+        elif domain_familiarity < 0.3:
+            return "random_association"
+        elif creative_flow > 0.7:
+            return "domain_transfer"
+        else:
+            return "attribute_listing"
+    
+    def _random_association_strategy(self, topic: str, constraints: List[str], 
+                                   num_ideas: int) -> List[str]:
+        """Stratégie: associations aléatoires"""
+        ideas = []
+        
+        # Activation des concepts liés au topic
+        related_concepts = self._get_related_concepts(topic, distance=2)
+        
+        for _ in range(num_ideas * 3):  # Générer plus pour filtrer
+            # Sélection aléatoire de concepts
+            concept1 = random.choice(related_concepts) if related_concepts else topic
+            concept2 = random.choice(list((conceptual_space["concept_network"] if isinstance(conceptual_space, dict) else getattr(conceptual_space, "concept_network", None)).nodes()))
+            
+            # Combinaison créative
+            combined_idea = f"{concept1} + {concept2} = {self._combine_concepts(concept1, concept2)}"
+            
+            # Vérification des contraintes
+            if self._satisfies_constraints(combined_idea, constraints):
+                ideas.append(combined_idea)
+            
+            if len(ideas) >= num_ideas:
+                break
+        
+        return ideas[:num_ideas]
+    
+    def _domain_transfer_strategy(self, topic: str, constraints: List[str], 
+                                num_ideas: int) -> List[str]:
+        """Stratégie: transfert inter-domaines"""
+        ideas = []
+        
+        # Identification de domaines sources
+        source_domains = list((creative_knowledge["analogical_sources"] if isinstance(creative_knowledge, dict) else getattr(creative_knowledge, "analogical_sources", None)).keys())
+        
+        for _ in range(num_ideas):
+            source_domain = random.choice(source_domains)
+            domain_concepts = (creative_knowledge["analogical_sources"] if isinstance(creative_knowledge, dict) else getattr(creative_knowledge, "analogical_sources", None))[source_domain]
+            source_concept = random.choice(domain_concepts)
+            
+            # Transfert analogique
+            transferred_idea = f"Application de {source_concept} ({source_domain}) à {topic}"
+            
+            if self._satisfies_constraints(transferred_idea, constraints):
+                ideas.append(transferred_idea)
+        
+        return ideas
+    
+    def _constraint_challenge_strategy(self, topic: str, constraints: List[str], 
+                                     num_ideas: int) -> List[str]:
+        """Stratégie: défi des contraintes"""
+        ideas = []
+        
+        for constraint in constraints:
+            # Inversion de contrainte
+            challenged_constraint = self._challenge_constraint(constraint)
+            
+            # Génération basée sur la contrainte inversée
+            idea = f"{topic} sans la limitation: {challenged_constraint}"
+            ideas.append(idea)
+            
+            if len(ideas) >= num_ideas:
+                break
+        
+        # Complétion si nécessaire
+        while len(ideas) < num_ideas:
+            extra_idea = f"{topic} avec approche radicalement différente"
+            ideas.append(extra_idea)
+        
+        return ideas[:num_ideas]
+    
+    def _attribute_listing_strategy(self, topic: str, constraints: List[str], 
+                                  num_ideas: int) -> List[str]:
+        """Stratégie: liste d'attributs"""
+        ideas = []
+        
+        # Extraction d'attributs du topic
+        attributes = self._extract_attributes(topic)
+        
+        # Modification systématique des attributs
+        for attribute in attributes[:min(5, len(attributes))]:
+            modifications = ["amplifier", "réduire", "inverser", "combiner", "transformer"]
+            
+            for modification in modifications:
+                idea = f"{topic} avec {attribute} {modification}"
+                
+                if self._satisfies_constraints(idea, constraints):
+                    ideas.append(idea)
+                
+                if len(ideas) >= num_ideas:
+                    break
+            
+            if len(ideas) >= num_ideas:
+                break
+        
+        return ideas[:num_ideas]
+    
+    def _forced_relationship_strategy(self, topic: str, constraints: List[str], 
+                                    num_ideas: int) -> List[str]:
+        """Stratégie: relation forcée"""
+        ideas = []
+        
+        # Concepts sans relation apparente
+        unrelated_concepts = self._get_unrelated_concepts(topic, threshold=0.1)
+        
+        for concept in unrelated_concepts[:num_ideas]:
+            # Forçage de relation
+            forced_idea = f"Relation forcée entre {topic} et {concept}: {self._force_relationship(topic, concept)}"
+            
+            if self._satisfies_constraints(forced_idea, constraints):
+                ideas.append(forced_idea)
+        
+        return ideas
+    
+    def _get_related_concepts(self, concept: str, distance: int = 1) -> List[str]:
+        """Récupère les concepts reliés dans le réseau"""
+        concept_network = (conceptual_space["concept_network"] if isinstance(conceptual_space, dict) else getattr(conceptual_space, "concept_network", None))
+        
+        if concept not in concept_network:
+            return []
+        
+        related = []
+        for node in concept_network.nodes():
+            if node != concept:
+                try:
+                    # Calcul du plus court chemin
+                    path_length = nx.shortest_path_length(concept_network, concept, node)
+                    if path_length <= distance:
+                        related.append(node)
+                except nx.NetworkXNoPath:
+                    continue
+        
+        return related
+    
+    def _combine_concepts(self, concept1: str, concept2: str) -> str:
+        """Combine deux concepts de manière créative"""
+        combination_patterns = [
+            f"{concept1} utilisant {concept2}",
+            f"{concept2} appliqué à {concept1}",
+            f"fusion de {concept1} et {concept2}",
+            f"{concept1} inspiré par {concept2}",
+            f"{concept2} comme métaphore pour {concept1}"
+        ]
+        
+        return random.choice(combination_patterns)
+    
+    def _satisfies_constraints(self, idea: str, constraints: List[str]) -> bool:
+        """Vérifie si une idée satisfait les contraintes"""
+        if not constraints:
+            return True
+        
+        idea_lower = idea.lower()
+        for constraint in constraints:
+            constraint_lower = constraint.lower()
+            # Vérification basique de violation de contrainte
+            if "sans" in constraint_lower and "avec" in idea_lower:
+                forbidden = constraint_lower.replace("sans", "").strip()
+                if forbidden in idea_lower:
+                    return False
+            elif "avec" in constraint_lower and "sans" in idea_lower:
+                required = constraint_lower.replace("avec", "").strip()
+                if required not in idea_lower:
+                    return False
+        
+        return True
+    
+    def _challenge_constraint(self, constraint: str) -> str:
+        """Défie une contrainte de manière créative"""
+        if "sans" in constraint.lower():
+            return constraint.lower().replace("sans", "avec excès de")
+        elif "avec" in constraint.lower():
+            return constraint.lower().replace("avec", "sans")
+        else:
+            return f"inversion de: {constraint}"
+    
+    def _extract_attributes(self, concept: str) -> List[str]:
+        """Extrait les attributs d'un concept"""
+        # Attributs génériques basés sur le concept
+        generic_attributes = {
+            "taille", "couleur", "forme", "texture", "poids", "durée", 
+            "intensité", "complexité", "vitesse", "fréquence", "coût"
+        }
+        
+        # Filtrage basé sur la pertinence du concept
+        concept_lower = concept.lower()
+        relevant_attributes = []
+        
+        for attribute in generic_attributes:
+            # Vérification de pertinence basique
+            if any(word in concept_lower for word in ["grand", "petit", "taille"]) and attribute == "taille":
+                relevant_attributes.append(attribute)
+            elif any(word in concept_lower for word in ["couleur", "coloré", "teinte"]) and attribute == "couleur":
+                relevant_attributes.append(attribute)
+            else:
+                # Ajout aléatoire avec probabilité réduite
+                if random.random() < 0.3:
+                    relevant_attributes.append(attribute)
+        
+        return relevant_attributes if relevant_attributes else list(generic_attributes)[:3]
+    
+    def _get_unrelated_concepts(self, concept: str, threshold: float = 0.1) -> List[str]:
+        """Récupère les concepts non reliés"""
+        concept_network = (conceptual_space["concept_network"] if isinstance(conceptual_space, dict) else getattr(conceptual_space, "concept_network", None))
+        all_concepts = list(concept_network.nodes())
+        unrelated = []
+        
+        for other_concept in all_concepts:
+            if other_concept != concept:
+                try:
+                    # Calcul de la distance conceptuelle
+                    if not nx.has_path(concept_network, concept, other_concept):
+                        unrelated.append(other_concept)
+                    else:
+                        path_length = nx.shortest_path_length(concept_network, concept, other_concept)
+                        if path_length > 3:  # Seuil de non-relation
+                            unrelated.append(other_concept)
+                except nx.NetworkXNoPath:
+                    unrelated.append(other_concept)
+        
+        return unrelated[:20]  # Limiter le nombre
+    
+    def _force_relationship(self, concept1: str, concept2: str) -> str:
+        """Force une relation entre deux concepts non reliés"""
+        relationship_types = [
+            "comme source d'inspiration",
+            "comme contrainte créative",
+            "comme élément de contraste",
+            "comme métaphore structurelle",
+            "comme principe organisationnel"
+        ]
+        
+        return random.choice(relationship_types)
+    
+    def _develop_raw_idea(self, raw_idea: str, topic: str, constraints: List[str]) -> CreativeIdea:
+        """Développe une idée brute en idée créative structurée"""
+        idea_id = f"idea_{int(time.time())}_{random.randint(1000, 9999)}"
+        
+        # Analyse de l'idée
+        novelty = self._assess_novelty(raw_idea, topic)
+        usefulness = self._assess_usefulness(raw_idea, topic)
+        feasibility = self._assess_feasibility(raw_idea)
+        elaboration = 0.3  # Élaboration initiale basse
+        
+        # Extraction des composants
+        components = self._extract_components(raw_idea)
+        domains = self._identify_domains(raw_idea)
+        associations = self._generate_associations(raw_idea)
+        
+        idea = CreativeIdea(
+            id=idea_id,
+            concept_core=raw_idea,
+            description=f"Idée créative: {raw_idea}",
+            state=IdeaState.RAW,
+            novelty=novelty,
+            usefulness=usefulness,
+            feasibility=feasibility,
+            elaboration=elaboration,
+            domains=domains,
+            components=components,
+            associations=associations,
+            created_time=time.time(),
+            last_modified=time.time(),
+            development_history=[{
+                "timestamp": time.time(),
+                "action": "création",
+                "state": "raw",
+                "notes": "Idée générée initialement"
+            }],
+            emotional_affinity=self._assess_emotional_affinity(raw_idea),
+            activation_level=0.1
+        )
+        
+        return idea
+    
+    def _assess_novelty(self, idea: str, topic: str) -> float:
+        """Évalue la nouveauté d'une idée"""
+        # Facteurs de nouveauté
+        factors = []
+        
+        # Nouveauté lexicale
+        idea_words = set(idea.lower().split())
+        topic_words = set(topic.lower().split())
+        lexical_overlap = len(idea_words & topic_words) / len(idea_words | topic_words) if idea_words | topic_words else 0
+        lexical_novelty = 1.0 - lexical_overlap
+        factors.append(lexical_novelty * 0.4)
+        
+        # Nouveauté conceptuelle (basée sur le réseau)
+        concept_novelty = self._assess_conceptual_novelty(idea)
+        factors.append(concept_novelty * 0.6)
+        
+        return sum(factors) / len(factors) if factors else 0.5
+    
+    def _assess_conceptual_novelty(self, idea: str) -> float:
+        """Évalue la nouveauté conceptuelle"""
+        concept_network = (conceptual_space["concept_network"] if isinstance(conceptual_space, dict) else getattr(conceptual_space, "concept_network", None))
+        idea_concepts = self._extract_concepts_from_text(idea)
+        
+        if not idea_concepts:
+            return 0.5
+        
+        # Distance moyenne entre les concepts de l'idée
+        total_distance = 0
+        concept_pairs = list(combinations(idea_concepts, 2))
+        
+        if not concept_pairs:
+            return 0.5
+        
+        for concept1, concept2 in concept_pairs:
+            if concept1 in concept_network and concept2 in concept_network:
+                try:
+                    distance = nx.shortest_path_length(concept_network, concept1, concept2)
+                    total_distance += distance
+                except nx.NetworkXNoPath:
+                    total_distance += 5  # Distance maximale estimée
+        
+        avg_distance = total_distance / len(concept_pairs)
+        novelty = min(avg_distance / 5.0, 1.0)  # Normalisation
+        
+        return novelty
+    
+    def _assess_usefulness(self, idea: str, topic: str) -> float:
+        """Évalue l'utilité d'une idée"""
+        # Facteurs d'utilité
+        factors = []
+        
+        # Pertinence au topic
+        relevance = self._assess_relevance(idea, topic)
+        factors.append(relevance * 0.4)
+        
+        # Potentiel d'application
+        applicability = self._assess_applicability(idea)
+        factors.append(applicability * 0.3)
+        
+        # Valeur pratique
+        practical_value = self._assess_practical_value(idea)
+        factors.append(practical_value * 0.3)
+        
+        return sum(factors) / len(factors) if factors else 0.5
+    
+    def _assess_relevance(self, idea: str, topic: str) -> float:
+        """Évalue la pertinence au topic"""
+        idea_lower = idea.lower()
+        topic_lower = topic.lower()
+        
+        # Chevauchement sémantique basique
+        idea_words = set(idea_lower.split())
+        topic_words = set(topic_lower.split())
+        
+        if not idea_words or not topic_words:
+            return 0.3
+        
+        overlap = len(idea_words & topic_words)
+        relevance = overlap / len(topic_words)
+        
+        return min(relevance, 1.0)
+    
+    def _assess_applicability(self, idea: str) -> float:
+        """Évalue l'applicabilité de l'idée"""
+        # Indicateurs d'applicabilité
+        applicability_indicators = ["solution", "application", "utiliser", "implémenter", "appliquer"]
+        idea_lower = idea.lower()
+        
+        score = 0.3  # Score de base
+        
+        for indicator in applicability_indicators:
+            if indicator in idea_lower:
+                score += 0.1
+        
+        return min(score, 1.0)
+    
+    def _assess_practical_value(self, idea: str) -> float:
+        """Évalue la valeur pratique"""
+        # Indicateurs de valeur pratique
+        value_indicators = ["efficace", "efficient", "économique", "simple", "robuste"]
+        idea_lower = idea.lower()
+        
+        score = 0.3  # Score de base
+        
+        for indicator in value_indicators:
+            if indicator in idea_lower:
+                score += 0.1
+        
+        return min(score, 1.0)
+    
+    def _assess_feasibility(self, idea: str) -> float:
+        """Évalue la faisabilité de l'idée"""
+        # Facteurs de faisabilité
+        factors = []
+        
+        # Complexité perçue
+        complexity = self._assess_complexity(idea)
+        feasibility_from_complexity = 1.0 - complexity
+        factors.append(feasibility_from_complexity * 0.4)
+        
+        # Ressources nécessaires
+        resource_demand = self._assess_resource_demand(idea)
+        feasibility_from_resources = 1.0 - resource_demand
+        factors.append(feasibility_from_resources * 0.3)
+        
+        # Temps de réalisation
+        time_requirement = self._assess_time_requirement(idea)
+        feasibility_from_time = 1.0 - time_requirement
+        factors.append(feasibility_from_time * 0.3)
+        
+        return sum(factors) / len(factors) if factors else 0.5
+    
+    def _assess_complexity(self, idea: str) -> float:
+        """Évalue la complexité de l'idée"""
+        # Métriques basiques de complexité
+        word_count = len(idea.split())
+        concept_count = len(self._extract_concepts_from_text(idea))
+        
+        complexity = (word_count * 0.01) + (concept_count * 0.05)
+        return min(complexity, 1.0)
+    
+    def _assess_resource_demand(self, idea: str) -> float:
+        """Évalue la demande en ressources"""
+        # Indicateurs de demande de ressources
+        resource_indicators = ["coûteux", "complexe", "spécialisé", "rare", "avancé"]
+        idea_lower = idea.lower()
+        
+        score = 0.3  # Score de base
+        
+        for indicator in resource_indicators:
+            if indicator in idea_lower:
+                score += 0.1
+        
+        return min(score, 1.0)
+    
+    def _assess_time_requirement(self, idea: str) -> float:
+        """Évalue le temps de réalisation requis"""
+        # Indicateurs de temps
+        time_indicators = ["long", "rapide", "immédiat", "progressif", "étapier"]
+        idea_lower = idea.lower()
+        
+        score = 0.3  # Score de base
+        
+        for indicator in time_indicators:
+            if "long" in indicator and indicator in idea_lower:
+                score += 0.2
+            elif "rapide" in indicator or "immédiat" in indicator:
+                if indicator in idea_lower:
+                    score -= 0.1
+        
+        return max(0.1, min(score, 1.0))
+    
+    def _extract_components(self, idea: str) -> List[str]:
+        """Extrait les composants d'une idée"""
+        # Extraction basique basée sur la structure
+        components = []
+        
+        # Séparation par mots-clés
+        separators = ["+", "avec", "utilisant", "appliquant", "inspiré par"]
+        
+        for separator in separators:
+            if separator in idea:
+                parts = idea.split(separator)
+                components.extend([part.strip() for part in parts])
+                break
+        
+        if not components:
+            # Fallback: mots significatifs
+            words = idea.split()
+            components = [word for word in words if len(word) > 3][:3]
+        
+        return components
+    
+    def _identify_domains(self, idea: str) -> List[str]:
+        """Identifie les domaines concernés par l'idée"""
+        domains = []
+        idea_lower = idea.lower()
+        
+        # Mapping mot-clé -> domaine
+        domain_mapping = {
+            "technologie": ["technologie", "digital", "informatique", "programmation"],
+            "art": ["art", "créatif", "design", "esthétique"],
+            "science": ["science", "recherche", "expérience", "découverte"],
+            "affaires": ["business", "commerce", "entreprise", "profit"],
+            "éducation": ["éducation", "apprentissage", "enseignement", "savoir"]
+        }
+        
+        for domain, keywords in domain_mapping.items():
+            if any(keyword in idea_lower for keyword in keywords):
+                domains.append(domain)
+        
+        return domains if domains else ["général"]
+    
+    def _generate_associations(self, idea: str) -> List[str]:
+        """Génère des associations pour l'idée"""
+        concepts = self._extract_concepts_from_text(idea)
+        associations = []
+        
+        for concept in concepts[:3]:  # Limiter le nombre
+            related = self._get_related_concepts(concept, distance=1)
+            if related:
+                associations.extend(related[:2])  # 2 associations par concept
+        
+        return list(set(associations))[:5]  # Maximum 5 associations uniques
+    
+    def _extract_concepts_from_text(self, text: str) -> List[str]:
+        """Extrait les concepts d'un texte"""
+        concept_network = (conceptual_space["concept_network"] if isinstance(conceptual_space, dict) else getattr(conceptual_space, "concept_network", None))
+        words = text.lower().split()
+        
+        # Filtrage des mots significatifs
+        concepts = []
+        for word in words:
+            if len(word) > 3 and word in concept_network:
+                concepts.append(word)
+        
+        return concepts
+    
+    def _assess_emotional_affinity(self, idea: str) -> float:
+        """Évalue l'affinité émotionnelle avec l'idée"""
+        if not self.emotional_system:
+            return 0.5
+        
+        # Simulation de réaction émotionnelle à l'idée
+        emotional_response = self.emotional_system.process_stimulus(
+            f"idée créative: {idea}", 
+            {"context": "évaluation_créative"}
+        )
+        
+        # Affinité basée sur la valence émotionnelle
+        affinity = (emotional_response.valence + 1.0) / 2.0  # Conversion -1,1 -> 0,1
+        
+        return affinity
+    
+    def _update_creative_metrics(self, ideas_generated: int, generation_time: float, strategy: str):
+        """Met à jour les métriques créatives"""
+        # Mise à jour de l'état de flux créatif
+        efficiency = ideas_generated / max(generation_time, 1.0)
+        flow_increase = min(efficiency * 0.1, 0.2)
+if isinstance(creative_states, dict):
+    creative_states['creative_flow'] = min(
+else:
+    setattr(creative_states, 'creative_flow', min()
+            1.0, (creative_states["creative_flow"] if isinstance(creative_states, dict) else getattr(creative_states, "creative_flow", None)) + flow_increase
+        )
+        
+        # Mise à jour de la confiance créative
+        if ideas_generated > 0:
+            confidence_increase = ideas_generated * 0.02
+if isinstance(creative_states, dict):
+    creative_states['creative_confidence'] = min(
+else:
+    setattr(creative_states, 'creative_confidence', min()
+                1.0, (creative_states["creative_confidence"] if isinstance(creative_states, dict) else getattr(creative_states, "creative_confidence", None)) + confidence_increase
+        )
+        
+        # Enregistrement d’apprentissage
+        learning_record = {
+            "timestamp": time.time(),
+            "strategy": strategy,
+            "ideas_generated": ideas_generated,
+            "generation_time": generation_time,
+            "efficiency": efficiency,
+            "new_creative_state": self.creative_states.copy()
+        }
+if isinstance(creative_history, dict):
+    creative_history['learning_trajectory'].append(learning_record)
+else:
+    getattr(creative_history, 'learning_trajectory', []).append(learning_record)
+    
+    def create_conceptual_blend(self, concept1: str, concept2: str) -> ConceptualBlend:
+        """
+        Crée un mélange conceptuel entre deux concepts
+        Basé sur la théorie des espaces mentaux de Fauconnier et Turner
+        """
+        start_time = time.time()
+        
+        # Préparation des espaces d'entrée
+        input_space1 = self._prepare_input_space(concept1)
+        input_space2 = self._prepare_input_space(concept2)
+        
+        # Construction de l'espace générique
+        generic_space = self._build_generic_space(input_space1, input_space2)
+        
+        # Projection sélective vers l'espace blendé
+        blended_space = self._create_blended_space(input_space1, input_space2, generic_space)
+        
+        # Détection de structure émergente
+        emergent_structure = self._detect_emergent_structure(blended_space)
+        
+        # Évaluation du blend
+        creativity_score = self._evaluate_blend_creativity(blended_space, emergent_structure)
+        coherence = self._evaluate_blend_coherence(blended_space)
+        elaboration_potential = self._evaluate_elaboration_potential(blended_space)
+        
+        blend = ConceptualBlend(
+            blend_id=f"blend_{int(time.time())}_{random.randint(1000, 9999)}",
+            input_spaces=[concept1, concept2],
+            generic_space=generic_space,
+            blended_space=blended_space,
+            emergent_structure=emergent_structure,
+            creativity_score=creativity_score,
+            coherence=coherence,
+            elaboration_potential=elaboration_potential
+        )
+        
+        # Enregistrement
+if isinstance(conceptual_blending, dict):
+    conceptual_blending['blend_history'].append(blend)
+else:
+    getattr(conceptual_blending, 'blend_history', []).append(blend)
+if isinstance(creative_history, dict):
+    creative_history['blends_created'].append(blend)
+else:
+    getattr(creative_history, 'blends_created', []).append(blend)
+        
+        return blend
+    
+    def _prepare_input_space(self, concept: str) -> Dict[str, Any]:
+        """Prépare un espace mental d'entrée pour un concept"""
+        concept_network = (conceptual_space["concept_network"] if isinstance(conceptual_space, dict) else getattr(conceptual_space, "concept_network", None))
+        
+        # Structure de l'espace d'entrée
+        input_space = {
+            "core_concept": concept,
+            "elements": [],
+            "relations": [],
+            "properties": [],
+            "functions": []
+        }
+        
+        if concept in concept_network:
+            # Éléments reliés
+            neighbors = list(concept_network.neighbors(concept))
+if isinstance(input_space, dict):
+    input_space['elements'] = neighbors[:5]  # Limiter le nombre
+else:
+    setattr(input_space, 'elements', neighbors[:5])  # Limiter le nombre)
+            
+            # Propriétés basées sur le réseau
+            degree = concept_network.degree(concept)
+if isinstance(input_space, dict):
+    input_space['properties'].append(f"connectivité: {degree}")
+else:
+    getattr(input_space, 'properties', []).append(f"connectivité: {degree}")
+            
+            # Relations
+            for neighbor in neighbors[:3]:
+                edge_data = concept_network.get_edge_data(concept, neighbor)
+                weight = edge_data.get('weight', 0.5) if edge_data else 0.5
+if isinstance(input_space, dict):
+    input_space['relations'].append(f"{concept} -> {neighbor} (force: {weight:.2f})")
+else:
+    getattr(input_space, 'relations', []).append(f"{concept} -> {neighbor} (force: {weight:.2f})")
+        
+        # Propriétés génériques
+        generic_properties = ["abstrait", "concret", "complexe", "simple", "dynamique", "statique"]
+        (input_space["properties"] if isinstance(input_space, dict) else getattr(input_space, "properties", None)).extend(random.sample(generic_properties, 2))
+        
+        # Fonctions potentielles
+        generic_functions = ["représenter", "organiser", "transformer", "communiquer", "créer"]
+        (input_space["functions"] if isinstance(input_space, dict) else getattr(input_space, "functions", None)).extend(random.sample(generic_functions, 2))
+        
+        return input_space
+    
+    def _build_generic_space(self, space1: Dict[str, Any], space2: Dict[str, Any]) -> List[str]:
+        """Construit l'espace générique commun"""
+        generic_elements = []
+        
+        # Éléments communs
+        common_elements = set((space1["elements"] if isinstance(space1, dict) else getattr(space1, "elements", None))) & set((space2["elements"] if isinstance(space2, dict) else getattr(space2, "elements", None)))
+        generic_elements.extend(list(common_elements)[:3])
+        
+        # Propriétés communes
+        all_properties = (space1["properties"] if isinstance(space1, dict) else getattr(space1, "properties", None)) + (space2["properties"] if isinstance(space2, dict) else getattr(space2, "properties", None))
+        property_counts = defaultdict(int)
+        for prop in all_properties:
+            property_counts[prop] += 1
+        
+        common_properties = [prop for prop, count in property_counts.items() if count > 1]
+        generic_elements.extend(common_properties[:2])
+        
+        # Éléments génériques de secours
+        if len(generic_elements) < 3:
+            fallback_elements = ["relation", "structure", "processus", "élément", "système"]
+            needed = 3 - len(generic_elements)
+            generic_elements.extend(random.sample(fallback_elements, needed))
+        
+        return generic_elements
+    
+    def _create_blended_space(self, space1: Dict[str, Any], space2: Dict[str, Any], 
+                            generic_space: List[str]) -> str:
+        """Crée l'espace blendé résultant"""
+        
+        # Combinaison créative des concepts de base
+        core_blend = f"{space1['core_concept']}-{space2['core_concept']} hybride"
+        
+        # Intégration d'éléments des deux espaces
+        space1_elements = random.sample((space1["elements"] if isinstance(space1, dict) else getattr(space1, "elements", None)), min(2, len((space1["elements"] if isinstance(space1, dict) else getattr(space1, "elements", None)))))
+        space2_elements = random.sample((space2["elements"] if isinstance(space2, dict) else getattr(space2, "elements", None)), min(2, len((space2["elements"] if isinstance(space2, dict) else getattr(space2, "elements", None)))))
+        
+        # Construction de la description
+        description_parts = [
+            core_blend,
+            f"intégrant {', '.join(space1_elements)} de {space1['core_concept']}",
+            f"avec {', '.join(space2_elements)} de {space2['core_concept']}",
+            f"via {random.choice(generic_space)}"
+        ]
+        
+        return " ".join(description_parts)
+    
+    def _detect_emergent_structure(self, blended_space: str) -> List[str]:
+        """Détecte la structure émergente dans l'espace blendé"""
+        emergent_structures = []
+        
+        # Patterns de structure émergente
+        patterns = [
+            "nouvelle propriété émergente",
+            "comportement imprévu",
+            "fonctionnalité émergente",
+            "relation inattendue",
+            "pattern structurel nouveau"
+        ]
+        
+        # Sélection basée sur la complexité du blend
+        words = blended_space.split()
+        complexity = len(words) / 10.0
+        
+        num_structures = max(1, int(complexity * 3))
+        selected_structures = random.sample(patterns, min(num_structures, len(patterns)))
+        
+        for structure in selected_structures:
+            # Personnalisation basée sur le contenu du blend
+            customized_structure = f"{structure} dans {blended_space}"
+            emergent_structures.append(customized_structure)
+        
+        return emergent_structures
+    
+    def _evaluate_blend_creativity(self, blended_space: str, emergent_structure: List[str]) -> float:
+        """Évalue la créativité du blend conceptuel"""
+        factors = []
+        
+        # Originalité basée sur la rareté des combinaisons
+        originality = len(blended_space) / 100.0  # Métrique simplifiée
+        factors.append(min(originality, 1.0) * 0.4)
+        
+        # Richesse de la structure émergente
+        emergence_richness = len(emergent_structure) / 5.0
+        factors.append(min(emergence_richness, 1.0) * 0.3)
+        
+        # Complexité intégrative
+        word_count = len(blended_space.split())
+        complexity = min(word_count / 20.0, 1.0)
+        factors.append(complexity * 0.3)
+        
+        return sum(factors) / len(factors) if factors else 0.5
+    
+    def _evaluate_blend_coherence(self, blended_space: str) -> float:
+        """Évalue la cohérence du blend conceptuel"""
+        # Cohérence basée sur la plausibilité sémantique
+        words = blended_space.split()
+        meaningful_ratio = sum(1 for word in words if len(word) > 3) / len(words) if words else 0
+        
+        # Cohérence structurelle basique
+        structural_coherence = 0.7 if "hybride" in blended_space else 0.5
+        
+        return (meaningful_ratio + structural_coherence) / 2.0
+    
+    def _evaluate_elaboration_potential(self, blended_space: str) -> float:
+        """Évalue le potentiel d'élaboration du blend"""
+        # Potentiel basé sur la richesse conceptuelle
+        concepts = self._extract_concepts_from_text(blended_space)
+        concept_potential = min(len(concepts) / 5.0, 1.0)
+        
+        # Potentiel basé sur la complexité
+        complexity = len(blended_space.split()) / 10.0
+        complexity_potential = min(complexity, 1.0)
+        
+        return (concept_potential + complexity_potential) / 2.0
+    
+    def experience_insight(self, problem_context: Dict[str, Any]) -> Optional[CreativeInsight]:
+        """
+        Expérience un insight créatif (moment "Eurêka")
+        """
+        # Vérification des conditions d'insight
+        if not self._check_insight_conditions():
+            return None
+        
+        # Génération de l'insight
+        insight_content = self._generate_insight_content(problem_context)
+        if not insight_content:
+            return None
+        
+        # Création de l'objet insight
+        insight = CreativeInsight(
+            insight_id=f"insight_{int(time.time())}_{random.randint(1000, 9999)}",
+            type=self._determine_insight_type(insight_content),
+            content=insight_content,
+            significance=self._assess_insight_significance(insight_content, problem_context),
+            clarity=random.uniform(0.6, 0.9),
+            surprise=random.uniform(0.7, 1.0),
+            emotional_intensity=random.uniform(0.6, 0.9),
+            preceding_incubation=self._get_incubation_duration(),
+            trigger=self._identify_insight_trigger(),
+            timestamp=time.time(),
+            related_ideas=self._get_related_ideas(insight_content),
+            verification_status="unverified"
+        )
+        
+        # Enregistrement
+if isinstance(insight_detection, dict):
+    insight_detection['insight_history'].append(insight)
+else:
+    getattr(insight_detection, 'insight_history', []).append(insight)
+if isinstance(creative_history, dict):
+    creative_history['insights_experienced'].append(insight)
+else:
+    getattr(creative_history, 'insights_experienced', []).append(insight)
+        
+        # Mise à jour de l'état créatif
+        self._update_after_insight(insight)
+        
+        return insight
+    
+    def _check_insight_conditions(self) -> bool:
+        """Vérifie si les conditions sont favorables pour un insight"""
+        conditions = []
+        
+        # État de flux créatif
+        if (creative_states["creative_flow"] if isinstance(creative_states, dict) else getattr(creative_states, "creative_flow", None)) > 0.6:
+            conditions.append(True)
+        
+        # Flexibilité cognitive
+        if (creative_states["cognitive_flexibility"] if isinstance(creative_states, dict) else getattr(creative_states, "cognitive_flexibility", None)) > 0.5:
+            conditions.append(True)
+        
+        # Niveau d'inspiration
+        if (creative_states["inspiration_level"] if isinstance(creative_states, dict) else getattr(creative_states, "inspiration_level", None)) > 0.4:
+            conditions.append(True)
+        
+        # Charge cognitive modérée
+        cognitive_load = self.contextual_influences.get("cognitive_load", 0.5)
+        if 0.3 < cognitive_load < 0.7:
+            conditions.append(True)
+        
+        return len(conditions) >= 3 and random.random() < 0.3  # Probabilité d'occurrence
+    
+    def _generate_insight_content(self, problem_context: Dict[str, Any]) -> Optional[str]:
+        """Génère le contenu de l'insight"""
+        problem_description = problem_context.get("problem", "problème générique")
+        
+        # Patterns d'insight courants
+        insight_patterns = [
+            f"Réalisation soudaine: {problem_description} peut être abordé complètement différemment",
+            f"Connexion inattendue: {problem_description} est similaire à {random.choice(list(self.creative_knowledge['analogical_sources'].keys()))}",
+            f"Restructuration: {problem_description} n'est pas ce qu'il semble être",
+            f"Solution émergente: la réponse à {problem_description} était là depuis le début",
+            f"Perspective nouvelle: {problem_description} vu sous un angle radicalement différent"
+        ]
+        
+        return random.choice(insight_patterns) if random.random() < 0.7 else None
+    
+    def _determine_insight_type(self, insight_content: str) -> InsightType:
+        """Détermine le type d'insight"""
+        content_lower = insight_content.lower()
+        
+        if "similaire" in content_lower or "comme" in content_lower:
+            return InsightType.ANALOGICAL
+        elif "différemment" in content_lower or "angle" in content_lower:
+            return InsightType.RESTRUCTURING
+        elif "connexion" in content_lower or "lien" in content_lower:
+            return InsightType.ASSOCIATIVE
+        elif "émergent" in content_lower or "soudain" in content_lower:
+            return InsightType.EMERGENT
+        else:
+            return InsightType.INTUITIVE
+    
+    def _assess_insight_significance(self, insight_content: str, problem_context: Dict[str, Any]) -> float:
+        """Évalue la signification de l'insight"""
+        # Facteurs de signification
+        factors = []
+        
+        # Longueur et complexité
+        complexity = len(insight_content.split()) / 10.0
+        factors.append(min(complexity, 1.0) * 0.3)
+        
+        # Originalité perçue
+        originality = random.uniform(0.5, 0.9)
+        factors.append(originality * 0.4)
+        
+        # Pertinence au problème
+        relevance = random.uniform(0.6, 1.0)
+        factors.append(relevance * 0.3)
+        
+        return sum(factors) / len(factors)
+    
+    def _get_incubation_duration(self) -> float:
+        """Estime la durée d'incubation précédente"""
+        # Basé sur l'historique récent des idées
+        recent_ideas = list((creative_history["ideas_generated"] if isinstance(creative_history, dict) else getattr(creative_history, "ideas_generated", None)))[-10:]
+        if not recent_ideas:
+            return random.uniform(10.0, 60.0)
+        
+        # Durée moyenne depuis la dernière idée liée
+        now = time.time()
+        time_differences = [now - idea.created_time for idea in recent_ideas]
+        avg_incubation = sum(time_differences) / len(time_differences)
+        
+        return min(avg_incubation, 3600.0)  # Maximum 1 heure
+    
+    def _identify_insight_trigger(self) -> str:
+        """Identifie le déclencheur de l'insight"""
+        triggers = [
+            "changement de perspective",
+            "association distante",
+            "relaxation après effort intense",
+            "stimulus environnemental",
+            "conversation interne",
+            "rêverie éveillée"
+        ]
+        
+        return random.choice(triggers)
+    
+    def _get_related_ideas(self, insight_content: str) -> List[str]:
+        """Récupère les idées reliées à l'insight"""
+        recent_ideas = list((creative_history["ideas_generated"] if isinstance(creative_history, dict) else getattr(creative_history, "ideas_generated", None)))[-5:]
+        related = []
+        
+        for idea in recent_ideas:
+            # Vérification de similarité basique
+            if any(word in insight_content.lower() for word in idea.concept_core.lower().split()[:3]):
+                related.append(idea.id)
+            
+            if len(related) >= 2:
+                break
+        
+        return related
+    
+    def _update_after_insight(self, insight: CreativeInsight):
+        """Met à jour l'état après un insight"""
+        # Boost de confiance créative
+        confidence_boost = insight.significance * 0.2
+if isinstance(creative_states, dict):
+    creative_states['creative_confidence'] = min(
+else:
+    setattr(creative_states, 'creative_confidence', min()
+            1.0, (creative_states["creative_confidence"] if isinstance(creative_states, dict) else getattr(creative_states, "creative_confidence", None)) + confidence_boost
+        )
+        
+        # Augmentation de l'inspiration
+        inspiration_boost = insight.emotional_intensity * 0.15
+if isinstance(creative_states, dict):
+    creative_states['inspiration_level'] = min(
+else:
+    setattr(creative_states, 'inspiration_level', min()
+            1.0, (creative_states["inspiration_level"] if isinstance(creative_states, dict) else getattr(creative_states, "inspiration_level", None)) + inspiration_boost
+        )
+    
+    def develop_innovation_project(self, core_idea: str, objectives: List[str], 
+                                 constraints: List[str]) -> InnovationProject:
+        """
+        Développe un projet d'innovation structuré
+        """
+        project_id = f"project_{int(time.time())}_{random.randint(1000, 9999)}"
+        
+        # Planification du développement
+        development_phases = self._plan_development_phases(core_idea, objectives)
+        
+        # Évaluation des risques
+        risk_assessment = self._assess_innovation_risks(core_idea, constraints)
+        
+        # Définition des métriques de succès
+        success_metrics = self._define_success_metrics(objectives)
+        
+        # Estimation des ressources
+        resources_needed = self._estimate_resources_needed(core_idea, development_phases)
+        
+        project = InnovationProject(
+            project_id=project_id,
+            core_idea=core_idea,
+            objectives=objectives,
+            constraints=constraints,
+            resources_needed=resources_needed,
+            development_phases=development_phases,
+            current_phase=0,
+            success_metrics=success_metrics,
+            risk_assessment=risk_assessment,
+            team_dynamics={"auto_collaboration": True, "roles": ["générateur", "évaluateur", "développeur"]}
+        )
+        
+        # Ajout au pipeline d'innovation
+if isinstance(innovation_engine, dict):
+    innovation_engine['innovation_pipeline'].append(project)
+else:
+    getattr(innovation_engine, 'innovation_pipeline', []).append(project)
+if isinstance(creative_history, dict):
+    creative_history['projects_completed'].append(project)
+else:
+    getattr(creative_history, 'projects_completed', []).append(project)
+        
+        return project
+    
+    def _plan_development_phases(self, core_idea: str, objectives: List[str]) -> List[Dict[str, Any]]:
+        """Planifie les phases de développement"""
+        phases = []
+        
+        # Phases standard de développement créatif
+        standard_phases = [
+            {
+                "name": "exploration_conceptuelle",
+                "description": "Exploration approfondie du concept de base",
+                "duration_estimate": random.uniform(5.0, 15.0),
+                "resources": ["recherche", "brainstorming", "analyse comparative"]
+            },
+            {
+                "name": "développement_prototype",
+                "description": "Développement d'une première version tangible",
+                "duration_estimate": random.uniform(10.0, 30.0),
+                "resources": ["conception", "test", "itération"]
+            },
+            {
+                "name": "validation_test",
+                "description": "Test et validation de la solution",
+                "duration_estimate": random.uniform(8.0, 20.0),
+                "resources": ["expérimentation", "feedback", "amélioration"]
+            },
+            {
+                "name": "implémentation_finale",
+                "description": "Implémentation de la solution finale",
+                "duration_estimate": random.uniform(15.0, 40.0),
+                "resources": ["déploiement", "documentation", "formation"]
+            }
+        ]
+        
+        # Ajustement basé sur la complexité de l'idée
+        complexity = len(core_idea.split()) / 10.0
+        for phase in standard_phases:
+            adjusted_phase = phase.copy()
+            (adjusted_phase["duration_estimate"] if isinstance(adjusted_phase, dict) else getattr(adjusted_phase, "duration_estimate", None)) *= (1 + complexity)
+            phases.append(adjusted_phase)
+        
+        return phases
+    
+    def _assess_innovation_risks(self, core_idea: str, constraints: List[str]) -> Dict[str, float]:
+        """Évalue les risques d'innovation"""
+        risks = {}
+        
+        # Risque technique
+        technical_risk = random.uniform(0.3, 0.8)
+if isinstance(risks, dict):
+    risks['technique'] = technical_risk
+else:
+    setattr(risks, 'technique', technical_risk)
+        
+        # Risque de marché (simulé)
+        market_risk = random.uniform(0.2, 0.7)
+if isinstance(risks, dict):
+    risks['marché'] = market_risk
+else:
+    setattr(risks, 'marché', market_risk)
+        
+        # Risque de ressources
+        resource_risk = len(constraints) / 10.0
+if isinstance(risks, dict):
+    risks['ressources'] = min(resource_risk, 1.0)
+else:
+    setattr(risks, 'ressources', min(resource_risk, 1.0))
+        
+        # Risque temporel
+        time_risk = random.uniform(0.4, 0.9)
+if isinstance(risks, dict):
+    risks['temporel'] = time_risk
+else:
+    setattr(risks, 'temporel', time_risk)
+        
+        return risks
+    
+    def _define_success_metrics(self, objectives: List[str]) -> Dict[str, float]:
+        """Définit les métriques de succès"""
+        metrics = {}
+        
+        for objective in objectives[:3]:  # Maximum 3 métriques
+            metric_name = f"succès_{objective.lower().replace(' ', '_')}"
+            metrics[metric_name] = random.uniform(0.7, 0.95)
+        
+        # Métriques standard
+        standard_metrics = {
+            "satisfaction_utilisateur": random.uniform(0.6, 0.9),
+            "impact_innovation": random.uniform(0.5, 0.8),
+            "efficacité_implémentation": random.uniform(0.7, 0.9)
+        }
+        metrics.update(standard_metrics)
+        
+        return metrics
+    
+    def _estimate_resources_needed(self, core_idea: str, development_phases: List[Dict[str, Any]]) -> List[str]:
+        """Estime les ressources nécessaires"""
+        resources = []
+        
+        # Ressources basées sur la complexité
+        complexity = len(core_idea.split()) / 10.0
+        
+        base_resources = ["temps", "attention", "énergie_cognitive"]
+        resources.extend(base_resources)
+        
+        if complexity > 0.5:
+            resources.extend(["recherche_approfondie", "expertise_spécialisée"])
+        
+        if complexity > 0.7:
+            resources.extend(["expérimentation", "itération_multiple"])
+        
+        # Ressources des phases
+        for phase in development_phases:
+            resources.extend((phase["resources"] if isinstance(phase, dict) else getattr(phase, "resources", None)))
+        
+        return list(set(resources))  # Éliminer les doublons
+    
+    def _monitor_creative_state(self):
+        """Surveille l'état créatif global"""
+        # Mise à jour basée sur l'activité récente
+        recent_ideas = list((creative_history["ideas_generated"] if isinstance(creative_history, dict) else getattr(creative_history, "ideas_generated", None)))[-10:]
+        recent_insights = list((creative_history["insights_experienced"] if isinstance(creative_history, dict) else getattr(creative_history, "insights_experienced", None)))[-5:]
+        
+        # Flux créatif basé sur la productivité
+        if recent_ideas:
+            productivity = len(recent_ideas) / 10.0
+            flow_change = (productivity - 0.5) * 0.1
+if isinstance(creative_states, dict):
+    creative_states['creative_flow'] = max(0.1, min(1.0, 
+else:
+    setattr(creative_states, 'creative_flow', max(0.1, min(1.0, )
+                (creative_states["creative_flow"] if isinstance(creative_states, dict) else getattr(creative_states, "creative_flow", None)) + flow_change))
+        
+        # Flexibilité cognitive basée sur la variété des idées
+        if len(recent_ideas) >= 3:
+            domains_used = set()
+            for idea in recent_ideas:
+                domains_used.update(idea.domains)
+            flexibility = len(domains_used) / 5.0
+if isinstance(creative_states, dict):
+    creative_states['cognitive_flexibility'] = max(0.1, min(1.0,
+else:
+    setattr(creative_states, 'cognitive_flexibility', max(0.1, min(1.0,)
+                (creative_states["cognitive_flexibility"] if isinstance(creative_states, dict) else getattr(creative_states, "cognitive_flexibility", None)) * 0.9 + flexibility * 0.1))
+        
+        # Inspiration basée sur les insights récents
+        if recent_insights:
+            inspiration_boost = len(recent_insights) * 0.05
+if isinstance(creative_states, dict):
+    creative_states['inspiration_level'] = min(1.0,
+else:
+    setattr(creative_states, 'inspiration_level', min(1.0,)
+                (creative_states["inspiration_level"] if isinstance(creative_states, dict) else getattr(creative_states, "inspiration_level", None)) + inspiration_boost)
+    
+    def _update_conceptual_space(self):
+        """Met à jour l'espace conceptuel dynamique"""
+        concept_network = (conceptual_space["concept_network"] if isinstance(conceptual_space, dict) else getattr(conceptual_space, "concept_network", None))
+        
+        # Décroissance naturelle de l'activation
+        for node in concept_network.nodes():
+            current_activation = concept_network.nodes[node].get("activation", 0.1)
+            new_activation = current_activation * 0.99  # Décroissance légère
+            concept_network.nodes[node]["activation"] = max(0.01, new_activation)
+    
+    def _evaluate_ongoing_ideas(self):
+        """Évalue les idées en cours de développement"""
+        recent_ideas = list((idea_generation["idea_pool"] if isinstance(idea_generation, dict) else getattr(idea_generation, "idea_pool", None)))[-20:]
+        
+        for idea in recent_ideas:
+            if idea.state == IdeaState.RAW and random.random() < 0.1:
+                # Promotion occasionnelle d'idées brutes
+                idea.state = IdeaState.DEVELOPED
+                idea.last_modified = time.time()
+                idea.development_history.append({
+                    "timestamp": time.time(),
+                    "action": "promotion_automatique",
+                    "state": "developed",
+                    "notes": "Promotion basée sur le potentiel détecté"
+                })
+    
+    def _detect_creative_opportunities(self):
+        """Détecte les opportunités créatives émergentes"""
+        # Surveillance des patterns dans l'espace conceptuel
+        concept_network = (conceptual_space["concept_network"] if isinstance(conceptual_space, dict) else getattr(conceptual_space, "concept_network", None))
+        
+        # Détection de concepts sous-utilisés
+        for node in concept_network.nodes():
+            activation = concept_network.nodes[node].get("activation", 0.1)
+            if activation < 0.05:  # Concept très peu activé
+                # Opportunité d'exploration
+                if random.random() < 0.05:
+                    self._create_exploration_opportunity(node)
+    
+    def _create_exploration_opportunity(self, concept: str):
+        """Crée une opportunité d'exploration pour un concept sous-utilisé"""
+        opportunity = {
+            "type": "exploration_conceptuelle",
+            "concept": concept,
+            "potential": random.uniform(0.6, 0.9),
+            "timestamp": time.time(),
+            "action": f"Explorer le concept '{concept}' dans de nouveaux contextes"
+        }
+        
+        # Pourrait déclencher une génération d'idées automatique
+    
+    def _process_incubation_phase(self):
+        """Traite la phase d'incubation des idées"""
+        # Augmentation de l'activation des idées en incubation
+        for idea in (idea_generation["idea_pool"] if isinstance(idea_generation, dict) else getattr(idea_generation, "idea_pool", None)):
+            if idea.state in [IdeaState.RAW, IdeaState.DEVELOPED]:
+                # Légère augmentation de l'activation pendant l'incubation
+                incubation_boost = random.uniform(0.01, 0.05)
+                idea.activation_level = min(1.0, idea.activation_level + incubation_boost)
+    
+    def _monitor_insight_conditions(self):
+        """Surveille les conditions favorables aux insights"""
+        # Vérification périodique des conditions d'insight
+        if self._check_insight_conditions() and random.random() < 0.1:
+            # Génération d'un insight opportuniste
+            problem_context = {"problem": "optimisation_processus_créatif"}
+            self.experience_insight(problem_context)
+    
+    def get_creative_status(self) -> Dict[str, Any]:
+        """Retourne le statut créatif complet"""
+        recent_ideas = list((idea_generation["idea_pool"] if isinstance(idea_generation, dict) else getattr(idea_generation, "idea_pool", None)))[-10:]
+        
+        return {
+            "creative_states": self.creative_states.copy(),
+            "current_phase": (creative_processes["current_phase"] if isinstance(creative_processes, dict) else getattr(creative_processes, "current_phase", None)),
+            "recent_activity": {
+                "ideas_generated": len(recent_ideas),
+                "ideas_by_state": {
+                    state.value: sum(1 for idea in recent_ideas if idea.state == state)
+                    for state in IdeaState
+                },
+                "average_novelty": np.mean([idea.novelty for idea in recent_ideas]) if recent_ideas else 0.0,
+                "average_usefulness": np.mean([idea.usefulness for idea in recent_ideas]) if recent_ideas else 0.0
+            },
+            "conceptual_space": {
+                "concepts_count": (conceptual_space["concept_network"] if isinstance(conceptual_space, dict) else getattr(conceptual_space, "concept_network", None)).number_of_nodes(),
+                "connections_count": (conceptual_space["concept_network"] if isinstance(conceptual_space, dict) else getattr(conceptual_space, "concept_network", None)).number_of_edges(),
+                "average_activation": np.mean([
+                    data.get("activation", 0.1) 
+                    for _, data in (conceptual_space["concept_network"] if isinstance(conceptual_space, dict) else getattr(conceptual_space, "concept_network", None)).nodes(data=True)
+                ]) if (conceptual_space["concept_network"] if isinstance(conceptual_space, dict) else getattr(conceptual_space, "concept_network", None)).nodes() else 0.0
+            },
+            "innovation_pipeline": {
+                "projects_count": len((innovation_engine["innovation_pipeline"] if isinstance(innovation_engine, dict) else getattr(innovation_engine, "innovation_pipeline", None))),
+                "active_projects": sum(1 for p in (innovation_engine["innovation_pipeline"] if isinstance(innovation_engine, dict) else getattr(innovation_engine, "innovation_pipeline", None)) 
+                                     if p.current_phase < len(p.development_phases))
+            },
+            "historical_metrics": {
+                "total_ideas": len((creative_history["ideas_generated"] if isinstance(creative_history, dict) else getattr(creative_history, "ideas_generated", None))),
+                "total_blends": len((creative_history["blends_created"] if isinstance(creative_history, dict) else getattr(creative_history, "blends_created", None))),
+                "total_insights": len((creative_history["insights_experienced"] if isinstance(creative_history, dict) else getattr(creative_history, "insights_experienced", None))),
+                "total_projects": len((creative_history["projects_completed"] if isinstance(creative_history, dict) else getattr(creative_history, "projects_completed", None))),
+                "breakthroughs": len((creative_history["creative_breakthroughs"] if isinstance(creative_history, dict) else getattr(creative_history, "creative_breakthroughs", None)))
+            }
+        }
+    
+    def stop_creativity_system(self):
+        """Arrête le système de créativité"""
+        self.running = False
+        print("⏹️ Système de créativité arrêté")
+
+# ===== SOUS-SYSTÈMES SPÉCIALISÉS =====
+
+class ActivationSpreadingSystem:
+    """Système de propagation d'activation dans l'espace conceptuel"""
+    
+    def __init__(self):
+        self.propagation_factor = 0.3
+        self.decay_rate = 0.1
+    
+    def spread_activation(self, network, start_node, activation_amount):
+        """Propage l'activation à partir d'un nœud"""
+        if start_node not in network:
+            return
+        
+        visited = set()
+        queue = deque([(start_node, activation_amount)])
+        
+        while queue:
+            node, current_activation = queue.popleft()
+            
+            if node in visited or current_activation < 0.01:
+                continue
+            
+            visited.add(node)
+            
+            # Mise à jour de l'activation du nœud
+            current_node_activation = network.nodes[node].get("activation", 0.1)
+            new_activation = current_node_activation + current_activation
+            network.nodes[node]["activation"] = min(new_activation, 1.0)
+            
+            # Propagation aux voisins
+            for neighbor in network.neighbors(node):
+                edge_weight = network.edges[node, neighbor].get("weight", 0.5)
+                neighbor_activation = current_activation * self.propagation_factor * edge_weight
+                queue.append((neighbor, neighbor_activation))
+
+class ConstraintRelaxationSystem:
+    """Système de relaxation des contraintes pour la créativité"""
+    
+    def __init__(self):
+        self.constraint_levels = defaultdict(float)
+        self.relaxation_strategies = [
+            "ignore_temporarily",
+            "redefine_scope",
+            "find_alternative",
+            "challenge_assumption"
+        ]
+    
+    def relax_constraints(self, constraints: List[str], creativity_need: float) -> List[str]:
+        """Relaxe les contraintes selon le besoin de créativité"""
+        if creativity_need < 0.5:
+            return constraints  # Pas de relaxation nécessaire
+        
+        relaxed_constraints = []
+        relaxation_rate = creativity_need - 0.5  # 0.0 à 0.5
+        
+        for constraint in constraints:
+            if random.random() < relaxation_rate:
+                # Application d'une stratégie de relaxation
+                strategy = random.choice(self.relaxation_strategies)
+                relaxed_constraint = f"{constraint} [{strategy}]"
+                relaxed_constraints.append(relaxed_constraint)
+            else:
+                relaxed_constraints.append(constraint)
+        
+        return relaxed_constraints
+
+class DivergentThinker:
+    """Penseur divergent - génération de nombreuses idées variées"""
+    
+    def __init__(self):
+        self.fluency = 0.7       # Nombre d'idées générées
+        self.flexibility = 0.6    # Variété des catégories
+        self.originality = 0.5    # Originalité des idées
+        self.elaboration = 0.4    # Développement des idées
+    
+    def generate_divergent_ideas(self, topic: str, num_ideas: int) -> List[str]:
+        """Génère des idées divergentes"""
+        ideas = []
+        
+        for _ in range(num_ideas * 2):  # Générer plus pour sélection
+            idea = self._apply_divergent_strategy(topic)
+            if idea not in ideas:
+                ideas.append(idea)
+            
+            if len(ideas) >= num_ideas:
+                break
+        
+        return ideas
+    
+    def _apply_divergent_strategy(self, topic: str) -> str:
+        """Applique une stratégie de pensée divergente"""
+        strategies = [
+            self._attribute_modification,
+            self._perspective_shift,
+            self._analogical_transfer,
+            self._constraint_removal
+        ]
+        
+        strategy = random.choice(strategies)
+        return strategy(topic)
+    
+    def _attribute_modification(self, topic: str) -> str:
+        """Modifie les attributs du topic"""
+        attributes = ["taille", "couleur", "forme", "fonction", "matériau"]
+        attribute = random.choice(attributes)
+        modifications = ["augmenter", "réduire", "inverser", "combiner"]
+        modification = random.choice(modifications)
+        
+        return f"{topic} avec {attribute} {modification}"
+    
+    def _perspective_shift(self, topic: str) -> str:
+        """Change de perspective sur le topic"""
+        perspectives = ["enfant", "expert", "étranger", "artiste", "scientifique"]
+        perspective = random.choice(perspectives)
+        
+        return f"{topic} vu par un {perspective}"
+    
+    def _analogical_transfer(self, topic: str) -> str:
+        """Transfert analogique depuis d'autres domaines"""
+        domains = ["nature", "sport", "musique", "cuisine", "architecture"]
+        domain = random.choice(domains)
+        
+        return f"{topic} comme en {domain}"
+    
+    def _constraint_removal(self, topic: str) -> str:
+        """Supprime les contraintes habituelles"""
+        constraints = ["coût", "temps", "technologie", "ressources"]
+        constraint = random.choice(constraints)
+        
+        return f"{topic} sans limitation de {constraint}"
+
+class ConvergentThinker:
+    """Penseur convergent - évaluation et sélection des meilleures idées"""
+    
+    def __init__(self):
+        self.analysis_depth = 0.7
+        self.decision_quality = 0.6
+        self.efficiency = 0.8
+    
+    def select_best_ideas(self, ideas: List[CreativeIdea], 
+                         criteria: Dict[str, float], 
+                         num_select: int) -> List[CreativeIdea]:
+        """Sélectionne les meilleures idées selon des critères"""
+        if not ideas:
+            return []
+        
+        # Calcul des scores pour chaque idée
+        scored_ideas = []
+        for idea in ideas:
+            score = self._calculate_idea_score(idea, criteria)
+            scored_ideas.append((idea, score))
+        
+        # Tri par score décroissant
+        scored_ideas.sort(key=lambda x: x[1], reverse=True)
+        
+        # Sélection des meilleures
+        selected = [idea for idea, score in scored_ideas[:num_select]]
+        
+        return selected
+    
+    def _calculate_idea_score(self, idea: CreativeIdea, criteria: Dict[str, float]) -> float:
+        """Calcule un score global pour une idée"""
+        score_components = []
+        
+        # Composantes de base
+        if "novelty" in criteria:
+            score_components.append(idea.novelty * (criteria["novelty"] if isinstance(criteria, dict) else getattr(criteria, "novelty", None)))
+        
+        if "usefulness" in criteria:
+            score_components.append(idea.usefulness * (criteria["usefulness"] if isinstance(criteria, dict) else getattr(criteria, "usefulness", None)))
+        
+        if "feasibility" in criteria:
+            score_components.append(idea.feasibility * (criteria["feasibility"] if isinstance(criteria, dict) else getattr(criteria, "feasibility", None)))
+        
+        if "elaboration" in criteria:
+            score_components.append(idea.elaboration * (criteria["elaboration"] if isinstance(criteria, dict) else getattr(criteria, "elaboration", None)))
+        
+        # Score émotionnel si disponible
+        if "emotional_affinity" in criteria and hasattr(idea, 'emotional_affinity'):
+            score_components.append(idea.emotional_affinity * (criteria["emotional_affinity"] if isinstance(criteria, dict) else getattr(criteria, "emotional_affinity", None)))
+        
+        return sum(score_components) / len(score_components) if score_components else 0.0
+
+class LateralThinker:
+    """Penseur latéral - approches non conventionnelles"""
+    
+    def __init__(self):
+        self.provocativeness = 0.6
+        self.insight_potential = 0.5
+        self.transformation_power = 0.4
+    
+    def generate_lateral_ideas(self, topic: str, num_ideas: int) -> List[str]:
+        """Génère des idées par pensée latérale"""
+        ideas = []
+        
+        techniques = [
+            self._random_entry,
+            self._provocation,
+            self._reversal,
+            self._distortion
+        ]
+        
+        for _ in range(num_ideas):
+            technique = random.choice(techniques)
+            idea = technique(topic)
+            ideas.append(idea)
+        
+        return ideas
+    
+    def _random_entry(self, topic: str) -> str:
+        """Point d'entrée aléatoire"""
+        random_words = ["chaise", "nuage", "rivière", "horloge", "cristal"]
+        entry_point = random.choice(random_words)
+        
+        return f"{topic} à travers le concept de {entry_point}"
+    
+    def _provocation(self, topic: str) -> str:
+        """Provocation créative"""
+        provocations = [
+            f"Et si {topic} était impossible?",
+            f"Et si {topic} fonctionnait à l'envers?",
+            f"Et si {topic} était vivant?",
+            f"Et si {topic} n'avait aucune limite?"
+        ]
+        
+        return random.choice(provocations)
+    
+    def _reversal(self, topic: str) -> str:
+        """Inversion des assumptions"""
+        return f"Le contraire de {topic}"
+    
+    def _distortion(self, topic: str) -> str:
+        """Distortion des paramètres"""
+        distortions = ["extrêmement lent", "incroyablement grand", "absolument transparent"]
+        distortion = random.choice(distortions)
+        
+        return f"{topic} mais {distortion}"
+
+class IdeaQualityMetrics:
+    """Métriques de qualité des idées créatives"""
+    
+    def __init__(self):
+        self.quality_dimensions = {
+            "novelty": 0.0,
+            "resolution": 0.0,
+            "elaboration": 0.0,
+            "synthesis": 0.0
+        }
+    
+    def assess_idea_quality(self, idea: CreativeIdea) -> Dict[str, float]:
+        """Évalue la qualité multidimensionnelle d'une idée"""
+        metrics = {}
+        
+        # Nouveauté
+if isinstance(metrics, dict):
+    metrics['novelty'] = idea.novelty
+else:
+    setattr(metrics, 'novelty', idea.novelty)
+        
+        # Résolution (utilité + faisabilité)
+if isinstance(metrics, dict):
+    metrics['resolution'] = (idea.usefulness + idea.feasibility) / 2.0
+else:
+    setattr(metrics, 'resolution', (idea.usefulness + idea.feasibility) / 2.0)
+        
+        # Élaboration et synthèse (estimées)
+if isinstance(metrics, dict):
+    metrics['elaboration'] = idea.elaboration
+else:
+    setattr(metrics, 'elaboration', idea.elaboration)
+if isinstance(metrics, dict):
+    metrics['synthesis'] = min(idea.novelty + idea.usefulness, 1.0)
+else:
+    setattr(metrics, 'synthesis', min(idea.novelty + idea.usefulness, 1.0))
+        
+        # Score global
+if isinstance(metrics, dict):
+    metrics['overall'] = sum(metrics.values()) / len(metrics)
+else:
+    setattr(metrics, 'overall', sum(metrics.values()) / len(metrics))
+        
+        return metrics
+
+class ConceptualBlendingEngine:
+    """Moteur de mélange conceptuel"""
+    
+    def __init__(self):
+        self.blending_rules = [
+            "composition",
+            "completion",
+            "elaboration"
+        ]
+    
+    def create_blend(self, space1: Dict, space2: Dict) -> Dict[str, Any]:
+        """Crée un mélange conceptuel"""
+        blend = {
+            "elements": [],
+            "relations": [],
+            "properties": [],
+            "emergent_structure": []
+        }
+        
+        # Composition d'éléments
+if isinstance(blend, dict):
+    blend['elements'] = self._compose_elements((space1["elements"] if isinstance(space1, dict) else getattr(space1, "elements", None)), (space2["elements"] if isinstance(space2, dict) else getattr(space2, "elements", None)))
+else:
+    setattr(blend, 'elements', self._compose_elements((space1["elements"] if isinstance(space1, dict) else getattr(space1, "elements", None)), (space2["elements"] if isinstance(space2, dict) else getattr(space2, "elements", None))))
+        
+        # Completion des relations
+if isinstance(blend, dict):
+    blend['relations'] = self._complete_relations((space1["relations"] if isinstance(space1, dict) else getattr(space1, "relations", None)), (space2["relations"] if isinstance(space2, dict) else getattr(space2, "relations", None)))
+else:
+    setattr(blend, 'relations', self._complete_relations((space1["relations"] if isinstance(space1, dict) else getattr(space1, "relations", None)), (space2["relations"] if isinstance(space2, dict) else getattr(space2, "relations", None))))
+        
+        # Élaboration des propriétés
+if isinstance(blend, dict):
+    blend['properties'] = self._elaborate_properties((space1["properties"] if isinstance(space1, dict) else getattr(space1, "properties", None)), (space2["properties"] if isinstance(space2, dict) else getattr(space2, "properties", None)))
+else:
+    setattr(blend, 'properties', self._elaborate_properties((space1["properties"] if isinstance(space1, dict) else getattr(space1, "properties", None)), (space2["properties"] if isinstance(space2, dict) else getattr(space2, "properties", None))))
+        
+        # Détection de structure émergente
+if isinstance(blend, dict):
+    blend['emergent_structure'] = self._detect_emergent_structure(blend)
+else:
+    setattr(blend, 'emergent_structure', self._detect_emergent_structure(blend))
+        
+        return blend
+    
+    def _compose_elements(self, elements1: List, elements2: List) -> List:
+        """Compose les éléments des espaces d'entrée"""
+        composed = []
+        
+        # Éléments de base
+        composed.extend(elements1[:2])
+        composed.extend(elements2[:2])
+        
+        # Combinaisons créatives
+        if elements1 and elements2:
+            for e1 in elements1[:1]:
+                for e2 in elements2[:1]:
+                    combined = f"{e1}-{e2}"
+                    composed.append(combined)
+        
+        return list(set(composed))  # Éliminer les doublons
+    
+    def _complete_relations(self, relations1: List, relations2: List) -> List:
+        """Complete les relations entre éléments"""
+        completed = []
+        
+        completed.extend(relations1[:2])
+        completed.extend(relations2[:2])
+        
+        # Relations croisées
+        if relations1 and relations2:
+            cross_relation = f"relation_croisée:{relations1[0]}_{relations2[0]}"
+            completed.append(cross_relation)
+        
+        return completed
+    
+    def _elaborate_properties(self, props1: List, props2: List) -> List:
+        """Élabore les propriétés du blend"""
+        elaborated = []
+        
+        elaborated.extend(props1[:2])
+        elaborated.extend(props2[:2])
+        
+        # Propriétés émergentes
+        emergent_props = ["nouvelle_fonctionnalité", "comportement_imprévu", "qualité_émergente"]
+        elaborated.extend(random.sample(emergent_props, 1))
+        
+        return elaborated
+    
+    def _detect_emergent_structure(self, blend: Dict) -> List[str]:
+        """Détecte la structure émergente"""
+        emergent = []
+        
+        # Structures émergentes basées sur la complexité
+        element_count = len((blend["elements"] if isinstance(blend, dict) else getattr(blend, "elements", None)))
+        relation_count = len((blend["relations"] if isinstance(blend, dict) else getattr(blend, "relations", None)))
+        
+        if element_count >= 3 and relation_count >= 2:
+            emergent.append("structure_hiérarchique_émergente")
+        
+        if element_count >= 4:
+            emergent.append("pattern_organisationnel_nouveau")
+        
+        return emergent
+
+class CrossDomainMapper:
+    """Système de mapping inter-domaines"""
+    
+    def __init__(self):
+        self.domain_knowledge = {}
+        self.mapping_strategies = ["structure", "function", "process"]
+    
+    def map_across_domains(self, source_domain: str, target_domain: str) -> List[str]:
+        """Établit des mappings entre domaines"""
+        mappings = []
+        
+        for strategy in self.mapping_strategies:
+        if isinstance(strategy, str):
+            try:
+                strategy = {"raw_text": strategy}
+            except Exception:
+                print(f"[⚠️ Créativité] Idée ignorée car invalide: {strategy}")
+                continue
+            mapping = self._apply_mapping_strategy(source_domain, target_domain, strategy)
+            mappings.append(mapping)
+        
+        return mappings
+    
+    def _apply_mapping_strategy(self, source: str, target: str, strategy: str) -> str:
+        """Applique une stratégie de mapping spécifique"""
+        if strategy == "structure":
+            return f"Structure de {source} appliquée à {target}"
+        elif strategy == "function":
+            return f"Fonction de {source} transférée à {target}"
+        elif strategy == "process":
+            return f"Processus de {source} adapté à {target}"
+        else:
+            return f"Mapping générique entre {source} et {target}"
+
+class EmergentStructureDetector:
+    """Détecteur de structure émergente"""
+    
+    def __init__(self):
+        self.pattern_library = [
+            "auto_organisation",
+            "boucle_feedback",
+            "hiérarchie_émergente",
+            "réseau_complexe"
+        ]
+    
+    def detect_emergent_patterns(self, blend: Dict) -> List[str]:
+        """Détecte les patterns émergents dans un blend"""
+        detected_patterns = []
+        
+        # Détection basée sur les caractéristiques du blend
+        if len(blend.get("elements", [])) >= 4:
+            detected_patterns.append("complexité_émergente")
+        
+        if len(blend.get("relations", [])) >= 3:
+            detected_patterns.append("interconnexion_émergente")
+        
+        # Patterns de la librairie
+        if random.random() < 0.3:
+            detected_patterns.append(random.choice(self.pattern_library))
+        
+        return detected_patterns
+
+class BlendEvaluator:
+    """Évaluateur de blends conceptuels"""
+    
+    def __init__(self):
+        self.evaluation_criteria = {
+            "coherence": 0.6,
+            "richness": 0.7,
+            "novelty": 0.8,
+            "utility": 0.5
+        }
+    
+    def evaluate_blend(self, blend: Dict) -> Dict[str, float]:
+        """Évalue un blend conceptuel"""
+        scores = {}
+        
+        # Cohérence
+if isinstance(scores, dict):
+    scores['coherence'] = self._assess_coherence(blend)
+else:
+    setattr(scores, 'coherence', self._assess_coherence(blend))
+        
+        # Richesse
+if isinstance(scores, dict):
+    scores['richness'] = self._assess_richness(blend)
+else:
+    setattr(scores, 'richness', self._assess_richness(blend))
+        
+        # Nouveauté
+if isinstance(scores, dict):
+    scores['novelty'] = self._assess_novelty(blend)
+else:
+    setattr(scores, 'novelty', self._assess_novelty(blend))
+        
+        # Utilité
+if isinstance(scores, dict):
+    scores['utility'] = self._assess_utility(blend)
+else:
+    setattr(scores, 'utility', self._assess_utility(blend))
+        
+        # Score global
+if isinstance(scores, dict):
+    scores['overall'] = sum(scores.values()) / len(scores)
+else:
+    setattr(scores, 'overall', sum(scores.values()) / len(scores))
+        
+        return scores
+    
+    def _assess_coherence(self, blend: Dict) -> float:
+        """Évalue la cohérence du blend"""
+        elements = blend.get("elements", [])
+        relations = blend.get("relations", [])
+        
+        if not elements:
+            return 0.3
+        
+        # Cohérence basée sur la densité relationnelle
+        coherence = min(len(relations) / max(len(elements), 1), 1.0)
+        return coherence
+    
+    def _assess_richness(self, blend: Dict) -> float:
+        """Évalue la richesse du blend"""
+        component_counts = [
+            len(blend.get("elements", [])),
+            len(blend.get("relations", [])),
+            len(blend.get("properties", [])),
+            len(blend.get("emergent_structure", []))
+        ]
+        
+        richness = sum(component_counts) / 20.0  # Normalisation
+        return min(richness, 1.0)
+    
+    def _assess_novelty(self, blend: Dict) -> float:
+        """Évalue la nouveauté du blend"""
+        # Nouveauté basée sur la structure émergente
+        emergent_count = len(blend.get("emergent_structure", []))
+        novelty = emergent_count / 5.0  # Normalisation
+        
+        return min(novelty, 1.0)
+    
+    def _assess_utility(self, blend: Dict) -> float:
+        """Évalue l'utilité potentielle du blend"""
+        # Utilité estimée basée sur la complexité
+        complexity = sum([
+            len(blend.get("elements", [])),
+            len(blend.get("relations", [])),
+            len(blend.get("properties", []))
+        ]) / 15.0
+        
+        return min(complexity, 1.0)
+
+class IncubationMonitor:
+    """Moniteur de phase d'incubation"""
+    
+    def __init__(self):
+        self.incubating_ideas = []
+        self.incubation_durations = []
+    
+    def monitor_incubation_progress(self, ideas: List[CreativeIdea]) -> List[CreativeIdea]:
+        """Surveille le progrès des idées en incubation"""
+        matured_ideas = []
+        
+        for idea in ideas:
+            if self._is_ready_for_illumination(idea):
+                matured_ideas.append(idea)
+        
+        return matured_ideas
+    
+    def _is_ready_for_illumination(self, idea: CreativeIdea) -> bool:
+        """Détermine si une idée est prête pour l'illumination"""
+        incubation_time = time.time() - idea.created_time
+        activation = idea.activation_level
+        
+        # Prêt si activation élevée et temps d'incubation suffisant
+        return activation > 0.7 and incubation_time > 30.0
+
+class InsightTriggerSystem:
+    """Système de déclenchement d'insights"""
+    
+    def __init__(self):
+        self.triggers = [
+            "pattern_completion",
+            "contradiction_resolution",
+            "perspective_shift",
+            "constraint_relaxation"
+        ]
+    
+    def check_trigger_conditions(self, creative_state: Dict) -> bool:
+        """Vérifie les conditions de déclenchement d'insight"""
+        conditions_met = 0
+        
+        if creative_state.get("creative_flow", 0) > 0.6:
+            conditions_met += 1
+        
+        if creative_state.get("cognitive_flexibility", 0) > 0.5:
+            conditions_met += 1
+        
+        if creative_state.get("inspiration_level", 0) > 0.4:
+            conditions_met += 1
+        
+        return conditions_met >= 2
+
+class AhaMomentDetector:
+    """Détecteur de moments 'Aha!'"""
+    
+    def __init__(self):
+        self.aha_indicators = [
+            "sudden_clarity",
+            "emotional_peak",
+            "cognitive_shift",
+            "solution_emergence"
+        ]
+    
+    def detect_aha_moment(self, insight: CreativeInsight) -> bool:
+        """Détecte un véritable moment 'Aha!'"""
+        aha_score = (
+            insight.clarity +
+            insight.surprise +
+            insight.emotional_intensity
+        ) / 3.0
+        
+        return aha_score > 0.7
+
+class InsightVerificationSystem:
+    """Système de vérification des insights"""
+    
+    def __init__(self):
+        self.verification_methods = [
+            "logical_consistency",
+            "empirical_testing",
+            "expert_review",
+            "predictive_power"
+        ]
+    
+    def verify_insight(self, insight: CreativeInsight) -> str:
+        """Vérifie la validité d'un insight"""
+        # Simulation de vérification
+        verification_score = random.uniform(0.0, 1.0)
+        
+        if verification_score > 0.7:
+            return "verified"
+        elif verification_score > 0.3:
+            return "partially_verified"
+        else:
+            return "falsified"
+
+class InnovationProjectManager:
+    """Gestionnaire de projets d'innovation"""
+    
+    def __init__(self):
+        self.project_templates = {}
+        self.success_factors = []
+    
+    def manage_project_progress(self, project: InnovationProject) -> InnovationProject:
+        """Gère le progrès d'un projet d'innovation"""
+        # Simulation d'avancement
+        if project.current_phase < len(project.development_phases):
+            progress_chance = random.uniform(0.1, 0.3)
+            if random.random() < progress_chance:
+                project.current_phase += 1
+        
+        return project
+
+class DevelopmentPlanner:
+    """Planificateur de développement"""
+    
+    def __init__(self):
+        self.planning_heuristics = [
+            "sequential_development",
+            "parallel_processing",
+            "iterative_refinement",
+            "risk_mitigation"
+        ]
+    
+    def create_development_plan(self, core_idea: str) -> List[Dict]:
+        """Crée un plan de développement pour une idée"""
+        phases = []
+        
+        # Phases standard
+        standard_phases = [
+            {"name": "conceptualization", "duration": 7, "resources": ["brainstorming", "research"]},
+            {"name": "prototyping", "duration": 14, "resources": ["design", "testing"]},
+            {"name": "refinement", "duration": 10, "resources": ["feedback", "iteration"]},
+            {"name": "implementation", "duration": 21, "resources": ["deployment", "documentation"]}
+        ]
+        
+        # Ajustement basé sur la complexité de l'idée
+        complexity = len(core_idea.split()) / 10.0
+        for phase in standard_phases:
+            adjusted_phase = phase.copy()
+if isinstance(adjusted_phase, dict):
+    adjusted_phase['duration'] = int((phase["duration"] if isinstance(phase, dict) else getattr(phase, "duration", None)) * (1 + complexity))
+else:
+    setattr(adjusted_phase, 'duration', int((phase["duration"] if isinstance(phase, dict) else getattr(phase, "duration", None)) * (1 + complexity)))
+            phases.append(adjusted_phase)
+        
+        return phases
+
+class InnovationRiskAssessor:
+    """Évaluateur de risques d'innovation"""
+    
+    def __init__(self):
+        self.risk_categories = [
+            "technical",
+            "market",
+            "resource",
+            "timing"
+        ]
+    
+    def assess_innovation_risks(self, idea: CreativeIdea) -> Dict[str, float]:
+        """Évalue les risques d'innovation"""
+        risks = {}
+        
+        for category in self.risk_categories:
+        if isinstance(category, str):
+            try:
+                category = {"raw_text": category}
+            except Exception:
+                print(f"[⚠️ Créativité] Idée ignorée car invalide: {category}")
+                continue
+            # Évaluation basée sur les caractéristiques de l'idée
+            if category == "technical":
+                risks[category] = 1.0 - idea.feasibility
+            elif category == "market":
+                risks[category] = 0.5  # Estimation générique
+            elif category == "resource":
+                risks[category] = (1.0 - idea.feasibility) * 0.7
+            elif category == "timing":
+                risks[category] = random.uniform(0.3, 0.8)
+        
+        return risks
+
+class CollaborationSimulator:
+    """Simulateur de collaboration créative"""
+    
+    def __init__(self):
+        self.team_roles = ["ideator", "critic", "synthesizer", "implementer"]
+        self.collaboration_patterns = [
+            "brainstorming_session",
+            "critical_review",
+            "synthesis_meeting",
+            "implementation_planning"
+        ]
+    
+    def simulate_collaboration(self, project: InnovationProject) -> Dict[str, Any]:
+        """Simule une session de collaboration"""
+        collaboration = {
+            "session_type": random.choice(self.collaboration_patterns),
+            "participants": random.sample(self.team_roles, 2),
+            "outcomes": [],
+            "improvements": random.uniform(0.1, 0.3)
+        }
+        
+        # Génération d'outcomes simulés
+        outcome_types = ["new_ideas", "refinements", "problem_solutions", "efficiency_gains"]
+if isinstance(collaboration, dict):
+    collaboration['outcomes'] = random.sample(outcome_types, 2)
+else:
+    setattr(collaboration, 'outcomes', random.sample(outcome_types, 2))
+        
+        return collaboration
+
+class PreparationPhase:
+    """Phase de préparation créative"""
+    
+    def __init__(self):
+        self.knowledge_acquisition = 0.0
+        self.problem_definition = 0.0
+        self.constraint_analysis = 0.0
+    
+    def execute(self, context: Dict) -> Dict[str, Any]:
+        """Exécute la phase de préparation"""
+        return {
+            "status": "completed",
+            "knowledge_acquired": random.uniform(0.5, 0.8),
+            "problem_clarity": random.uniform(0.6, 0.9),
+            "constraints_understood": random.uniform(0.7, 1.0)
+        }
+
+class IncubationPhase:
+    """Phase d'incubation"""
+    
+    def __init__(self):
+        self.duration = 0.0
+        self.activation_level = 0.0
+    
+    def execute(self, ideas: List[CreativeIdea]) -> List[CreativeIdea]:
+        """Exécute la phase d'incubation"""
+        incubated_ideas = []
+        
+        for idea in ideas:
+            # Augmentation de l'activation pendant l'incubation
+            incubation_boost = random.uniform(0.05, 0.15)
+            idea.activation_level = min(1.0, idea.activation_level + incubation_boost)
+            incubated_ideas.append(idea)
+        
+        return incubated_ideas
+
+class IlluminationPhase:
+    """Phase d'illumination"""
+    
+    def __init__(self):
+        self.insight_intensity = 0.0
+        self.solution_clarity = 0.0
+    
+    def execute(self, incubated_ideas: List[CreativeIdea]) -> Optional[CreativeInsight]:
+        """Exécute la phase d'illumination"""
+        if not incubated_ideas:
+            return None
+        
+        # Sélection de l'idée la plus activée
+        best_idea = max(incubated_ideas, key=lambda x: x.activation_level)
+        
+        if best_idea.activation_level > 0.7:
+            # Création d'un insight
+            insight = CreativeInsight(
+                insight_id=f"insight_{int(time.time())}",
+                type=InsightType.EMERGENT,
+                content=f"Solution émergente pour {best_idea.concept_core}",
+                significance=best_idea.activation_level,
+                clarity=random.uniform(0.7, 0.9),
+                surprise=random.uniform(0.6, 0.8),
+                emotional_intensity=random.uniform(0.5, 0.7),
+                preceding_incubation=time.time() - best_idea.created_time,
+                trigger="activation_peak",
+                timestamp=time.time(),
+                related_ideas=[best_idea.id],
+                verification_status="unverified"
+            )
+            
+            return insight
+        
+        return None
+
+class VerificationPhase:
+    """Phase de vérification"""
+    
+    def __init__(self):
+        self.validation_methods = [
+            "logical_analysis",
+            "practical_testing",
+            "expert_evaluation"
+        ]
+    
+    def execute(self, insight: CreativeInsight) -> str:
+        """Exécute la phase de vérification"""
+        # Simulation de vérification
+        verification_score = random.uniform(0.0, 1.0)
+        
+        if verification_score > 0.8:
+            return "fully_validated"
+        elif verification_score > 0.5:
+            return "partially_validated"
+        else:
+            return "invalidated"
+
+# Test du système de créativité
+if __name__ == "__main__":
+    print("🎨 TEST DU SYSTÈME DE CRÉATIVITÉ")
+    print("=" * 50)
+    
+    # Création du système
+    creativity_system = CreativitySystem()
+    
+    # Test de génération d'idées
+    print("\n💡 Test de génération d'idées:")
+    ideas = creativity_system.generate_ideas(
+        topic="transport urbain",
+        constraints=["écologique", "accessible", "efficace"],
+        num_ideas=5,
+        strategy="auto"
+    )
+    
+    for i, idea in enumerate(ideas, 1):
+        print(f"{i}. {idea.concept_core}")
+        print(f")  # Novelty: {idea.novelty:.2f}, Utility: {idea.usefulness:.2f}, Feasibility: {idea.feasibility:.2f}")
+    
+    # Test de mélange conceptuel
+    print("\n🔄 Test de mélange conceptuel:")
+    blend = creativity_system.create_conceptual_blend("vélo", "nuage")
+    print(f"Blend: {blend.blended_space}")
+    print(f"Créativité: {blend.creativity_score:.2f}, Cohérence: {blend.coherence:.2f}")
+    
+    # Test d'insight
+    print("\n💫 Test d'insight créatif:")
+    insight = creativity_system.experience_insight({
+        "problem": "améliorer l'efficacité énergétique des bâtiments"
+    })
+    
+    if insight:
+        print(f"Insight: {insight.content}")
+        print(f"Type: {insight.type.value}, Signification: {insight.significance:.2f}")
+    
+    # Test de projet d'innovation
+    print("\n🚀 Test de projet d'innovation:")
+    project = creativity_system.develop_innovation_project(
+        core_idea="système de transport urbain écologique",
+        objectives=["réduire les émissions", "améliorer la mobilité", "être abordable"],
+        constraints=["budget limité", "infrastructure existante"]
+    )
+    
+    print(f"Projet: {project.core_idea}")
+    print(f"Phases: {len(project.development_phases)}, Risques: {len(project.risk_assessment)}")
+    
+    # Statut final
+    print("\n📊 Statut créatif complet:")
+    status = creativity_system.get_creative_status()
+    for key, value in status.items():
+        if isinstance(value, dict):
+            print(f" - {key}:")
+            for subkey, subvalue in value.items():
+                print(f"   - {subkey}: {subvalue}")
+        else:
+            print(f" - {key}: {value}")
+    
+    # Arrêt propre
+    creativity_system.stop_creativity_system()
+    
+    print("\n✅ Test du système de créativité terminé avec succès!")
