@@ -183,6 +183,12 @@ class CognitiveArchitecture:
             except Exception:
                 # fallback minimal
                 response = f"Reçu: {user_msg}"
+        self.last_output_text = response or "OK"
+
+        try:
+            if hasattr(self, "goals") and self.goals:
+                # on alimente le moteur d'objectifs à chaque tour
+                self.goals.step(user_msg=user_msg)
 
         try:
             response = self.style_profiler.rewrite_to_match(response or "OK", self.last_user_id)
