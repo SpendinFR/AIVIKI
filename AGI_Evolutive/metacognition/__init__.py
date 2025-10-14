@@ -16,6 +16,8 @@ import math
 import json
 import inspect
 
+from .experimentation import MetacogExperimenter, calibrate_self_model
+
 class MetacognitiveState(Enum):
     """États métacognitifs possibles"""
     MONITORING = "surveillance"
@@ -198,6 +200,8 @@ class MetacognitiveSystem:
         # === THREADS DE SURVEILLANCE ===
         self.monitoring_threads = {}
         self.running = True
+
+        self.experimenter = MetacogExperimenter(system_ref=self)
         
         # Initialisation des systèmes
         self._initialize_metacognitive_system()
@@ -392,6 +396,15 @@ class MetacognitiveSystem:
                     "value": value,
                     "context": "continuous_monitoring"
                 })
+                try:
+                    self.experimenter.record_outcome(metric, new_value=value)
+                except Exception as _e:
+                    print(f"[⚠] record_outcome: {_e}")
+
+            try:
+                self.experimenter.suggest_and_log_tests(performance_metrics)
+            except Exception as _e:
+                print(f"[⚠] suggest_and_log_tests: {_e}")
 
             self._detect_performance_anomalies(performance_metrics)
 
@@ -1089,6 +1102,20 @@ class MetacognitiveSystem:
         
         # Mise à jour de la précision du modèle de soi
         self._update_self_model_accuracy()
+
+        # Calibration douce entre auto-évaluation et performances observées
+        try:
+            deltas = calibrate_self_model(self.self_model, self.cognitive_monitoring["performance_tracking"], learning_rate=0.1)
+            if deltas:
+                self._record_metacognitive_event(
+                    event_type="self_model_calibrated",
+                    domain=CognitiveDomain.LEARNING,
+                    description=f"Calibration self-model: { {k: round(v,3) for k,v in deltas.items()} }",
+                    significance=0.3,
+                    confidence=0.7
+                )
+        except Exception as _e:
+            print(f"[⚠] calibrate_self_model: {_e}")
     
     def _update_ability_estimate(self, current_estimate: float, new_evidence: float) -> float:
         """Met à jour une estimation de capacité avec de nouvelles preuves"""

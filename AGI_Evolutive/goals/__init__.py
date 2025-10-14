@@ -14,6 +14,9 @@ import math
 from collections import defaultdict, deque
 import heapq
 
+from .dag_store import GoalDAG
+from .curiosity import select_next_subgoals
+
 class GoalType(Enum):
     """Types de buts"""
     SURVIVAL = "survie"
@@ -96,6 +99,24 @@ class GoalSystem:
         self.memory_system = memory_system
         self.reasoning_system = reasoning_system
         self.creation_time = time.time()
+
+        self.dag = GoalDAG()
+        # noeud racine
+        self.dag.add_goal(
+            "root",
+            description="Racine des objectifs auto-générés",
+            value=0.8,
+            competence=0.5,
+            success_criteria={"type": "hierarchical"}
+        )
+        # exemple de macro-goal de départ (tu peux en créer d'autres à chaud)
+        self.dag.add_subgoal(
+            "root", "understand_humans",
+            description="Comprendre les humains (actes de langage, intentions, feedback)",
+            value=0.9, competence=0.4,
+            success_criteria={"evidence": "capable d'expliquer une interaction en 3 actes"}
+        )
+        self.dag.save()
 
         # ——— LIAISONS INTER-MODULES ———
         if self.cognitive_architecture is not None:
@@ -789,12 +810,23 @@ class GoalSystem:
             return False
         
         goal = self.goals_database[goal_id]
-        
+        previous_progress = goal.progress
+
         if new_progress is not None:
             goal.progress = max(0.0, min(1.0, new_progress))
         else:
             goal.progress = max(0.0, min(1.0, goal.progress + progress_delta))
-        
+
+        if hasattr(self, 'dag'):
+            try:
+                node = self.dag.get_node(goal_id) if self.dag else None
+                if node:
+                    competence_delta = 0.02 if goal.progress > previous_progress else None
+                    self.dag.update_progress(goal_id, progress=goal.progress, competence_delta=competence_delta)
+                    self.dag.save()
+            except Exception as _e:
+                print(f"[warn] dag.update_progress: {_e}")
+
         # Vérification des critères de succès
         if self._check_success_criteria(goal):
             self._complete_goal(goal_id)
@@ -839,6 +871,14 @@ class GoalSystem:
         goal.status = GoalStatus.COMPLETED
         goal.progress = 1.0
         
+        if hasattr(self, "dag"):
+            try:
+                if self.dag:
+                    self.dag.mark_done(goal_id)
+                    self.dag.save()
+            except Exception as _e:
+                print(f"[warn] dag.mark_done: {_e}")
+
         self.active_goals.remove(goal_id)
         self.completed_goals.add(goal_id)
         
@@ -1447,6 +1487,14 @@ def main_goal_cycle(goal_system: GoalSystem, cycle_duration: float = 60.0):
         
         # 3. Priorisation des buts actifs
         prioritized_goals = goal_system.prioritize_goals()
+
+        candidates = select_next_subgoals(goal_system.dag, k=3)
+        # 'candidates' est une liste de (GoalNode, score)
+        # exemple: pousser le meilleur dans l'agenda autonomie
+        if candidates:
+            node, score = candidates[0]
+            # push une tâche concrète vers l'autonomy/raisonnement
+            # ex: self.architecture.autonomy.enqueue({"kind":"goal_step","goal_id":node.goal_id, ...})
         if prioritized_goals:
             top_goal = goal_system.goals_database[prioritized_goals[0]]
             print(f"🎯 But prioritaire: {top_goal.description} (Progression: {top_goal.progress:.1%})")
