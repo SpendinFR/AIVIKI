@@ -1,3 +1,4 @@
+from .understanding import SemanticUnderstanding
 
 # language/__init__.py
 """
@@ -65,6 +66,7 @@ class Utterance:
     frame: Optional[Frame] = None
     pragmatics: Dict[str, Any] = field(default_factory=dict)  # act, politeness, uncertainty
     timestamp: float = field(default_factory=_now)
+    normalized_text: str = ""
 
 
 # ============================================================
@@ -99,6 +101,7 @@ class SemanticUnderstanding:
         self.cognitive_arch = cognitive_architecture
         self.arch = cognitive_architecture
         self.memory_system = memory_system
+        self.memory = memory_system  # alias pour compatibilité/reflexive replies
         self.history: List[Utterance] = []
         self.lang = "fr"
 
@@ -121,8 +124,17 @@ class SemanticUnderstanding:
         ents = self._ner(text)
         frame = self._frame(text, toks, ents)
         prag = self._pragmatics(text, toks)
+        normalized = " ".join(toks).lower()
 
-        utt = Utterance(surface_form=text, lang=self.lang, tokens=toks, entities=ents, frame=frame, pragmatics=prag)
+        utt = Utterance(
+            surface_form=text,
+            lang=self.lang,
+            tokens=toks,
+            entities=ents,
+            frame=frame,
+            pragmatics=prag,
+            normalized_text=normalized,
+        )
         self.history.append(utt)
         if len(self.history) > 200:
             self.history.pop(0)
@@ -180,6 +192,161 @@ class SemanticUnderstanding:
             response = f"Reçu: {getattr(utterance, 'surface_form', user_text)}"
 
         return response
+    def _retrieve_context(self, frame) -> List[dict]:
+        """
+        Cherche 3 éléments pertinents (interactions + docs) à partir du texte normalisé
+        et des slots importants. Tolérant si memory absent.
+        """
+        results: List[dict] = []
+        try:
+            arch = getattr(self, "arch", None)
+            mem = getattr(self, "memory_system", None) or (getattr(arch, "memory", None) if arch else None)
+            retr = getattr(mem, "retrieval", None)
+            if not retr:
+                return results
+
+            q = getattr(frame, "normalized_text", "") or getattr(frame, "surface_form", "")
+            extras: List[str] = []
+
+            slots_obj = getattr(frame, "slots", None)
+            if slots_obj is None and getattr(frame, "frame", None):
+                slots_obj = getattr(frame.frame, "slots", None)
+
+            if isinstance(slots_obj, dict):
+                for k in ("quoted", "goal", "term_to_define"):
+                    if k in slots_obj:
+                        val = slots_obj[k]
+                        if isinstance(val, (list, tuple)):
+                            extras.extend([str(v) for v in val])
+                        else:
+                            extras.append(str(val))
+            if extras:
+                q = (q + " " + " ".join(extras)).strip()
+
+            if not q:
+                return results
+
+            hits = retr.search_text(q, top_k=3)
+            for h in hits:
+                txt = h.get("text", "")
+                meta = h.get("meta", {})
+                snippet = (txt[:180] + "…") if len(txt) > 180 else txt
+                title = meta.get("title") or meta.get("source") or meta.get("type", "")
+                results.append({
+                    "score": h.get("score", 0.0),
+                    "title": title,
+                    "snippet": snippet,
+                })
+        except Exception:
+            return []
+        return results
+
+    def respond(self, text: str, context: Optional[Dict[str, Any]] = None) -> str:
+        frame = self.parse_utterance(text, context=context)
+        contexts = self._retrieve_context(frame)
+
+        utter_frame = frame.frame if isinstance(frame, Utterance) else getattr(frame, "frame", None)
+        if utter_frame is None and isinstance(frame, Frame):
+            utter_frame = frame
+
+        intent = utter_frame.intent if utter_frame else "inform"
+        conf = utter_frame.confidence if utter_frame else 0.5
+        slots = utter_frame.slots if utter_frame else {}
+
+        slot_bits: List[str] = []
+        for key, val in (slots or {}).items():
+            if isinstance(val, (list, tuple)):
+                slot_bits.append(f"{key}=" + ", ".join(str(v) for v in val))
+            else:
+                slot_bits.append(f"{key}={val}")
+
+        summary = f"Intent détecté: {intent} (confiance {conf:.2f})."
+        if slot_bits:
+            summary += " Slots: " + "; ".join(slot_bits)
+
+        parts = [summary]
+
+        if contexts:
+            ctx_lines = []
+            for c in contexts:
+                lbl = f"{c['title']}" if c["title"] else "mémoire"
+                ctx_lines.append(f"• ({c['score']:.2f}) {lbl}: {c['snippet']}")
+            parts.append("Contexte pertinent retrouvé :\n" + "\n".join(ctx_lines))
+
+        return "\n\n".join(parts)
+    def generate_reflective_reply(self, arch, user_msg: str) -> str:
+        """Génère une réponse réflexive courte et lisible."""
+        status = {}
+        try:
+            status = arch.get_cognitive_status()
+        except Exception:
+            status = {}
+
+        tokens = re.findall(r"[a-zA-ZÀ-ÿ0-9_]+", user_msg.lower())
+        unknown = []
+        try:
+            memory = getattr(self, "memory", None) or getattr(self, "memory_system", None)
+            if memory and hasattr(memory, "knows"):
+                unknown = [t for t in tokens if not memory.knows(t)]
+            elif memory and hasattr(memory, "retrieve"):
+                for t in tokens:
+                    try:
+                        res = memory.retrieve(t, top_k=1)
+                        if not res:
+                            unknown.append(t)
+                    except Exception:
+                        pass
+            else:
+                unknown = [t for t in tokens if len(t) > 12]
+        except Exception:
+            pass
+        unknown = list(dict.fromkeys(unknown))[:3]
+
+        reasoning = status.get("reasoning", {})
+        creativity = status.get("creativity", {})
+        metacog = status.get("metacognition", {})
+        activation = status.get("global_activation", 0.5)
+
+        doing = []
+        if reasoning.get("recent_inferences", 0) > 0:
+            doing.append("j’analyse des inférences récentes")
+        if creativity.get("recent_ideas", 0) > 0:
+            doing.append("je génère/évalue de nouvelles idées")
+        if metacog.get("events", 0) > 0:
+            doing.append("je surveille mes performances et erreurs")
+        if not doing:
+            doing.append("je collecte des repères pour mieux te comprendre")
+
+        confusion = []
+        if unknown:
+            confusion.append("je ne suis pas sûr de bien cerner: " + ", ".join(unknown))
+        avg_conf = reasoning.get("avg_confidence", 0.5)
+        if isinstance(avg_conf, (int, float)) and avg_conf < 0.45:
+            confusion.append("ma confiance de raisonnement est un peu basse sur ce sujet")
+
+        next_steps = []
+        if unknown:
+            next_steps.append("tu peux m’expliquer ce que tu entends par " + ", ".join(unknown) + " ?")
+        else:
+            next_steps.append("je peux tenter un exemple concret ou reformuler si tu veux")
+        if isinstance(activation, (int, float)) and activation < 0.4:
+            next_steps.append("je vais réduire la complexité pour m’aligner")
+
+        lines = []
+        lines.append("• Ce que je fais: " + "; ".join(doing))
+        if confusion:
+            lines.append("• Ce que je ne comprends pas: " + "; ".join(confusion))
+        lines.append("• Ce que je propose: " + "; ".join(next_steps))
+
+        try:
+            gist = user_msg.strip()
+            if len(gist) > 120:
+                gist = gist[:117] + "…"
+            lines.append(f"• Ta demande (j’ai bien reçu): « {gist} »")
+        except Exception:
+            pass
+
+        return "\n".join(lines)
 
     # --------- Étapes internes ---------
 
@@ -237,6 +404,7 @@ class SemanticUnderstanding:
                 "frame": u.frame.__dict__ if u.frame else None,
                 "pragmatics": u.pragmatics,
                 "timestamp": u.timestamp,
+                "normalized_text": u.normalized_text,
             } for u in self.history[-100:]]
         }
 
@@ -255,6 +423,7 @@ class SemanticUnderstanding:
                 frame=fr,
                 pragmatics=d.get("pragmatics", {}),
                 timestamp=d.get("timestamp", _now()),
+                normalized_text=d.get("normalized_text", ""),
             ))
 
 
