@@ -119,7 +119,7 @@ class AutonomyCore:
         ep = episode_record(
             user_msg="[idle]",
             hypotheses=h,
-            chosen=0,
+            chosen_index=0,
             tests=t,
             evidence=ev,
             result_text=f"Micro-étape sur {goal_id}: {rule}",
