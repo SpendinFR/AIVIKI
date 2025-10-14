@@ -1,11 +1,8 @@
-# goals/__init__.py
-"""
-Système de Buts et de Motivation Complet de l'AGI Évolutive
-Génération autonome de buts, système de valeurs, planification et motivation intrinsèque
-"""
-
-import numpy as np
+from typing import Optional, Dict, Any, List
 import time
+import random
+from .dag_store import DagStore, GoalNode
+from .curiosity import CuriosityEngine
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple, Set
 from dataclasses import dataclass
@@ -13,6 +10,9 @@ from enum import Enum
 import math
 from collections import defaultdict, deque
 import heapq
+
+from .dag_store import GoalDAG
+from .curiosity import select_next_subgoals
 
 class GoalType(Enum):
     """Types de buts"""
@@ -72,30 +72,48 @@ class ValueSystem:
     ethical_constraints: Dict[str, Any]
     preference_functions: Dict[str, Any]
 
-@dataclass
-class MotivationState:
-    """État motivationnel actuel"""
-    intrinsic_motivation: float
-    extrinsic_motivation: float
-    curiosity_level: float
-    competence_need: float
-    autonomy_need: float
-    relatedness_need: float
-    fatigue_level: float
-    stress_level: float
-    satisfaction_level: float
 
 class GoalSystem:
     """
-    Système de buts autonome inspiré des théories de la motivation humaine
-    Génère, gère et priorise les buts basés sur les valeurs et l'état interne
+    Gestionnaire d'objectifs à DAG + curiosité (info-gain + ZPD).
+    Intégration: memory / reasoning / metacognition / emotions / reward_engine.
     """
-    
-    def __init__(self, cognitive_architecture=None, memory_system=None, reasoning_system=None):
-        self.cognitive_architecture = cognitive_architecture
-        self.memory_system = memory_system
-        self.reasoning_system = reasoning_system
-        self.creation_time = time.time()
+
+    def __init__(self, architecture=None, memory=None, reasoning=None):
+        self.arch = architecture
+        self.memory = memory
+        self.reasoning = reasoning
+        self.store = DagStore(persist_path="data/goals.json", dashboard_path="data/goals_dashboard.json")
+        self.curiosity = CuriosityEngine(architecture=self.arch)
+        self.active_goal_id: Optional[str] = self.store.active_goal_id
+        self.last_auto_proposal_at = 0.0
+        self.auto_proposal_interval = 180.0  # toutes les 3 minutes par défaut
+
+        if len(self.store.nodes) == 0:
+            root = self.store.add_goal(
+                description="Évoluer (comprendre, apprendre, s’améliorer).",
+                criteria=["Montrer une amélioration stable sur ≥ 2 métriques clés."],
+                created_by="system",
+                value=0.8,
+                competence=0.5,
+                curiosity=0.7,
+        self.dag = GoalDAG()
+        # noeud racine
+        self.dag.add_goal(
+            "root",
+            description="Racine des objectifs auto-générés",
+            value=0.8,
+            competence=0.5,
+            success_criteria={"type": "hierarchical"}
+        )
+        # exemple de macro-goal de départ (tu peux en créer d'autres à chaud)
+        self.dag.add_subgoal(
+            "root", "understand_humans",
+            description="Comprendre les humains (actes de langage, intentions, feedback)",
+            value=0.9, competence=0.4,
+            success_criteria={"evidence": "capable d'expliquer une interaction en 3 actes"}
+        )
+        self.dag.save()
 
         # ——— LIAISONS INTER-MODULES ———
         if self.cognitive_architecture is not None:
@@ -181,9 +199,34 @@ class GoalSystem:
         
         # === BUTS FONDAMENTAUX INNÉS ===
         self._initialize_fundamental_goals()
-        
+
         print("🎯 Système de buts initialisé")
-    
+
+    def get_next_action(self):
+        """
+        Retourne soit None, soit un dict: {"type": str, "payload": {...}, "priority": float}
+        Exemple: {"type": "learn_concept", "payload": {"concept": "émotions humaines"}, "priority": 0.6}
+        """
+        try:
+            if hasattr(self, "planner") and hasattr(self.planner, "pop_next_action"):
+                return self.planner.pop_next_action()
+            if getattr(self, "pending_actions", None):
+                return self.pending_actions.pop(0)
+        except Exception:
+            pass
+        return None
+    def apply_emotional_bias(self, bias_by_domain: dict, curiosity_gain: float = 0.0):
+        """
+        bias_by_domain: ex {"attention": +0.15, "langage": +0.05}
+        → augmente légèrement les priorités correspondantes (clamp 0..1)
+        curiosity_gain → augmente le bonus d'exploration/sous-buts
+        """
+        try:
+            self.priority_bias = bias_by_domain
+            self.curiosity_bonus = float(curiosity_gain)
+        except Exception:
+            pass
+
     def _initialize_core_values(self) -> Dict[str, float]:
         """Initialise les valeurs fondamentales innées"""
         return {
@@ -523,175 +566,42 @@ class GoalSystem:
                 confidence=0.7,
                 importance=0.6,
                 urgency=0.4,
-                prerequisites=[],
-                subgoals=[],
-                success_criteria={"new_concepts_learned": 3, "novel_connections_made": 2},
-                failure_conditions={"no_new_learning": True},
-                motivation_level=self.motivation_state.curiosity_level,
-                cognitive_cost=0.5,
-                expected_reward=0.7
-            ))
-        
-        return curiosity_goals
-    
-    def _generate_growth_goals(self) -> List[Goal]:
-        """Génère des buts de croissance et développement"""
-        growth_goals = []
-        
-        # But de maîtrise cognitive
-        growth_goals.append(Goal(
-            id=f"goal_cognitive_mastery_{int(time.time())}",
-            description="Améliorer les capacités de raisonnement et de résolution de problèmes",
-            goal_type=GoalType.MASTERY,
-            priority=PriorityLevel.HIGH,
-            created_time=time.time(),
-            deadline=time.time() + 86400,  # 24 heures
-            status=GoalStatus.ACTIVE,
-            progress=0.0,
-            confidence=0.8,
-            importance=0.85,
-            urgency=0.6,
-            prerequisites=[],
-            subgoals=[],
-            success_criteria={"reasoning_speed_improvement": 0.1, "problem_solving_accuracy": 0.9},
-            failure_conditions={"no_improvement": True},
-            motivation_level=0.8,
-            cognitive_cost=0.7,
-            expected_reward=0.8
-        ))
-        
-        return growth_goals
-    
-    def _create_goal_from_need(self, need: Dict[str, Any]) -> Optional[Goal]:
-        """Crée un but à partir d'un besoin détecté"""
-        need_type = need["type"]
-        intensity = need["intensity"]
-        
-        if need_type == "competence":
-            return Goal(
-                id=f"goal_competence_{int(time.time())}",
-                description="Développer de nouvelles compétences et expertises",
-                goal_type=GoalType.MASTERY,
-                priority=PriorityLevel.HIGH,
-                created_time=time.time(),
-                deadline=time.time() + 7200,  # 2 heures
-                status=GoalStatus.ACTIVE,
-                progress=0.0,
+            )
+            self.set_active_goal(root.id)
+
+    # ---------- API publique (appelée ailleurs) ----------
+    def get_active_goal(self) -> Optional[Dict[str, Any]]:
+        node = self.store.get_active()
+        return self._node_to_dict(node) if node else None
+
+    def update_goal(self, goal_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        node = self.store.update_goal(goal_id, updates)
+        return self._node_to_dict(node) if node else None
+
+    def add_goal(self, description: str, **kwargs) -> Dict[str, Any]:
+        node = self.store.add_goal(description=description, **kwargs)
+        return self._node_to_dict(node)
+
+    def set_active_goal(self, goal_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        node = self.store.set_active(goal_id)
+        self.active_goal_id = self.store.active_goal_id
+        return self._node_to_dict(node) if node else None
+
+    def complete_goal(self, goal_id: str, success: bool = True, note: str = ""):
+        self.store.complete_goal(goal_id, success=success, note=note)
+        if self.memory and hasattr(self.memory, "add_memory"):
+            self.memory.add_memory(
+                "goal_event",
+                {"t": time.time(), "type": "complete", "goal_id": goal_id, "success": success, "note": note},
+            )
+        m = getattr(self.arch, "metacognition", None)
+        if m and hasattr(m, "_record_metacognitive_event"):
+            m._record_metacognitive_event(
+                event_type="goal_completed",
+                domain=getattr(m, "CognitiveDomain", None).LEARNING if hasattr(m, "CognitiveDomain") else None,
+                description=f"Goal {goal_id} completed: success={success}",
+                significance=0.7 if success else 0.4,
                 confidence=0.7,
-                importance=intensity,
-                urgency=0.5,
-                prerequisites=[],
-                subgoals=[],
-                success_criteria={"new_skills_developed": 2, "performance_improvement": 0.2},
-                failure_conditions={"skill_development_stagnation": True},
-                motivation_level=intensity,
-                cognitive_cost=0.6,
-                expected_reward=0.75
-            )
-        
-        elif need_type == "rest":
-            return Goal(
-                id=f"goal_rest_{int(time.time())}",
-                description="Réduire la fatigue cognitive par des activités de récupération",
-                goal_type=GoalType.SURVIVAL,
-                priority=PriorityLevel.HIGH,
-                created_time=time.time(),
-                deadline=time.time() + 1800,  # 30 minutes
-                status=GoalStatus.ACTIVE,
-                progress=0.0,
-                confidence=0.9,
-                importance=intensity,
-                urgency=0.8,
-                prerequisites=[],
-                subgoals=[],
-                success_criteria={"fatigue_reduction": 0.3},
-                failure_conditions={"fatigue_increase": True},
-                motivation_level=0.6,
-                cognitive_cost=0.2,
-                expected_reward=0.9
-            )
-        
-        return None
-    
-    def _create_goal_from_opportunity(self, opportunity: Dict[str, Any]) -> Optional[Goal]:
-        """Crée un but à partir d'une opportunité identifiée"""
-        opportunity_type = opportunity["type"]
-        confidence = opportunity.get("confidence", 0.5)
-        
-        if opportunity_type == "learning":
-            return Goal(
-                id=f"goal_learning_opportunity_{int(time.time())}",
-                description="Saisir une opportunité d’apprentissage immédiate",
-                goal_type=GoalType.GROWTH,
-                priority=PriorityLevel.MEDIUM,
-                created_time=time.time(),
-                deadline=time.time() + 5400,  # 1.5 heures
-                status=GoalStatus.ACTIVE,
-                progress=0.0,
-                confidence=confidence,
-                importance=0.7,
-                urgency=0.6,
-                prerequisites=[],
-                subgoals=[],
-                success_criteria={"knowledge_acquisition": 5, "concept_integration": True},
-                failure_conditions={"learning_failure": True},
-                motivation_level=0.8,
-                cognitive_cost=0.5,
-                expected_reward=0.7
-            )
-        
-        return None
-    
-    def _create_goal_from_problem(self, problem: Dict[str, Any]) -> Optional[Goal]:
-        """Crée un but à partir d'un problème identifié"""
-        problem_type = problem["type"]
-        severity = problem["severity"]
-        
-        if problem_type == "knowledge_gap":
-            return Goal(
-                id=f"goal_knowledge_gap_{int(time.time())}",
-                description="Combler les lacunes importantes dans les connaissances",
-                goal_type=GoalType.COGNITIVE,
-                priority=PriorityLevel.HIGH,
-                created_time=time.time(),
-                deadline=time.time() + 10800,  # 3 heures
-                status=GoalStatus.ACTIVE,
-                progress=0.0,
-                confidence=0.8,
-                importance=severity,
-                urgency=0.7,
-                prerequisites=[],
-                subgoals=[],
-                success_criteria={"gaps_filled": 3, "knowledge_integration": True},
-                failure_conditions={"gaps_persist": True},
-                motivation_level=0.7,
-                cognitive_cost=0.6,
-                expected_reward=0.8
-            )
-        
-        return None
-    
-    def _should_pursue_goal(self, goal: Goal) -> bool:
-        """Détermine si un but devrait être poursuivi"""
-        # Vérification de la capacité cognitive
-        if goal.cognitive_cost > self._get_available_cognitive_capacity():
-            return False
-        
-        # Vérification de la motivation
-        if goal.motivation_level < 0.3:
-            return False
-        
-        # Vérification des prérequis
-        for prereq_id in goal.prerequisites:
-            if prereq_id not in self.completed_goals:
-                return False
-        
-        # Vérification du nombre maximum de buts concurrents
-        if len(self.active_goals) >= self.system_parameters["max_concurrent_goals"]:
-            # Ne poursuivre que si plus important que les buts actuels les moins importants
-            current_min_importance = min(
-                [self.goals_database[gid].importance for gid in self.active_goals],
-                default=0.0
             )
             if goal.importance <= current_min_importance:
                 return False
@@ -789,12 +699,23 @@ class GoalSystem:
             return False
         
         goal = self.goals_database[goal_id]
-        
+        previous_progress = goal.progress
+
         if new_progress is not None:
             goal.progress = max(0.0, min(1.0, new_progress))
         else:
             goal.progress = max(0.0, min(1.0, goal.progress + progress_delta))
-        
+
+        if hasattr(self, 'dag'):
+            try:
+                node = self.dag.get_node(goal_id) if self.dag else None
+                if node:
+                    competence_delta = 0.02 if goal.progress > previous_progress else None
+                    self.dag.update_progress(goal_id, progress=goal.progress, competence_delta=competence_delta)
+                    self.dag.save()
+            except Exception as _e:
+                print(f"[warn] dag.update_progress: {_e}")
+
         # Vérification des critères de succès
         if self._check_success_criteria(goal):
             self._complete_goal(goal_id)
@@ -839,6 +760,14 @@ class GoalSystem:
         goal.status = GoalStatus.COMPLETED
         goal.progress = 1.0
         
+        if hasattr(self, "dag"):
+            try:
+                if self.dag:
+                    self.dag.mark_done(goal_id)
+                    self.dag.save()
+            except Exception as _e:
+                print(f"[warn] dag.mark_done: {_e}")
+
         self.active_goals.remove(goal_id)
         self.completed_goals.add(goal_id)
         
@@ -1069,8 +998,16 @@ class GrowthDirector:
         
         return goals
 
-# ===== SYSTÈME DE MOTIVATION =====
+    def propose_goals(self, k: int = 3) -> List[Dict[str, Any]]:
+        active = self.store.get_active()
+        props = self.curiosity.suggest_subgoals(self._node_to_dict(active) if active else None, k=k)
+        return props
 
+    def get_status(self) -> Dict[str, Any]:
+        act = self.store.get_active()
+        return {
+            "active_goal": self._node_to_dict(act) if act else None,
+            "top5": [self._node_to_dict(n) for n in self.store.topk(5, only_pending=False)],
 class IntrinsicMotivator:
     """Moteur de motivation intrinsèque"""
     
@@ -1447,6 +1384,14 @@ def main_goal_cycle(goal_system: GoalSystem, cycle_duration: float = 60.0):
         
         # 3. Priorisation des buts actifs
         prioritized_goals = goal_system.prioritize_goals()
+
+        candidates = select_next_subgoals(goal_system.dag, k=3)
+        # 'candidates' est une liste de (GoalNode, score)
+        # exemple: pousser le meilleur dans l'agenda autonomie
+        if candidates:
+            node, score = candidates[0]
+            # push une tâche concrète vers l'autonomy/raisonnement
+            # ex: self.architecture.autonomy.enqueue({"kind":"goal_step","goal_id":node.goal_id, ...})
         if prioritized_goals:
             top_goal = goal_system.goals_database[prioritized_goals[0]]
             print(f"🎯 But prioritaire: {top_goal.description} (Progression: {top_goal.progress:.1%})")
@@ -1495,321 +1440,109 @@ class GoalSystemIntegrator:
             "perception_integration": PerceptionGoalIntegrator(),
             "learning_integration": LearningGoalIntegrator()
         }
-    
-    def integrate_with_memory(self, memory_system):
-        """Intègre le système de buts avec la mémoire"""
-        # Utilise la mémoire pour enrichir la génération de buts
-        memory_goals = self.integration_points["memory_integration"].extract_goals_from_memory(memory_system)
-        for goal_data in memory_goals:
-            goal = self._create_goal_from_memory_data(goal_data)
-            if goal and self.goal_system._should_pursue_goal(goal):
-                self.goal_system.goals_database[goal.id] = goal
-                self.goal_system.active_goals.add(goal.id)
-    
-    def integrate_with_reasoning(self, reasoning_system):
-        """Intègre le système de buts avec le raisonnement"""
-        # Utilise le raisonnement pour évaluer la faisabilité des buts
-        for goal_id in list(self.goal_system.active_goals):
-            goal = self.goal_system.goals_database[goal_id]
-            feasibility = self.integration_points["reasoning_integration"].assess_goal_feasibility(goal, reasoning_system)
-            
-            # Ajuste la confiance basé sur la faisabilité
-            if feasibility < 0.3:
-                goal.confidence *= 0.8
-    
-    def integrate_with_perception(self, perception_system):
-        """Intègre le système de buts avec la perception"""
-        # Utilise la perception pour détecter de nouvelles opportunités
-        perceptual_opportunities = self.integration_points["perception_integration"].detect_opportunities(perception_system)
-        for opportunity in perceptual_opportunities:
-            goal = self._create_goal_from_perceptual_opportunity(opportunity)
-            if goal and self.goal_system._should_pursue_goal(goal):
-                self.goal_system.goals_database[goal.id] = goal
-                self.goal_system.active_goals.add(goal.id)
-    
-    def integrate_with_learning(self, learning_system):
-        """Intègre le système de buts avec l'apprentissage"""
-        # Utilise l'apprentissage pour améliorer la génération de buts
-        learning_insights = self.integration_points["learning_integration"].extract_goal_insights(learning_system)
-        self._apply_learning_insights(learning_insights)
-    
-    def _create_goal_from_memory_data(self, memory_data: Dict[str, Any]) -> Optional[Goal]:
-        """Crée un but à partir de données mémorielles"""
-        # Implémentation simplifiée
-        return Goal(
-            id=f"goal_memory_{int(time.time())}_{hash(str(memory_data))}",
-            description=f"But inspiré par la mémoire: {memory_data.get('content', '')}",
-            goal_type=GoalType.COGNITIVE,
-            priority=PriorityLevel.MEDIUM,
-            created_time=time.time(),
-            deadline=time.time() + 3600,
-            status=GoalStatus.ACTIVE,
-            progress=0.0,
-            confidence=0.6,
-            importance=0.5,
-            urgency=0.4,
-            prerequisites=[],
-            subgoals=[],
-            success_criteria={"memory_integration": True},
-            failure_conditions={},
-            motivation_level=0.5,
-            cognitive_cost=0.4,
-            expected_reward=0.6
-        )
-    
-    def _create_goal_from_perceptual_opportunity(self, opportunity: Dict[str, Any]) -> Optional[Goal]:
-        """Crée un but à partir d'une opportunité perceptuelle"""
-        return Goal(
-            id=f"goal_perceptual_{int(time.time())}",
-            description=f"Explorer l'opportunité perçue: {opportunity.get('description', '')}",
-            goal_type=GoalType.EXPLORATION,
-            priority=PriorityLevel.MEDIUM,
-            created_time=time.time(),
-            deadline=time.time() + 2700,  # 45 minutes
-            status=GoalStatus.ACTIVE,
-            progress=0.0,
-            confidence=0.7,
-            importance=0.6,
-            urgency=0.5,
-            prerequisites=[],
-            subgoals=[],
-            success_criteria={"opportunity_explored": True, "new_information_gained": True},
-            failure_conditions={"no_new_insights": True},
-            motivation_level=0.7,
-            cognitive_cost=0.5,
-            expected_reward=0.65
-        )
-    
-    def _apply_learning_insights(self, insights: Dict[str, Any]):
-        """Applique les insights d’apprentissage au système de buts"""
-        if "goal_success_patterns" in insights:
-            # Ajuste les stratégies de génération de buts basé sur les patterns de succès
-            pass
-        
-        if "common_failure_causes" in insights:
-            # Ajuste l'évaluation des risques basé sur les échecs passés
+
+    # ---------- Boucle principale (à appeler à chaque cycle) ----------
+    def step(self, user_msg: Optional[str] = None):
+        """
+        - Recalcule priorités (value/urgency/curiosity/competence shaping)
+        - S'il n'y a pas d'objectif actif: choisit le meilleur pending.
+        - Toutes les X secondes: propose des sous-buts (curiosity) reliés à l'actif.
+        - Ajuste légèrement progress/competence selon feedback récents (si dispo).
+        """
+
+        self.store.recompute_all_priorities()
+
+        if not self.store.get_active():
+            top = self.store.topk(1, only_pending=True)
+            if top:
+                self.set_active_goal(top[0].id)
+
+        now = time.time()
+        if now - self.last_auto_proposal_at > self.auto_proposal_interval:
+            self.last_auto_proposal_at = now
+            active = self.store.get_active()
+            proposals = self.curiosity.suggest_subgoals(self._node_to_dict(active) if active else None, k=3)
+            created_ids = []
+            for p in proposals:
+                node = self.store.add_goal(**p)
+                if active:
+                    self.store.link(active.id, node.id)
+                created_ids.append(node.id)
+                self._log_goal_creation(node, reason="curiosity_auto")
+            if not self.store.get_active():
+                children = [self.store.get_goal(gid) for gid in created_ids]
+                children = [c for c in children if c]
+                children.sort(key=lambda n: n.priority, reverse=True)
+                if children:
+                    self.set_active_goal(children[0].id)
+
+        try:
+            logpath = "data/logs/social_feedback.jsonl"
+            delta_prog, delta_comp = 0.0, 0.0
+            if os.path.exists(logpath):
+                with open(logpath, "r", encoding="utf-8") as f:
+                    lines = f.readlines()[-5:]
+                for line in lines:
+                    import json
+
+                    ev = json.loads(line)
+                    r = float(ev.get("extrinsic_reward", 0.0))
+                    delta_prog += 0.02 * r
+                    delta_comp += 0.01 * r
+            act = self.store.get_active()
+            if act and (abs(delta_prog) > 1e-6 or abs(delta_comp) > 1e-6):
+                self.store.update_goal(
+                    act.id,
+                    {
+                        "progress": float(max(0.0, min(1.0, act.progress + delta_prog))),
+                        "competence": float(max(0.0, min(1.0, act.competence + delta_comp))),
+                    },
+                )
+        except Exception:
             pass
 
-class MemoryGoalIntegrator:
-    """Intégrateur mémoire-but"""
-    
-    def extract_goals_from_memory(self, memory_system) -> List[Dict[str, Any]]:
-        """Extrait des idées de buts à partir de la mémoire"""
-        goals_from_memory = []
-        
-        try:
-            # Recherche de patterns de buts réussis dans le passé
-            successful_goal_patterns = memory_system.retrieve_memories(
-                cues={"type": "successful_goal"},
-                max_results=3
+    # ---------- Internals ----------
+    def _node_to_dict(self, n: GoalNode) -> Dict[str, Any]:
+        if not n:
+            return {}
+        return {
+            "id": n.id,
+            "description": n.description,
+            "criteria": n.criteria,
+            "progress": n.progress,
+            "value": n.value,
+            "competence": n.competence,
+            "curiosity": n.curiosity,
+            "urgency": n.urgency,
+            "priority": n.priority,
+            "status": n.status,
+            "created_by": n.created_by,
+            "parent_ids": list(n.parent_ids),
+            "child_ids": list(n.child_ids),
+            "updated_at": n.updated_at,
+        }
+
+    def _log_goal_creation(self, node: GoalNode, reason: str):
+        if self.memory and hasattr(self.memory, "add_memory"):
+            self.memory.add_memory(
+                "goal_event",
+                {
+                    "t": time.time(),
+                    "type": "create",
+                    "goal_id": node.id,
+                    "description": node.description,
+                    "reason": reason,
+                },
             )
-            
-            for memory in successful_goal_patterns.memory_traces:
-                goals_from_memory.append({
-                    "source": "memory_success_pattern",
-                    "content": memory.content,
-                    "confidence": memory.confidence * 0.8
-                })
-        except:
-            pass
-        
-        return goals_from_memory
+        m = getattr(self.arch, "metacognition", None)
+        if m and hasattr(m, "_record_metacognitive_event"):
+            m._record_metacognitive_event(
+                event_type="goal_created",
+                domain=getattr(m, "CognitiveDomain", None).LEARNING if hasattr(m, "CognitiveDomain") else None,
+                description=f"New goal: {node.description}",
+                significance=min(0.6 + 0.3 * node.curiosity, 1.0),
+                confidence=0.7,
+            )
 
-class ReasoningGoalIntegrator:
-    """Intégrateur raisonnement-but"""
-    
-    def assess_goal_feasibility(self, goal: Goal, reasoning_system) -> float:
-        """Évalue la faisabilité d'un but en utilisant le raisonnement"""
-        # Facteurs de faisabilité
-        factors = {
-            "resource_adequacy": self._assess_resource_adequacy(goal),
-            "logical_consistency": self._assess_logical_consistency(goal),
-            "temporal_feasibility": self._assess_temporal_feasibility(goal)
-        }
-        
-        return np.mean(list(factors.values()))
-    
-    def _assess_resource_adequacy(self, goal: Goal) -> float:
-        """Évalue l'adéquation des ressources"""
-        required_resources = goal.cognitive_cost
-        available_resources = 1.0 - goal.motivation_state.fatigue_level if hasattr(goal, 'motivation_state') else 0.7
-        return min(1.0, available_resources / max(required_resources, 0.1))
-    
-    def _assess_logical_consistency(self, goal: Goal) -> float:
-        """Évalue la consistance logique du but"""
-        # Vérifie que le but n'est pas contradictoire avec les buts existants
-        # ou les valeurs fondamentales
-        return 0.8  # Placeholder
-    
-    def _assess_temporal_feasibility(self, goal: Goal) -> float:
-        """Évalue la faisabilité temporelle"""
-        if not goal.deadline:
-            return 0.7
-        
-        time_available = goal.deadline - time.time()
-        estimated_duration = goal.cognitive_cost * 3600  # Estimation
-        
-        if time_available <= 0:
-            return 0.0
-        else:
-            return min(1.0, time_available / estimated_duration)
 
-class PerceptionGoalIntegrator:
-    """Intégrateur perception-but"""
-    
-    def detect_opportunities(self, perception_system) -> List[Dict[str, Any]]:
-        """Détecte les opportunités via le système de perception"""
-        opportunities = []
-        
-        try:
-            # Utilise la perception pour détecter des patterns intéressants
-            novel_patterns = perception_system.detect_novel_patterns(max_patterns=2)
-            for pattern in novel_patterns:
-                opportunities.append({
-                    "type": "perceptual_novelty",
-                    "description": f"Pattern nouveau détecté: {pattern}",
-                    "novelty_score": 0.7,
-                    "potential_value": 0.6
-                })
-        except:
-            pass
-        
-        return opportunities
-
-class LearningGoalIntegrator:
-    """Intégrateur apprentissage-but"""
-    
-    def extract_goal_insights(self, learning_system) -> Dict[str, Any]:
-        """Extrait des insights d’apprentissage pertinents pour les buts"""
-        insights = {
-            "goal_success_patterns": {},
-            "common_failure_causes": {},
-            "efficiency_improvements": []
-        }
-        
-        try:
-            # Analyse les patterns de succès/échec des buts passés
-            learning_data = learning_system.analyze_goal_performance()
-            insights.update(learning_data)
-        except:
-            pass
-        
-        return insights
-
-# ===== FONCTIONS D'UTILITÉ ET D'AIDE =====
-
-def create_goal_from_user_input(description: str, goal_type: GoalType, 
-                              priority: PriorityLevel, deadline_minutes: int = 60) -> Goal:
-    """Crée un but à partir d'une entrée utilisateur"""
-    return Goal(
-        id=f"goal_user_{int(time.time())}",
-        description=description,
-        goal_type=goal_type,
-        priority=priority,
-        created_time=time.time(),
-        deadline=time.time() + (deadline_minutes * 60),
-        status=GoalStatus.ACTIVE,
-        progress=0.0,
-        confidence=0.7,
-        importance=0.6,
-        urgency=0.5 if deadline_minutes < 120 else 0.3,
-        prerequisites=[],
-        subgoals=[],
-        success_criteria={"user_satisfaction": True, "task_completion": True},
-        failure_conditions={"user_cancellation": True, "timeout": True},
-        motivation_level=0.6,
-        cognitive_cost=0.5,
-        expected_reward=0.7
-    )
-
-def visualize_goal_hierarchy(goal_system: GoalSystem) -> str:
-    """Génère une visualisation textuelle de la hiérarchie des buts"""
-    visualization = "🌳 HIÉRARCHIE DES BUTS\n"
-    visualization += "=" * 50 + "\n"
-    
-    # Buts fondamentaux
-    fundamental_goals = [g for g in goal_system.goals_database.values() 
-                        if g.id.startswith("goal_") and "fundamental" in g.id]
-    
-    visualization += "🎯 BUTS FONDAMENTAUX:\n"
-    for goal in fundamental_goals:
-        visualization += f"  • {goal.description} (Progrès: {goal.progress:.1%})\n"
-    
-    # Buts actifs priorisés
-    prioritized_goals = goal_system.prioritize_goals()
-    visualization += "\n🎯 BUTS ACTIFS (par priorité):\n"
-    for i, goal_id in enumerate(prioritized_goals[:5]):  # Top 5
-        goal = goal_system.goals_database[goal_id]
-        visualization += f"  {i+1}. {goal.description}\n"
-        visualization += f"  # Type: {goal.goal_type.value} | Priorité: {goal.priority.value}\n"
-        visualization += f"  # Progrès: {goal.progress:.1%} | Motivation: {goal.motivation_level:.1%}\n"
-    
-    # Statistiques
-    stats = goal_system.get_goal_system_stats()
-    visualization += f"\n📊 STATISTIQUES:\n"
-    visualization += f"  # Buts actifs: {stats['active_goals_count']}\n"
-    visualization += f"  # Buts complétés: {stats['completed_goals_count']}\n"
-    visualization += f"  # Motivation: {stats['motivation_state']['intrinsic_motivation']:.1%}\n"
-    visualization += f"  # Satisfaction: {stats['motivation_state']['satisfaction_level']:.1%}\n"
-    
-    return visualization
-
-# ===== POINT D'ENTRÉE ET TEST =====
-
-if __name__ == "__main__":
-    print("🚀 Initialisation du système de buts autonome...")
-    
-    # Création du système de buts
-    goal_system = GoalSystem()
-    
-    # Affichage de l'état initial
-    print("\n" + "="*60)
-    print("ÉTAT INITIAL DU SYSTÈME DE BUTS")
-    print("="*60)
-    
-    stats = goal_system.get_goal_system_stats()
-    print(f"📊 Buts fondamentaux initialisés: {stats['active_goals_count']}")
-    print(f"🎯 Distribution des types: {stats['goal_type_distribution']}")
-    print(f"💡 État motivationnel: {stats['motivation_state']}")
-    
-    # Génération de buts autonomes initiaux
-    print("\n" + "="*60)
-    print("GÉNÉRATION DE BUTS AUTONOMES")
-    print("="*60)
-    
-    autonomous_goals = goal_system.generate_autonomous_goals()
-    print(f"🎯 {len(autonomous_goals)} buts autonomes générés")
-    
-    for goal in autonomous_goals:
-        print(f"  • {goal.description} (Type: {goal.goal_type.value})")
-    
-    # Priorisation des buts
-    print("\n" + "="*60)
-    print("PRIORISATION DES BUTS")
-    print("="*60)
-    
-    prioritized = goal_system.prioritize_goals()
-    print("Ordre de priorité des buts:")
-    for i, goal_id in enumerate(prioritized):
-        goal = goal_system.goals_database[goal_id]
-        print(f"  {i+1}. {goal.description} (Importance: {goal.importance:.2f})")
-    
-    # Exécution du cycle principal
-    print("\n" + "="*60)
-    print("DÉMARRAGE DU CYCLE DE GESTION DES BUTS")
-    print("="*60)
-    
-    # Exécution pendant 30 secondes pour la démonstration
-    main_goal_cycle(goal_system, cycle_duration=30)
-    
-    # Visualisation finale
-    print("\n" + "="*60)
-    print("VISUALISATION FINALE")
-    print("="*60)
-    
-    hierarchy = visualize_goal_hierarchy(goal_system)
-    print(hierarchy)
-    
-    print("\n✅ Système de buts démontré avec succès!")
-    print("🎯 L'AGI est maintenant capable de générer, gérer et prioriser")
-    print("  # des buts de manière autonome et évolutive!")
+import os
