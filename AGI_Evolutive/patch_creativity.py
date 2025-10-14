@@ -17,7 +17,7 @@ def main():
         text
     )
 
-    # 2️⃣ Safeguard all idea[...] index accesses against strings
+    # 2️⃣ Safeguard all idea[<key>] index accesses against strings
     text = re.sub(
         r'(\w+)\[\"(\w+)\"\]',
         r'(\1["\2"] if isinstance(\1, dict) else getattr(\1, "\2", None))',
@@ -46,7 +46,7 @@ def main():
     )
 
     if text == original:
-        print("Aucun changement détecté — fichier déjà conforme.")
+        print("Aucun changement détecté - fichier déjà conforme.")
         return
 
     backup = TARGET.with_suffix('.py.bak')

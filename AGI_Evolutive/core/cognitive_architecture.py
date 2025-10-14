@@ -261,13 +261,13 @@ class CognitiveArchitecture:
                 "chosen_hypothesis": "clarifier intention + proposer 1 test",
                 "tests": ["proposer 2 options et valider"],
                 "final_confidence": 0.5,
-                "appris": ["garder une trace même en cas d’erreur"],
-                "prochain_test": "valider l’option la plus utile",
+                "appris": ["garder une trace même en cas d'erreur"],
+                "prochain_test": "valider l'option la plus utile",
             }
 
         apprentissages = [
             "associer récompense sociale ↔ style",
-            "tenir un journal d’épisodes de raisonnement",
+            "tenir un journal d'épisodes de raisonnement",
         ] + list(reason_out.get("appris", []))
 
         contract = ensure_contract(
@@ -276,7 +276,7 @@ class CognitiveArchitecture:
                 "incertitude": float(
                     max(0.0, min(1.0, 1.0 - float(reason_out.get("final_confidence", 0.5))))
                 ),
-                "prochain_test": reason_out.get("prochain_test") or "—",
+                "prochain_test": reason_out.get("prochain_test") or "-",
                 "appris": apprentissages,
                 "besoin": ["confirmer si tu veux patch immédiat ou plan en étapes"],
             }

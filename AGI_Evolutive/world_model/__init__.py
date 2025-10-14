@@ -1,7 +1,6 @@
-
 # world_model/__init__.py
 """
-World Model — module unique, optimisé et auto‑contenu.
+World Model - module unique, optimisé et auto-contenu.
 Contient :
   - PhysicsEngine        : dynamique physique simplifiée, contraintes et simulations
   - SocialModel          : agents, normes, intentions, relations
@@ -9,10 +8,10 @@ Contient :
   - SpatialReasoning     : repères, cartes mentales, graphes spatiaux, itinéraires
 
 Objectifs :
-  - Aucun import de sous‑fichiers (évite ModuleNotFoundError)
+  - Aucun import de sous-fichiers (évite ModuleNotFoundError)
   - Compatibilité avec core.cognitive_architecture (from world_model import PhysicsEngine)
   - to_state()/from_state() pour persistance (core/persistence.py)
-  - Auto‑wiring doux via cognitive_architecture (getattr, sans import croisé)
+  - Auto-wiring doux via cognitive_architecture (getattr, sans import croisé)
 
 Dépendances : standard library only.
 """
@@ -243,7 +242,7 @@ class SocialModel:
     Modèle social minimal :
     - Agents, rôles, affinités
     - Normes sociales (règles simples)
-    - Attribution d’intentions (Bayes léger)
+    - Attribution d'intentions (Bayes léger)
     """
     def __init__(self, cognitive_architecture: Any = None):
         self.cognitive_architecture = cognitive_architecture
@@ -331,11 +330,11 @@ class Body:
 class PhysicsEngine:
     """
     Moteur physique 2D discret et simplifié :
-    - intégration d’Euler (dt fixe)
-    - collisions disque‑disque élastiques partiellement (restitution)
+    - intégration d'Euler (dt fixe)
+    - collisions disque-disque élastiques partiellement (restitution)
     - friction linéaire
     - contraintes spatiales (mur rectangulaire)
-    - hooks d’observation vers cognition (reasoning/perception)
+    - hooks d'observation vers cognition (reasoning/perception)
     """
     def __init__(self, cognitive_architecture: Any = None, memory_system: Any = None):
         self.cognitive_arch = cognitive_architecture
@@ -346,14 +345,14 @@ class PhysicsEngine:
         self.last_step_ts: float = 0.0
         self.events: List[str] = []
 
-        # auto‑wiring
+        # auto-wiring
         ca = self.cognitive_arch
         if ca:
             self.reasoning = getattr(ca, "reasoning", None)
             self.perception = getattr(ca, "perception", None)
             self.goals = getattr(ca, "goals", None)
             self.metacognition = getattr(ca, "metacognition", None)
-            # accès aux autres sous‑modèles si exposés
+            # accès aux autres sous-modèles si exposés
             self.social = SocialModel(ca)
             self.temporal = TemporalReasoning(ca)
             self.spatial = SpatialReasoning(ca)

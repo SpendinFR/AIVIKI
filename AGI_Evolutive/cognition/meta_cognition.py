@@ -15,9 +15,9 @@ class MetaCognition:
         self.path = os.path.join(data_dir, "metacog.json")
         self.state = {
             "last_assessment_ts": 0.0,
-            "open_questions": [],     # [{"q":"...", "topic":"...", "priority":0..1}]
+            "open_questions": [],     # [{"q": "<question>", "topic": "<theme>", "priority": 0.0-1.0}]
             "uncertainty": 0.5,       # 0..1
-            "domains": {},            # {"language": {"confidence":0.6,"gaps":["..."]}, ...}
+            "domains": {},            # {"language": {"confidence": 0.6, "gaps": ["lexique", "raisonnement"]}}
             "history": []             # log compact
         }
         self._load()
@@ -56,11 +56,11 @@ class MetaCognition:
             for w in text.lower().split():
                 if w.isalpha(): tokens[w] += 1
 
-            # heuristique de "réponse"/“affirmation apprise”
+            # heuristique de "réponse"/"affirmation apprise"
             if any(k in kind for k in ("lesson","insight")) or ("answer" in text.lower()):
                 a_cnt += 1
 
-        # incertitude : plus de questions et d’erreurs -> plus d’incertitude
+        # incertitude : plus de questions et d'erreurs -> plus d'incertitude
         denom = max(1, q_cnt + a_cnt)
         uncertainty = 0.5 + 0.4*((q_cnt - a_cnt)/denom) + 0.1*min(1.0, err_cnt/10.0)
         uncertainty = max(0.0, min(1.0, uncertainty))

@@ -1,19 +1,19 @@
 # language/__init__.py
 """
-Module Language — auto‑contenu, optimisé et complet pour ton AGI.
+Module Language - auto-contenu, optimisé et complet pour ton AGI.
 Contient :
   - SemanticUnderstanding  : parsing sémantique (frames, intents, slots, entities)
   - PragmaticReasoning     : contexte, intentions, implicatures, actes de langage
-  - DiscourseProcessing    : gestion de la cohérence inter‑tour, anaphores simples
+  - DiscourseProcessing    : gestion de la cohérence inter-tour, anaphores simples
   - LanguageGeneration     : génération textuelle contrôlée par but/tonalité/style
 
 Objectifs :
-  - AUCUN import de sous‑fichier (fini les ModuleNotFoundError)
-  - Auto‑wiring doux via cognitive_architecture (getattr, sans import croisé)
+  - AUCUN import de sous-fichier (fini les ModuleNotFoundError)
+  - Auto-wiring doux via cognitive_architecture (getattr, sans import croisé)
   - Persistance (to_state / from_state) pour travailler offline et reprendre
   - Standard library only (pas de dépendances externes)
 
-N.B. : Ce module est “optimisé mais complet” : toute la logique utile est là,
+N.B. : Ce module est "optimisé mais complet" : toute la logique utile est là,
 avec des implémentations compactes et robustes (pas de verbiage inutile).
 """
 
@@ -76,7 +76,7 @@ class SemanticUnderstanding:
     Compréhension sémantique compacte :
      - tokenisation simple, NER par regex (dates, nombres, emails, urls, montants)
      - frame intent+slots : détecte objectifs fréquents (demander, informer, créer, planifier, envoyer)
-     - calcul d'incertitude : hedges (“peut‑être”, “je crois”), tournures interrogatives
+     - calcul d'incertitude : hedges ("peut-être", "je crois"), tournures interrogatives
     """
     RE_NUMBER = re.compile(r"\b\d+(?:[.,]\d+)?\b")
     RE_DATE = re.compile(r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b")
@@ -103,7 +103,7 @@ class SemanticUnderstanding:
         self.history: List[Utterance] = []
         self.lang = "fr"
 
-        # auto‑wiring : accès doux aux autres modules si dispos
+        # auto-wiring : accès doux aux autres modules si dispos
         ca = self.cognitive_arch
         if ca:
             self.reasoning = getattr(ca, "reasoning", None)
@@ -136,7 +136,7 @@ class SemanticUnderstanding:
         self.history.append(utt)
         if len(self.history) > 200:
             self.history.pop(0)
-        # informer la méta du niveau d’incertitude
+        # informer la méta du niveau d'incertitude
         if getattr(self, "metacognition", None) and hasattr(
             self.metacognition, "register_language_parse"
         ):
@@ -150,7 +150,7 @@ class SemanticUnderstanding:
         return utt
 
     def respond(self, user_text: str, context: Optional[Dict[str, Any]] = None) -> str:
-        """Parse l’énoncé utilisateur et orchestre un raisonnement léger pour répondre."""
+        """Parse l'énoncé utilisateur et orchestre un raisonnement léger pour répondre."""
         context = context or {}
         utterance = self.parse_utterance(user_text, context)
         frame = getattr(utterance, "frame", None)
@@ -174,11 +174,11 @@ class SemanticUnderstanding:
 
         if reasoned:
             steps_lines = [
-                f"– {t['strategy']}: {t['notes']}"
+                f"- {t['strategy']}: {t['notes']}"
                 for t in reasoned.get("trace", [])
                 if t.get("notes")
             ]
-            steps = "\n".join(steps_lines) if steps_lines else "– (aucune note)"
+            steps = "\n".join(steps_lines) if steps_lines else "- (aucune note)"
             support = reasoned.get("support", [])
             support_lines = (
                 "\nContexte mémoire:\n" + "\n".join([f"• {s}" for s in support])
@@ -312,7 +312,7 @@ class SemanticUnderstanding:
 
         doing = []
         if reasoning.get("recent_inferences", 0) > 0:
-            doing.append("j’analyse des inférences récentes")
+            doing.append("j'analyse des inférences récentes")
         if creativity.get("recent_ideas", 0) > 0:
             doing.append("je génère/évalue de nouvelles idées")
         if metacog.get("events", 0) > 0:
@@ -329,11 +329,11 @@ class SemanticUnderstanding:
 
         next_steps = []
         if unknown:
-            next_steps.append("tu peux m’expliquer ce que tu entends par " + ", ".join(unknown) + " ?")
+            next_steps.append("tu peux m'expliquer ce que tu entends par " + ", ".join(unknown) + " ?")
         else:
             next_steps.append("je peux tenter un exemple concret ou reformuler si tu veux")
         if isinstance(activation, (int, float)) and activation < 0.4:
-            next_steps.append("je vais réduire la complexité pour m’aligner")
+            next_steps.append("je vais réduire la complexité pour m'aligner")
 
         lines = []
         lines.append("• Ce que je fais: " + "; ".join(doing))
@@ -345,7 +345,7 @@ class SemanticUnderstanding:
             gist = user_msg.strip()
             if len(gist) > 120:
                 gist = gist[:117] + "…"
-            lines.append(f"• Ta demande (j’ai bien reçu): « {gist} »")
+            lines.append(f"• Ta demande (j'ai bien reçu): \"{gist}\"")
         except Exception:
             pass
 
@@ -436,8 +436,8 @@ class SemanticUnderstanding:
 
 class PragmaticReasoning:
     """
-    Raisonner au‑delà du littéral :
-     - infère l’intention et les présupposés (ex : “tu peux… ?” = requête)
+    Raisonner au-delà du littéral :
+     - infère l'intention et les présupposés (ex : "tu peux… ?" = requête)
      - ajuste au contexte (état émotionnel, objectifs actifs, normes sociales)
      - propose des actes de langage appropriés (répondre, demander précision, proposer plan)
     """
@@ -449,7 +449,7 @@ class PragmaticReasoning:
             "cooperation": 0.7,
             "confidence": 0.6,
         }
-        # auto‑wiring
+        # auto-wiring
         ca = self.cognitive_arch
         if ca:
             self.emotions = getattr(ca, "emotions", None)
@@ -505,8 +505,8 @@ class DiscourseProcessing:
     """
     Gestion de discours minimale :
      - suit les entités/objets récurrents (anaphores très simples)
-     - maintient un “topic stack” de 5 éléments max
-     - fournit contexte de réponse (“réutiliser la dernière URL”, etc.)
+     - maintient un "topic stack" de 5 éléments max
+     - fournit contexte de réponse ("réutiliser la dernière URL", etc.)
     """
     def __init__(self, cognitive_architecture: Any = None):
         self.cognitive_arch = cognitive_architecture
@@ -523,7 +523,7 @@ class DiscourseProcessing:
         self.state.last_topics = (self.state.last_topics + topics)[-5:]
 
     def resolve_reference(self, text: str) -> Dict[str, Any]:
-        # “celui‑ci”, “ça”, “ce document”, “la même url”, etc.
+        # "celui-ci", "ça", "ce document", "la même url", etc.
         t = text.lower()
         ref_ent = None
         if "même url" in t or "la même url" in t:
@@ -551,16 +551,16 @@ class LanguageGeneration:
     """
     Génération textuelle pragmatique :
      - templates intelligents + mix lexical (tonalité, style, concision)
-     - prise en compte de l’incertitude et du besoin de clarification
-     - formats utilitaires : listes, plans d’action, réponses directes
+     - prise en compte de l'incertitude et du besoin de clarification
+     - formats utilitaires : listes, plans d'action, réponses directes
     """
     def __init__(self, cognitive_architecture: Any = None):
         self.cognitive_arch = cognitive_architecture
         self.style = {"formality": 0.5, "warmth": 0.6, "conciseness": 0.7}
-        # auto‑wiring
+        # auto-wiring
         ca = self.cognitive_arch
         if ca:
-            self.language = getattr(ca, "language", None)  # self‑ref possible
+            self.language = getattr(ca, "language", None)  # self-ref possible
             self.goals = getattr(ca, "goals", None)
             self.metacognition = getattr(ca, "metacognition", None)
 
@@ -595,16 +595,16 @@ class LanguageGeneration:
 
     def _propose_plan(self, intent: str, data: Dict[str, Any], tone: str = "neutral") -> str:
         topic = data.get("topic", "la tâche")
-        steps = data.get("steps") or ["Clarifier l’objectif", "Rassembler les données utiles", "Proposer une ébauche", "Itérer avec ton feedback"]
-        head = f"Je te propose un mini‑plan pour {topic} :"
+        steps = data.get("steps") or ["Clarifier l'objectif", "Rassembler les données utiles", "Proposer une ébauche", "Itérer avec ton feedback"]
+        head = f"Je te propose un mini-plan pour {topic} :"
         bullet = "\n- " + "\n- ".join(steps[:6])
         return self._tone(head + bullet, tone)
 
     def _ask_clarification(self, topic: Optional[str], tone: str = "neutral") -> str:
         if topic:
-            msg = f"Peux‑tu préciser les contraintes principales pour {topic} ?"
+            msg = f"Peux-tu préciser les contraintes principales pour {topic} ?"
         else:
-            msg = "Peux‑tu préciser le contexte ou les contraintes principales ?"
+            msg = "Peux-tu préciser le contexte ou les contraintes principales ?"
         return self._tone(msg, tone)
 
     def _inform(self, data: Dict[str, Any], tone: str = "neutral") -> str:
@@ -616,7 +616,7 @@ class LanguageGeneration:
         elif "text" in data:
             parts.append(str(data["text"])[:300])
         else:
-            parts.append("c’est noté.")
+            parts.append("c'est noté.")
         return self._tone(" ".join(parts), tone)
 
     # ----- utils -----

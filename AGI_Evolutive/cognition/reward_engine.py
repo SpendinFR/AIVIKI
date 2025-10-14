@@ -8,12 +8,12 @@ class RewardEvent:
     timestamp: float
     user_id: str
     text: str
-    channel: str               # "chat", "system", ...
+    channel: str               # "chat", "system", "tool"
     extrinsic_reward: float    # [-1.0, 1.0]
     polarity: str              # "positive" | "negative" | "neutral"
     intensity: float           # [0, 1] (force du signal)
     features: Dict[str, Any]   # détails (emojis, !, lexiques, etc.)
-    context: Dict[str, Any]    # ex: last_assistant_output, active_goal_id...
+    context: Dict[str, Any]    # ex: last_assistant_output, active_goal_id, emotional_state
 
 
 class RewardEngine:
@@ -109,7 +109,7 @@ class RewardEngine:
         channel: str = "chat",
     ) -> RewardEvent:
         """
-        À appeler depuis la boucle de dialogue — analyse textuelle, calcule une récompense,
+        À appeler depuis la boucle de dialogue - analyse textuelle, calcule une récompense,
         met à jour systèmes, et retourne l'événement.
         """
         ev = self._analyze_feedback(user_id, text, context or {}, channel)

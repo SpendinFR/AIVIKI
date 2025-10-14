@@ -57,7 +57,7 @@ class DecompositionStrategy(ReasoningStrategy):
         }
 
 
-# ---------- 2) Récupération d’évidence (mémoire/doc) ----------
+# ---------- 2) Récupération d'évidence (mémoire/doc) ----------
 class EvidenceRetrievalStrategy(ReasoningStrategy):
     name = "récupération"
 
@@ -88,7 +88,7 @@ class EvidenceRetrievalStrategy(ReasoningStrategy):
         }
 
 
-# ---------- 3) Génération / ranking d’hypothèses ----------
+# ---------- 3) Génération / ranking d'hypothèses ----------
 class HypothesisRankingStrategy(ReasoningStrategy):
     name = "hypothèses"
 
@@ -104,10 +104,10 @@ class HypothesisRankingStrategy(ReasoningStrategy):
             conf = min(0.65 + 0.1 * min(len(support_snippets), 3), 0.9)
             proposals.append({"answer": ans, "confidence": conf, "support": support_snippets[:3]})
 
-        # Proposer une réponse « prudente » quand info pauvre
+        # Proposer une réponse " prudente " quand info pauvre
         if not proposals:
             proposals.append({
-                "answer": "Je manque d’évidence directe. Je propose d’éclaircir le but et les contraintes.",
+                "answer": "Je manque d'évidence directe. Je propose d'éclaircir le but et les contraintes.",
                 "confidence": 0.35,
                 "support": []
             })
@@ -131,17 +131,17 @@ class SelfCheckStrategy(ReasoningStrategy):
         last_answer = context.get("last_answer", "")
         notes = "Aucune contradiction apparente"
 
-        # check basique: éviter contradictions « oui/non », « vrai/faux »
+        # check basique: éviter contradictions " oui/non ", " vrai/faux "
         contradictions = [("oui", "non"), ("vrai", "faux"), ("possible", "impossible")]
         for p in proposals:
             a = (p.get("answer") or "").lower()
             for x, y in contradictions:
                 if x in a and y in last_answer.lower():
                     p["confidence"] *= 0.8
-                    notes = "Contradiction détectée avec l’itération précédente (pondération réduite)"
+                    notes = "Contradiction détectée avec l'itération précédente (pondération réduite)"
                 if y in a and x in last_answer.lower():
                     p["confidence"] *= 0.8
-                    notes = "Contradiction détectée avec l’itération précédente (pondération réduite)"
+                    notes = "Contradiction détectée avec l'itération précédente (pondération réduite)"
 
         # clamp
         for p in proposals:

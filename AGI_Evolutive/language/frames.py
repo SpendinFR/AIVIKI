@@ -27,7 +27,7 @@ class UtteranceFrame:
     acts: List[DialogueAct] = field(default_factory=list)
     slots: Dict[str, Any] = field(default_factory=dict)
     unknown_terms: List[str] = field(default_factory=list)
-    needs: List[str] = field(default_factory=list)      # ce dont l’IA a “besoin” pour bien répondre
+    needs: List[str] = field(default_factory=list)      # ce dont l'IA a "besoin" pour bien répondre
     meta: Dict[str, Any] = field(default_factory=dict)  # ex: language, tone, user_profile hints
 
     @property

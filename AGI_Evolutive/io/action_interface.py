@@ -21,10 +21,10 @@ class Action:
 
 class ActionInterface:
     """
-    - Maintient une file d’actions (internes + issues de Goals/Planner)
+    - Maintient une file d'actions (internes + issues de Goals/Planner)
     - Valide contre policy (si présent)
     - Exécute en vrai (si pont dispo) ou simule
-    - Journalise dans data/actions_log.jsonl + ajoute une mémoire d’expérience
+    - Journalise dans data/actions_log.jsonl + ajoute une mémoire d'expérience
     - Informe le système émotionnel & métacognitif
     """
 
@@ -40,7 +40,7 @@ class ActionInterface:
             "arch": None, "goals": None, "policy": None,
             "memory": None, "metacog": None, "emotions": None, "language": None
         }
-        self.cooldown_s = 0.0  # peut être modulé par l’émotion
+        self.cooldown_s = 0.0  # peut être modulé par l'émotion
 
     # ---------- binding ----------
     def bind(self, arch=None, goals=None, policy=None,
@@ -50,7 +50,7 @@ class ActionInterface:
             "memory": memory, "metacog": metacog, "emotions": emotions, "language": language
         })
 
-    # ---------- file d’attente ----------
+    # ---------- file d'attente ----------
     def enqueue(self, type_: str, payload: Dict[str, Any], priority: float = 0.5, context: Dict[str, Any] = None) -> str:
         act = Action(id=str(uuid.uuid4()), type=type_, payload=payload or {}, priority=float(priority),
                      context=context or {})
@@ -86,7 +86,7 @@ class ActionInterface:
         if emo and hasattr(emo, "get_emotional_modulators"):
             mods = emo.get_emotional_modulators() or {}
             exploration = float(mods.get("exploration_rate", 0.15))
-            # plus d’exploration → moins de cooldown
+            # plus d'exploration → moins de cooldown
             self.cooldown_s = max(0.0, 1.0 - 0.8 * exploration)
         else:
             self.cooldown_s = 0.5
@@ -184,7 +184,7 @@ class ActionInterface:
     def _h_message_user(self, act: Action) -> Dict[str, Any]:
         """
         Simule l'envoi d'un message : on écrit dans output/last_message.txt + on retourne le texte.
-        Si un module Language existe, on peut l’utiliser pour générer le texte final à partir d’un intent.
+        Si un module Language existe, on peut l'utiliser pour générer le texte final à partir d'un intent.
         """
         lang = self.bound.get("language")
         text = act.payload.get("text")
@@ -234,7 +234,7 @@ class ActionInterface:
 
     def _h_learn_concept(self, act: Action) -> Dict[str, Any]:
         """
-        Enregistre un objectif d’apprentissage + mémoire associée.
+        Enregistre un objectif d'apprentissage + mémoire associée.
         """
         goals = self.bound.get("goals")
         memory = self.bound.get("memory")
@@ -314,7 +314,7 @@ class ActionInterface:
     def _maybe_autonomous_microaction(self):
         """
         Génère une petite action autonome (réflexion / scan mémoire)
-        quand il n’y a rien à faire → l’agent reste vivant.
+        quand il n'y a rien à faire → l'agent reste vivant.
         """
         emo = self.bound.get("emotions")
         curiosity = 0.2

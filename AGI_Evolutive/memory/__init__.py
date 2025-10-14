@@ -81,7 +81,7 @@ class MemorySystem:
         except Exception:
             self.retrieval = None
 
-        # ——— LIAISONS INTER-MODULES ———
+        # --- LIAISONS INTER-MODULES ---
         if self.cognitive_architecture is not None:
             self.reasoning = getattr(self.cognitive_architecture, "reasoning", None)
             self.perception = getattr(self.cognitive_architecture, "perception", None)
@@ -180,7 +180,7 @@ class MemorySystem:
     def store_interaction(self, record: Dict[str, Any]):
         """
         Enregistre une interaction pour retrieval.
-        record attendu: {"user": str, "agent": str, ...}
+        record attendu: {"user": str, "agent": str, "timestamp": float, "text": str}
         """
         if not getattr(self, "retrieval", None):
             return
@@ -193,7 +193,7 @@ class MemorySystem:
             pass
 
     def ingest_document(self, text: str, title: Optional[str] = None, source: Optional[str] = None):
-        """Ajoute un document arbitraire dans l’index."""
+        """Ajoute un document arbitraire dans l'index."""
         if not getattr(self, "retrieval", None):
             return
         try:
@@ -899,7 +899,7 @@ class MemorySystem:
         
         # Simplification pour l'exemple
         if len(content_str) > 50:
-            content_str = content_str[:47] + "..."
+            content_str = content_str[:47] + "…"
         
         emotion_desc = "neutre"
         if memory.valence < -0.3:
@@ -998,7 +998,7 @@ if __name__ == "__main__":
         }
     ]
     
-    print("\n📝 Encodage des mémoires de test...")
+    print("\n📝 Encodage des mémoires de test en cours")
     memory_ids = []
     for mem_data in test_memories:
         mem_id = memory_system.encode_memory(
@@ -1011,7 +1011,7 @@ if __name__ == "__main__":
         print(f"Encodé: {mem_id}")
     
     # Test de récupération
-    print("\n🔍 Test de récupération...")
+    print("\n🔍 Test de récupération en cours")
     retrieval_result = memory_system.retrieve_memories(
         cues={"context": {"activity": "observation"}},
         memory_type=MemoryType.EPISODIC
@@ -1023,7 +1023,7 @@ if __name__ == "__main__":
         print(f" - {memory.content}")
     
     # Test de consolidation
-    print("\n🔄 Test de consolidation...")
+    print("\n🔄 Test de consolidation en cours")
     consolidation_result = memory_system.consolidate_memories()
     print(f"Résultat: {consolidation_result}")
     

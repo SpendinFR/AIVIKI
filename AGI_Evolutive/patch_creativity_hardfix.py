@@ -10,22 +10,22 @@ with io.open(PATH, "r", encoding="utf-8") as f:
 
 original = src
 
-# --- A. Corriger les lignes corrompues de type self.(...) ---
-# 1) self.(processing_threads["insight_detection"] ...) = insight_thread
+# --- A. Corriger les lignes corrompues de type self.<expression> ---
+# 1) self.(processing_threads["insight_detection"] <noise>) = insight_thread
 src = re.sub(
     r'self\.\(processing_threads\["insight_detection"\][^)]*\)\s*=\s*insight_thread',
     'self.processing_threads["insight_detection"] = insight_thread',
     src
 )
 
-# 2) self.(creative_processes["current_phase"] ...) = "preparation"
+# 2) self.(creative_processes["current_phase"] <noise>) = "preparation"
 src = re.sub(
     r'self\.\(creative_processes\["current_phase"\][^)]*\)\s*=\s*"preparation"',
     'self.creative_processes["current_phase"] = "preparation"',
     src
 )
 
-# 3) self.(creative_history["learning_trajectory"] ...).append(
+# 3) self.(creative_history["learning_trajectory"] <noise>).append(
 src = re.sub(
     r'self\.\(creative_history\["learning_trajectory"\][^)]*\)\.append\(',
     'self.creative_history["learning_trajectory"].append(',
@@ -78,7 +78,7 @@ src = re.sub(
     src
 )
 
-# --- B. Ajouter une normalisation silencieuse et l’appeler ---
+# --- B. Ajouter une normalisation silencieuse et l'appeler ---
 guard_func = r'''
 def __crea__normalize(self):
     # Garantir les bons types

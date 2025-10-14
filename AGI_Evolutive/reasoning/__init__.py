@@ -40,7 +40,7 @@ class ReasoningSystem:
             SelfCheckStrategy(),
         ]
 
-        # Comptage d’usage par stratégie
+        # Comptage d'usage par stratégie
         self.strategy_usage = defaultdict(int)
 
     # ----------- API externe principale -----------
@@ -51,7 +51,7 @@ class ReasoningSystem:
         {
           "answer": str,
           "confidence": float,
-          "trace": [{"strategy": name, "notes": str, "questions": [...], "time": float}],
+          "trace": [{"strategy": name, "notes": str, "questions": ["clarifier"], "time": float}],
           "support": [str],
           "meta": {"complexity": float, "duration": float}
         }
@@ -96,7 +96,7 @@ class ReasoningSystem:
 
         # Sélection finale
         best = max(proposals, key=lambda p: p.get("confidence", 0.0)) if proposals else {
-            "answer": "Je manque d’éléments pour conclure. Pouvez-vous préciser le but et les contraintes ?",
+            "answer": "Je manque d'éléments pour conclure. Pouvez-vous préciser le but et les contraintes ?",
             "confidence": 0.3,
             "support": []
         }
@@ -189,7 +189,7 @@ class ReasoningSystem:
     # ----------- Historisation / métriques -----------
     def _estimate_complexity(self, trace: List[Dict[str, Any]]) -> float:
         """
-        Complexité heuristique: nb d’étapes + présence de sous-questions + support.
+        Complexité heuristique: nb d'étapes + présence de sous-questions + support.
         Normalisé [0,1].
         """
         steps = len(trace)
@@ -275,14 +275,14 @@ class ReasoningSystem:
         # 1) Sélection de stratégie de haut niveau (très simple mais efficace)
         strategy = self._pick_strategy(prompt)
 
-        # 2) Génère 3 hypothèses d’intention
+        # 2) Génère 3 hypothèses d'intention
         hypos = self._make_hypotheses(prompt, strategy=strategy)
 
         # 3) Scoring des hypothèses (heuristiques + style policy si dispo)
         scores = self._score_hypotheses(prompt, hypos, strategy)
         chosen_idx = max(range(len(scores)), key=lambda i: scores[i])
 
-        # 4) Proposer 2–3 tests concrets
+        # 4) Proposer 2-3 tests concrets
         tests = self._propose_tests(prompt, strategy=strategy)
 
         # 5) "Exécution" symbolique (ici: micro-inférence + evidence text)
@@ -324,7 +324,7 @@ class ReasoningSystem:
         except Exception:
             pass
 
-        # 11) Sortie pour l’architecture
+        # 11) Sortie pour l'architecture
         return {
             "summary": summary,
             "chosen_hypothesis": hypos[chosen_idx].content,
@@ -334,7 +334,7 @@ class ReasoningSystem:
                 f"Stratégie={strategy}, complexité≈{complexity:.2f}",
                 "Toujours relier hypothèse→test→évidence (traçabilité)."
             ],
-            "prochain_test": tests[0].description if tests else "—",
+            "prochain_test": tests[0].description if tests else "-",
             "episode": ep
         }
 
@@ -371,7 +371,7 @@ class ReasoningSystem:
     def _make_hypotheses(self, prompt: str, strategy: str) -> List[Hypothesis]:
         base = [
             Hypothesis(content="tu veux une explication avec étapes et tests", prior=0.55),
-            Hypothesis(content="tu veux que j’auto-documente ce que j’apprends", prior=0.50),
+            Hypothesis(content="tu veux que j'auto-documente ce que j'apprends", prior=0.50),
             Hypothesis(content="tu veux un patch/exécution immédiate", prior=0.45),
         ]
         # léger ajustement par stratégie
@@ -403,7 +403,7 @@ class ReasoningSystem:
         out: List[Test] = []
         if strategy == "deduction":
             out.append(Test(description="isoler la demande en 1 verbe + 1 objet et valider"))
-            out.append(Test(description="proposer 2 chemins d’action et demander un choix"))
+            out.append(Test(description="proposer 2 chemins d'action et demander un choix"))
         elif strategy == "abduction":
             out.append(Test(description="formuler 2 hypothèses causales et demander un contre-exemple"))
             out.append(Test(description="sonder le contexte minimal (contrainte/ressource)"))
@@ -414,9 +414,9 @@ class ReasoningSystem:
 
     def _simulate_micro_inference(self, prompt: str, strategy: str, h: Hypothesis) -> str:
         # Ici tu peux brancher du code concret (parsing inbox, etc.)
-        # Pour l’instant, on produit une evidence explicite et traçable:
+        # Pour l'instant, on produit une evidence explicite et traçable:
         if strategy == "abduction":
-            return f"Cause plausible: l’utilisateur veut {h.content}. Testons via contre-exemples."
+            return f"Cause plausible: l'utilisateur veut {h.content}. Testons via contre-exemples."
         if strategy == "analogy":
             return f"Analogie: pattern similaire (précision demandée + prochain test)."
         return f"Plan déductif: valider intention → choisir test → exécuter micro-étape."
@@ -453,7 +453,7 @@ class ReasoningSystem:
         final_conf: float
     ) -> str:
         hyp = hypos[chosen_idx]
-        test_desc = "; ".join(t.description for t in tests[:2]) if tests else "—"
+        test_desc = "; ".join(t.description for t in tests[:2]) if tests else "-"
         return (
             f"Stratégie {strategy} → hypothèse '{hyp.content}' avec {final_conf:.2f} conf."
             f" Tests: {test_desc}. Évidence: {evidence.notes}"

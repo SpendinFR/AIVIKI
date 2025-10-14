@@ -43,7 +43,7 @@ class Orchestrator:
         self.actions = ActionInterface(self.memory)
         self.perception = PerceptionInterface(self.memory)
         self.evolution = EvolutionManager()
-        # Réflexion périodique (inner monologue) – désactivable si tu préfères un scheduler pur
+        # Réflexion périodique (inner monologue) - désactivable si tu préfères un scheduler pur
         self.reflect_loop = ReflectionLoop(self.meta, interval_sec=300)
         self.reflect_loop.start()
         # Scheduler (sans threads nécessaires)
@@ -90,10 +90,10 @@ class Orchestrator:
         self.planner.plan_for_goal("understand_humans", "Comprendre les humains")
         if not self.planner.state["plans"]["understand_humans"]["steps"]:
             self.planner.add_step("understand_humans","Observer un échange et extraire intentions")
-            self.planner.add_step("understand_humans","Tester une hypothèse d’intention par question")
+            self.planner.add_step("understand_humans","Tester une hypothèse d'intention par question")
 
     def action_cycle(self):
-        # traiter d’abord un goal d’apprentissage si présent
+        # traiter d'abord un goal d'apprentissage si présent
         picked = None
         with self.planner.lock:
             plan_ids = list(self.planner.state["plans"].keys())
@@ -147,7 +147,7 @@ class Orchestrator:
         self.planning_cycle()
         self.action_cycle()
 
-        # Propositions d’évolution
+        # Propositions d'évolution
         self.proposals_cycle()
 
         # Journal macro pour évolution
@@ -215,7 +215,7 @@ class Orchestrator:
         plan = self.planner.state["plans"]["understand_humans"]
         if not plan["steps"]:
             self.planner.add_step("understand_humans", "Observer un échange et extraire intentions")
-            self.planner.add_step("understand_humans", "Tester une hypothèse d’intention par question ciblée")
+            self.planner.add_step("understand_humans", "Tester une hypothèse d'intention par question ciblée")
 
     def act_or_simulate(self) -> None:
         step = self.planner.pop_next_action("understand_humans")

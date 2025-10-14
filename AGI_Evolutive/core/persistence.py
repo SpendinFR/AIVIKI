@@ -37,7 +37,7 @@ def _to_state(obj):
     # fallback sur __dict__ si dispo
     src = getattr(obj, "__dict__", {})
     for k, v in src.items():
-        # ignorer méthodes, modules, fonctions, générateurs, coroutines...
+        # ignorer méthodes, modules, fonctions, générateurs et coroutines
         if isinstance(v, (types.ModuleType, types.FunctionType, types.GeneratorType)):
             continue
         if inspect.isroutine(v) or inspect.isclass(v):

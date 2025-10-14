@@ -91,7 +91,7 @@ class AutonomyCore:
                 time.sleep(5)
 
     def tick(self):
-        # 1) Choix d’objectif
+        # 1) Choix d'objectif
         pick = self.dag.choose_next_goal()
         goal_id, evi, progress = pick["id"], pick["evi"], pick["progress"]
 
@@ -110,7 +110,7 @@ class AutonomyCore:
             )
         ]
 
-        # 3) “Exécution” symbolique (sans I/O lourde ici)
+        # 3) "Exécution" symbolique (sans I/O lourde ici)
         rule = self._distill_micro_rule(goal_id)
         ev = Evidence(notes=f"Règle distillée: {rule}", confidence=0.6)
 
@@ -151,18 +151,18 @@ class AutonomyCore:
 
     def _distill_micro_rule(self, goal_id: str) -> str:
         """
-        Distille une mini-règle depuis l’historique récent pour garder l’agent 'vivant'.
+        Distille une mini-règle depuis l'historique récent pour garder l'agent 'vivant'.
         (Heuristique très simple et sûre.)
         """
         try:
             # lit les 30 derniers événements dialogue/autonomy (si dispo via logger → non trivial)
             # ici : renvoie une règle statique contextualisée pour démarrer
             if goal_id == "understand_humans":
-                return "Toujours expliciter l’hypothèse et demander 1 validation binaire."
+                return "Toujours expliciter l'hypothèse et demander 1 validation binaire."
             if goal_id == "self_modeling":
-                return "Journaliser 'ce que j’ai appris' au moins une fois par tour."
+                return "Journaliser 'ce que j'ai appris' au moins une fois par tour."
             if goal_id == "tooling_mastery":
-                return "Proposer un patch minimal plutôt qu’un grand refactor."
+                return "Proposer un patch minimal plutôt qu'un grand refactor."
             return "Faire un pas plus petit mais mesurable."
         except Exception:
             return "Faire un pas plus petit mais mesurable."

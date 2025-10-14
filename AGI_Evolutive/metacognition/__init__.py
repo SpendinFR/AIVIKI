@@ -118,7 +118,7 @@ class MetacognitiveSystem:
         self.reasoning_system = reasoning_system
         self.creation_time = time.time()
 
-        # ——— LIAISONS INTER-MODULES ———
+        # --- LIAISONS INTER-MODULES ---
         if self.cognitive_architecture is not None:
             self.goals = getattr(self.cognitive_architecture, "goals", None)
             self.emotions = getattr(self.cognitive_architecture, "emotions", None)
@@ -279,7 +279,7 @@ class MetacognitiveSystem:
         self.metacognitive_history["reflection_sessions"].append(initial_reflection)
 
     def _initialize_learning_strategies(self) -> Dict[str, Dict[str, Any]]:
-        """Initialise les stratégies d’apprentissage connues"""
+        """Initialise les stratégies d'apprentissage connues"""
         return {
             "spaced_repetition": {
                 "description": "Réviser à intervalles croissants",
@@ -463,7 +463,7 @@ class MetacognitiveSystem:
         }
 
     def _assess_learning_performance(self, reasoning) -> Dict[str, float]:
-        """Évalue la performance d’apprentissage"""
+        """Évalue la performance d'apprentissage"""
         metrics = {}
         try:
             trajectory = getattr(reasoning, "reasoning_history", {}).get("learning_trajectory", [])
@@ -860,7 +860,7 @@ class MetacognitiveSystem:
             domain_interactions = self._analyze_domain_interactions(evidence)
             insights.extend(domain_interactions)
             
-            # Insight sur les patterns d’apprentissage
+            # Insight sur les patterns d'apprentissage
             learning_patterns = self._analyze_learning_patterns(evidence)
             insights.extend(learning_patterns)
         
@@ -899,15 +899,15 @@ class MetacognitiveSystem:
         return interactions
     
     def _analyze_learning_patterns(self, evidence: Dict[str, Any]) -> List[str]:
-        """Analyse les patterns d’apprentissage"""
+        """Analyse les patterns d'apprentissage"""
         patterns = []
         
         # Pattern d'amélioration progressive
         learning_rate_metric = performance_data.get("learning_rate", {})
         if learning_rate_metric.get("current", 0.0) > 0.7:
-            patterns.append("Taux d’apprentissage élevé détecté")
+            patterns.append("Taux d'apprentissage élevé détecté")
         
-        # Pattern de plateau d’apprentissage
+        # Pattern de plateau d'apprentissage
         performance_stability = []
         for metric, data in evidence.get("performance_metrics", {}).items():
             if data["stability"] > 0.8 and data["trend"] < 0.6:
@@ -1122,7 +1122,7 @@ class MetacognitiveSystem:
                 recent_speed
             )
         
-        # Efficacité d’apprentissage
+        # Efficacité d'apprentissage
         learning_metrics = performance_data.get("learning_rate", [])
         if learning_metrics:
             recent_learning = learning_metrics[-1]["value"] if learning_metrics else 0.5
@@ -1184,7 +1184,7 @@ class MetacognitiveSystem:
         reflection.insights = [
             "Système métacognitif initialisé avec capacités de surveillance de base",
             "Auto-évaluation initiale: niveau débutant dans tous les domaines",
-            "Stratégies d’apprentissage de base disponibles"
+            "Stratégies d'apprentissage de base disponibles"
         ]
         
         # Conclusions
@@ -1550,7 +1550,7 @@ class ProgressTrackingSystem:
     """Système de suivi des progrès cognitifs"""
     
     def track_learning_progress(self, metacognitive_system) -> Dict[str, float]:
-        """Suit les progrès d’apprentissage"""
+        """Suit les progrès d'apprentissage"""
         progress_metrics = {}
         
         # Progrès métacognitif
@@ -1569,7 +1569,7 @@ class StrategySelector:
     """Sélecteur de stratégies cognitives adaptatives"""
     
     def select_learning_strategy(self, domain: CognitiveDomain, context: Dict[str, Any]) -> str:
-        """Sélectionne une stratégie d’apprentissage adaptée"""
+        """Sélectionne une stratégie d'apprentissage adaptée"""
         # Sélection basée sur le domaine et le contexte
         if domain == CognitiveDomain.MEMORY:
             return "spaced_repetition"
@@ -1641,11 +1641,11 @@ if __name__ == "__main__":
     metacognitive_system = MetacognitiveSystem()
     
     # Test de surveillance de base
-    print("\n🔍 Test de surveillance cognitive...")
+    print("\n🔍 Test de surveillance cognitive en cours")
     time.sleep(3)
     
     # Test de réflexion déclenchée
-    print("\n💭 Test de réflexion métacognitive...")
+    print("\n💭 Test de réflexion métacognitive en cours")
     reflection = metacognitive_system.trigger_reflection(
         trigger="test_performance_review",
         domain=CognitiveDomain.REASONING,

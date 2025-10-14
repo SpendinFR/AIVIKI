@@ -1,20 +1,19 @@
-
 # learning/__init__.py
 """
-Système d'Apprentissage Évolutif de l'AGI — module unique et auto‑contenu.
+Système d'Apprentissage Évolutif de l'AGI - module unique et auto-contenu.
 
-Ce fichier regroupe TOUTES les classes d’apprentissage en un seul module :
+Ce fichier regroupe TOUTES les classes d'apprentissage en un seul module :
 - ExperientialLearning (apprentissage expérientiel, cycle de Kolb)
-- MetaLearning (méta-apprentissage, ajuste les hyper‑paramètres)
+- MetaLearning (méta-apprentissage, ajuste les hyper-paramètres)
 - TransferLearning (transfert inter-domaines, mapping analogique)
 - ReinforcementLearning (apprentissage par renforcement tabulaire simple)
 - CuriosityEngine (récompense intrinsèque, exploration)
 
 Points clés :
-- AUCUNE importation de sous-modules (évite l’erreur d’import).
+- AUCUNE importation de sous-modules (évite l'erreur d'import).
 - Méthodes to_state()/from_state() pour la persistance.
-- Auto‑wiring sécurisé via getattr(self.cognitive_architecture, ...).
-- Idempotent : si un sous-composant n’existe pas, le code reste stable.
+- Auto-wiring sécurisé via getattr(self.cognitive_architecture, "<module_name>").
+- Idempotent : si un sous-composant n'existe pas, le code reste stable.
 """
 
 from __future__ import annotations
@@ -62,7 +61,7 @@ class ExperientialLearning:
     """
     def __init__(self, cognitive_architecture: Any = None):
         self.cognitive_architecture = cognitive_architecture
-        # journal d’expériences (persistant)
+        # journal d'expériences (persistant)
         self.learning_episodes: List[LearningEpisode] = []
         # compétences / états (adaptent les comportements)
         self.learning_competencies: Dict[str, float] = {
@@ -88,7 +87,7 @@ class ExperientialLearning:
         }
         self.learning_rate: float = 0.1
 
-        # auto‑wiring (lecture uniquement, pas d’import croisé)
+        # auto-wiring (lecture uniquement, pas d'import croisé)
         ca = self.cognitive_architecture
         if ca:
             self.memory = getattr(ca, "memory", None)
@@ -126,7 +125,7 @@ class ExperientialLearning:
 
         # consolidation minimale en mémoire
         self._consolidate_episode(episode)
-        # feedback à la méta‑cognition
+        # feedback à la méta-cognition
         if getattr(self, "metacognition", None) and hasattr(self.metacognition, "register_learning_event"):
             try:
                 self.metacognition.register_learning_event(episode.id, confidence_gain, integration)
@@ -136,10 +135,10 @@ class ExperientialLearning:
 
     def _reflect(self, raw: Dict[str, Any]) -> List[str]:
         qs = [
-            "Qu’est‑ce qui s’est réellement passé ?",
-            "Qu’est‑ce que j’attendais ?",
-            "Qu’est‑ce qui a surpris ?",
-            "Qu’est‑ce que je dois vérifier ensuite ?",
+            "Qu'est-ce qui s'est réellement passé ?",
+            "Qu'est-ce que j'attendais ?",
+            "Qu'est-ce qui a surpris ?",
+            "Qu'est-ce que je dois vérifier ensuite ?",
         ]
         refs = [f"{q} → " + str(raw.get("summary", raw))[:120] for q in qs]
         # légère progression
@@ -150,13 +149,13 @@ class ExperientialLearning:
         concepts = []
         s = str(raw).lower()
         if "erreur" in s or "error" in s:
-            concepts.append("Principe d’erreur : causes → effets (prévenir plutôt que corriger)")
+            concepts.append("Principe d'erreur : causes → effets (prévenir plutôt que corriger)")
         if "réussite" in s or "success" in s:
             concepts.append("Principe de réussite : répéter les conditions gagnantes")
         if "temps" in s or "delai" in s:
             concepts.append("Principe temporel : estimer/contraindre le temps utile")
         if not concepts:
-            concepts.append("Principe de parcimonie : tester l’hypothèse la plus simple d’abord")
+            concepts.append("Principe de parcimonie : tester l'hypothèse la plus simple d'abord")
         self.learning_competencies["abstraction"] = min(1.0, self.learning_competencies["abstraction"] + 0.01)
         return concepts
 
@@ -256,12 +255,12 @@ class ExperientialLearning:
 
 
 # ============================================================
-# 🧠 2) MÉTA‑APPRENTISSAGE
+# 🧠 2) MÉTA-APPRENTISSAGE
 # ============================================================
 
 class MetaLearning:
     """
-    Ajuste dynamiquement les hyper‑paramètres d’apprentissage des autres composantes
+    Ajuste dynamiquement les hyper-paramètres d'apprentissage des autres composantes
     selon la performance agrégée (succès récents, confiance/integration).
     """
     def __init__(self, cognitive_architecture: Any = None):
@@ -284,7 +283,7 @@ class MetaLearning:
         ca = self.cognitive_architecture
         if not ca:
             return
-        # Ajuste le taux d’apprentissage expérientiel
+        # Ajuste le taux d'apprentissage expérientiel
         xl = getattr(ca, "learning", None)
         if xl and hasattr(xl, "learning_rate"):
             base = float(getattr(xl, "learning_rate", 0.1))
@@ -406,7 +405,7 @@ class TransferLearning:
 class ReinforcementLearning:
     """
     Table de valeurs simple (state/action) avec mise à jour TD(0).
-    Suffit pour moduler des choix locaux dans l’AGI.
+    Suffit pour moduler des choix locaux dans l'AGI.
     """
     def __init__(self, cognitive_architecture: Any = None):
         self.cognitive_architecture = cognitive_architecture
@@ -449,8 +448,8 @@ class ReinforcementLearning:
 
 class CuriosityEngine:
     """
-    Génère des récompenses intrinsèques basées sur la nouveauté et l’imprévu.
-    Peut stimuler la recherche d’information et l’auto-questionnement.
+    Génère des récompenses intrinsèques basées sur la nouveauté et l'imprévu.
+    Peut stimuler la recherche d'information et l'auto-questionnement.
     """
     def __init__(self, cognitive_architecture: Any = None):
         self.cognitive_architecture = cognitive_architecture
