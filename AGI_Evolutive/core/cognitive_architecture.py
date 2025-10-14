@@ -13,6 +13,8 @@ from metacognition import MetacognitiveSystem
 from creativity import CreativitySystem
 from world_model import PhysicsEngine
 from language import SemanticUnderstanding
+from cognition.evolution_manager import EvolutionManager
+from runtime.scheduler import Scheduler
 
 
 class CognitiveArchitecture:
@@ -33,6 +35,22 @@ class CognitiveArchitecture:
         self.global_activation = 0.5
         self.start_time = time.time()
 
+        # === Évolution long-terme ===
+        self.evolution = EvolutionManager(data_dir="data")
+        self.evolution.bind(
+            architecture=self,
+            memory=getattr(self, "memory", None),
+            metacog=getattr(self, "metacognition", None),
+            goals=getattr(self, "goals", None),
+            learning=getattr(self, "learning", None),
+            emotions=getattr(self, "emotions", None),
+            language=getattr(self, "language", None),
+        )
+
+        # === Scheduler (orchestration en arrière-plan) ===
+        self.scheduler = Scheduler(self, data_dir="data")
+        self.scheduler.start()  # thread daemon, non bloquant
+
     def cycle(self, user_msg: Optional[str] = None, inbox_docs=None):
         """One simple cognitive cycle: perceive -> reason -> plan -> act -> learn -> reflect."""
         response = None
@@ -43,6 +61,26 @@ class CognitiveArchitecture:
                 response = f"Reçu: {parsed.surface_form if hasattr(parsed, 'surface_form') else user_msg}"
             except Exception:
                 response = f"Reçu: {user_msg}"
+
+        # Après le cycle court, on peut pousser un enregistrement d'état long-terme à faible cadence
+        try:
+            if hasattr(self, "evolution") and self.evolution:
+                # léger throttling interne dans EvolutionManager si besoin (au pire c'est O(1) ici)
+                self.evolution.record_cycle(extra_tags={"via": "cycle"})
+        except Exception:
+            pass
+
+        # idem concept/épisode si pas déjà déclenchés : (facultatif, le scheduler s'en charge)
+        try:
+            if hasattr(self, "concept_extractor") and self.concept_extractor:
+                self.concept_extractor.step()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "episodic_linker") and self.episodic_linker:
+                self.episodic_linker.step()
+        except Exception:
+            pass
         return response or "OK"
 
     # ----------------------------------------------------------------------
