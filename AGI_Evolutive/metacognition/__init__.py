@@ -203,14 +203,45 @@ class MetacognitiveSystem:
 
         self.experimenter = MetacogExperimenter(system_ref=self)
         
+        # logger si dispo
+        self.logger = getattr(self.cognitive_architecture, "logger", None)
+        # rapport périodique (toutes les ~90s)
+        try:
+            self._start_status_reporting(period=90)
+        except Exception:
+            pass
+
         # Initialisation des systèmes
         self._initialize_metacognitive_system()
-        
+
         print("🧠 Système Métacognitif Initialisé")
 
     # ==============================================================
     # 🧠 MÉTHODES D'INITIALISATION ET DE SURVEILLANCE MÉTACOGNITIVE
     # ==============================================================
+
+    def _start_status_reporting(self, period: int = 90):
+        import threading
+        import time
+
+        def loop():
+            while getattr(self, "running", True):
+                try:
+                    status = self.get_metacognitive_status()
+                    if self.logger:
+                        self.logger.write("metacog.report", status=status)
+                    time.sleep(period)
+                except Exception as e:
+                    try:
+                        if self.logger:
+                            self.logger.write("metacog.error", error=str(e))
+                    except Exception:
+                        pass
+                    time.sleep(30)
+
+        th = threading.Thread(target=loop, daemon=True)
+        th.start()
+        self.monitoring_threads["metacog_report"] = th
 
     def _get_reasoning_system(self):
         """Récupère le système de raisonnement de manière sécurisée."""
