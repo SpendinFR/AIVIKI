@@ -40,8 +40,8 @@ class QuestionManager:
             return
         qs = []
         if need >= 0.7:
-            qs.append({"type": "clarify_goal", "text": "Quel est l’objectif prioritaire sur lequel tu veux que je me concentre maintenant ?"})
-            qs.append({"type": "request_docs", "text": "As-tu un document ou un exemple pour m’aider à mieux comprendre le contexte ?"})
+            qs.append({"type": "clarify_goal", "text": "Quel est l'objectif prioritaire sur lequel tu veux que je me concentre maintenant ?"})
+            qs.append({"type": "request_docs", "text": "As-tu un document ou un exemple pour m'aider à mieux comprendre le contexte ?"})
         else:
             qs.append({"type": "missing_info", "text": "Peux-tu préciser le contexte ou les contraintes principales liées à ta demande ?"})
         for q in qs:

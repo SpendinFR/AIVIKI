@@ -30,7 +30,7 @@ def fix_conditional_assignments(text: str) -> str:
 
 def fix_conditional_appends(text: str) -> str:
     """Fix invalid conditional method calls like:
-       (x["key"] if isinstance(x, dict) else getattr(x, "key", None)).append(...)
+       (x["key"] if isinstance(x, dict) else getattr(x, "key", None)).append(<value>)
     """
     pattern = re.compile(
         r'\((\w+)\[["\'](\w+)["\']\]\s+if\s+isinstance\(\1,\s*dict\)\s*else\s*getattr\(\1,\s*["\']\2["\'],\s*None\)\)\.append\((.*)\)'

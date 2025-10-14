@@ -8,7 +8,7 @@ def ensure_contract(contract: Dict[str, Any]) -> Dict[str, Any]:
     defaults = {
         "hypothese_choisie": "clarifier intention",
         "incertitude": 0.5,
-        "prochain_test": "—",
+        "prochain_test": "-",
         "appris": [],
         "besoin": [],
     }
@@ -45,7 +45,7 @@ CONTRACT_KEYS = [
 
 def _stringify_list(items: Optional[List[str]]) -> str:
     if not items:
-        return "—"
+        return "-"
     return "\n".join([f"• {x}" for x in items])
 
 
@@ -68,11 +68,11 @@ def format_agent_reply(
 
     learned = _stringify_list(appris)
     needs = _stringify_list(besoin)
-    test_line = prochain_test or "—"
+    test_line = prochain_test or "-"
 
     return (
         f"{base_text}\n\n"
-        f"—\n"
+        f"-\n"
         f"🧩 Hypothèse prise: {hypothese_choisie}\n"
         f"🤔 Incertitude: {incertitude:.2f}\n"
         f"🧪 Prochain test: {test_line}\n"
@@ -85,11 +85,11 @@ def ensure_contract(kwargs: Dict[str, Any]) -> Dict[str, Any]:
     """Complète les champs manquants de contrat si besoin."""
     out = dict(kwargs)
     out.setdefault(
-        "hypothese_choisie", "clarifier l’intention et la granularité attendue"
+        "hypothese_choisie", "clarifier l'intention et la granularité attendue"
     )
     out.setdefault("incertitude", 0.5)
     out.setdefault(
-        "prochain_test", "proposer 2 chemins d’action et demander ton choix"
+        "prochain_test", "proposer 2 chemins d'action et demander ton choix"
     )
     out.setdefault("appris", ["prioriser le concret et la traçabilité"])
     out.setdefault(

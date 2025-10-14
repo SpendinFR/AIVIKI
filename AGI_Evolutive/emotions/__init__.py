@@ -99,7 +99,7 @@ class EmotionalSystem:
         self.metacognitive_system = metacognitive_system
         self.creation_time = time.time()
 
-        # ——— LIAISONS INTER-MODULES ———
+        # --- LIAISONS INTER-MODULES ---
         if self.cognitive_architecture is not None:
             self.goals = getattr(self.cognitive_architecture, "goals", None)
             self.learning = getattr(self.cognitive_architecture, "learning", None)
@@ -569,7 +569,7 @@ class EmotionalSystem:
             trigger="initialization",
             duration=0.0,
             bodily_sensations=["calme", "équilibre"],
-            cognitive_appraisals=["situation nouvelle", "potentiel d’apprentissage"],
+            cognitive_appraisals=["situation nouvelle", "potentiel d'apprentissage"],
             action_tendencies=["explorer", "apprendre"],
             expression="visage neutre, posture détendue"
         )
@@ -1102,7 +1102,7 @@ class EmotionalSystem:
         if experience.regulation_strategy:
             self._learn_regulation_effectiveness(experience)
         
-        # Enregistrement de l'épisode d’apprentissage
+        # Enregistrement de l'épisode d'apprentissage
         learning_episode = {
             "timestamp": time.time(),
             "emotion": experience.primary_emotion.value,
@@ -1118,7 +1118,7 @@ class EmotionalSystem:
         """Met à jour l'intelligence émotionnelle basée sur l'expérience"""
         learning_rate = 0.01
         
-        # Facteurs d’apprentissage
+        # Facteurs d'apprentissage
         intensity_factor = experience.intensity
         novelty_factor = self._assess_emotional_novelty(experience)
         
@@ -1856,7 +1856,7 @@ class VerbalExpressionGenerator:
                 "C'est inattendu.", "Quelle surprise!", "Incroyable!", "Je n'en reviens pas!"
             ],
             EmotionalState.ANTICIPATION: [
-                "C'est intéressant.", "J'ai hâte de voir.", "Je me demande...", "L'avenir semble prometteur."
+                "C'est intéressant.", "J'ai hâte de voir.", "Je me demande ce qui va arriver.", "L'avenir semble prometteur."
             ],
             EmotionalState.TRUST: [
                 "C'est rassurant.", "Je fais confiance.", "Je me sens en sécurité.", "C'est fiable."
@@ -1969,7 +1969,7 @@ if __name__ == "__main__":
             print(f" - {key}: {value}")
     
     # Simulation du temps pour observer les changements
-    print("\n🕒 Observation des changements émotionnels...")
+    print("\n🕒 Observation des changements émotionnels en cours")
     time.sleep(5)
     
     # Statut final

@@ -64,7 +64,7 @@ class MetacogExperimenter:
                 "improve": +0.10,
                 "plan": {
                     "strategy": "spaced_review",
-                    "details": "répéter 2 prompts similaires à 1 min d’intervalle",
+                    "details": "répéter 2 prompts similaires à 1 min d'intervalle",
                 },
             },
             "recall_accuracy": {

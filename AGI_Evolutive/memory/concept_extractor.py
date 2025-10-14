@@ -37,13 +37,13 @@ BASIC_STOP = set(
     """
     a au aux avec c ce ces ça dans de des du elle elles en et eux il ils je la le les leur lui ma mais me même mes
     moi mon ne nos notre nous on ou où par pas pour qu que qui sa se ses son sur ta te tes toi ton tu un une vos votre
-    vous y d l n t s qu’ j’ c’ m’ n’ t’ s’ auj aujourd’hui puis donc alors comme si car or ni soit été être suis es est
+    vous y d l n t s qu' j' c' m' n' t' s' auj aujourd'hui puis donc alors comme si car or ni soit été être suis es est
     sont étais étions étiez étaient sera seront serai serons serez serais seraient étais étiez étaient
     """.split()
 )
 
-CAP_WORD = re.compile(r"\b[A-ZÉÈÀÂÎÔÙÛÇ][\w\-’']+\b")
-TOKEN = re.compile(r"[a-z0-9àâäéèêëîïôöùûüç’']{3,}")
+CAP_WORD = re.compile(r"\b[A-ZÉÈÀÂÎÔÙÛÇ][\w\-'']+\b")
+TOKEN = re.compile(r"[a-z0-9àâäéèêëîïôöùûüç'']{3,}")
 
 
 class ConceptExtractor:
@@ -85,7 +85,7 @@ class ConceptExtractor:
             self.paths["concept_index"],
             {
                 # concept -> stats
-                # "émotions humaines": {"count": 3, "first_seen": ts, "last_seen": ts, "sources": [ids...], "sample": "..."}
+                # "émotions humaines": {"count": 3, "first_seen": ts, "last_seen": ts, "sources": [1, 5], "sample": "texte"}
             },
         )
         self.graph = _safe_json_load(
@@ -233,7 +233,7 @@ class ConceptExtractor:
     def _extract_concepts(self, text: str) -> List[str]:
         # entités capitalisées simples (acteurs/noms propres)
         caps = [match.group(0) for match in CAP_WORD.finditer(text)]
-        caps_norm = [cap.strip("’’").lower() for cap in caps if len(cap) >= 3]
+        caps_norm = [cap.strip("''").lower() for cap in caps if len(cap) >= 3]
 
         # tokens (lower)
         lowered = text.lower()

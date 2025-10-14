@@ -16,7 +16,7 @@ def close_missing_parens_before_comment(line: str) -> str:
     return line
 
 def fix_self_paren(line: str) -> str:
-    # Fix invalid self.(...) from earlier broken patches
+    # Fix invalid self.<something> from earlier broken patches
     return re.sub(r'\bself\.\s*\(', '(', line)
 
 # ---------- Single-line conditional assignment fix ----------
@@ -42,7 +42,7 @@ def try_fix_conditional_assignment(line: str, indent: str):
     )
     return block
 
-# ---------- Multiline conditional .append({...}) fix ----------
+# ---------- Multiline conditional .append({payload}) fix ----------
 _append_start = re.compile(
     r'^(?P<indent>\s*)\((?P<var>\w+)\[(?P<q1>["\'])(?P<key>\w+)(?P=q1)\]\s+'
     r'if\s+isinstance\(\s*(?P=var)\s*,\s*dict\s*\)\s*'
@@ -50,7 +50,7 @@ _append_start = re.compile(
 )
 
 def fix_multiline_append(lines, i):
-    """If line i starts a conditional-append( ... ), capture payload until matching ')'
+    """If line i starts a conditional-append(<payload>), capture payload until matching ')'
        Returns (new_lines_list, new_index_after_block) or (None, i) if not matched.
     """
     m = _append_start.match(lines[i])
@@ -62,7 +62,7 @@ def fix_multiline_append(lines, i):
 
     # Capture payload across multiple lines until closing ')'
     payload_lines = []
-    # Inside append( ... ) we track parentheses depth
+    # Inside append(<payload>) we track parentheses depth
     depth = 1  # we are after '('
     j = i + 1
     while j < len(lines):

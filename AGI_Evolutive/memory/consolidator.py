@@ -83,7 +83,7 @@ class Consolidator:
         top_words = [word for word, _ in topics.most_common(5)]
         lessons: List[str] = []
         if errors >= 3:
-            lessons.append("Pattern d’erreurs récurrentes détecté → ajouter étape de vérification.")
+            lessons.append("Pattern d'erreurs récurrentes détecté → ajouter étape de vérification.")
         if praises >= 3:
             lessons.append("Feedback positif récurrent → consolider la stratégie actuelle.")
         if top_words:

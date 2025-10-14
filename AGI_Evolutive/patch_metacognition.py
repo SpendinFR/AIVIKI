@@ -69,7 +69,7 @@ def main():
         'getattr(self.reasoning_system, "reasoning_history", getattr(getattr(getattr(self, "cognitive_arch", getattr(self, "cognitive_architecture", None)), "reasoning", None), "reasoning_history", []))'
     )
 
-    # --- 4) Replace any deque slicing patterns [-N:] or [:N] with list(...) slicing
+    # --- 4) Replace any deque slicing patterns [-N:] or [:N] with explicit list conversions
     # Basic patterns (variable[-N:] and variable[:N])
     src = re.sub(r'(\w+)\[-(\d+):\]', r'list(\\1)[-\\2:]', src)
     src = re.sub(r'(\w+)\[:(\d+)\]', r'list(\\1)[:\\2]', src)
@@ -80,7 +80,7 @@ def main():
     src = src.replace('events[-', 'list(events)[-')
 
     if src == original:
-        print("Aucun changement nécessaire — le fichier semble déjà corrigé.")
+        print("Aucun changement nécessaire - le fichier semble déjà corrigé.")
         return
 
     # Backup then write

@@ -18,7 +18,7 @@ def close_missing_parens_before_comment(line: str) -> str:
 def fix_self_paren(line: str) -> str:
     return re.sub(r'\bself\.\s*\(', '(', line)
 
-# Match conditional .append({ ... }) starting on one line
+# Match conditional .append({payload}) starting on one line
 APP_START = re.compile(
     r'^(?P<indent>\s*)\((?P<var>\w+)\[(?P<q1>["\'])(?P<key>\w+)(?P=q1)\]\s+'
     r'if\s+isinstance\(\s*(?P=var)\s*,\s*dict\s*\)\s*'

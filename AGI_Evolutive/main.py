@@ -1,4 +1,4 @@
-# 🚀 main.py — Point d’entrée AGI Évolutive
+# 🚀 main.py - Point d'entrée AGI Évolutive
 import os, sys, glob, time, traceback
 from core.cognitive_architecture import CognitiveArchitecture
 from core.autopilot import Autopilot
@@ -15,7 +15,7 @@ Commandes disponibles :
   /help        → afficher cette aide
   /inbox       → liste les fichiers déposés dans ./inbox
   /save        → force une sauvegarde immédiate
-  /state       → montre les infos d’état globales
+  /state       → montre les infos d'état globales
   /quit        → quitte proprement
 Astuce : déposez vos fichiers (.txt, .md, .json, etc.) dans ./inbox/
          ils seront intégrés automatiquement en mémoire.
@@ -30,13 +30,13 @@ def list_inbox(inbox_dir="inbox"):
 
 def run_cli():
     print(BANNER)
-    print("Chargement de l’architecture cognitive…")
+    print("Chargement de l'architecture cognitive…")
     try:
         arch = CognitiveArchitecture()
         orc = Orchestrator(arch)
         auto = Autopilot(arch, orchestrator=orc)
     except Exception as e:
-        print("❌ Erreur d’initialisation :", e)
+        print("❌ Erreur d'initialisation :", e)
         traceback.print_exc()
         sys.exit(1)
 
@@ -87,7 +87,7 @@ def run_cli():
                 print(f"🧠 Mémoires stockées : {total_mem}")
                 print(f"⚙️  Dernière sauvegarde : {time.strftime('%H:%M:%S', time.localtime(auto.persist._last_save))}")
             except Exception as e:
-                print("⚠️ Impossible d’afficher l’état :", e)
+                print("⚠️ Impossible d'afficher l'état :", e)
             continue
 
         # ==== INTERACTION ====

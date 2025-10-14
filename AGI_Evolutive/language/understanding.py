@@ -1,6 +1,6 @@
 """
 Language v2: NLU à cadres + état de dialogue + self-ask
-- Pas d’appel LLM. Heuristiques hybrides (patterns, mots-clés, scores).
+- Pas d'appel LLM. Heuristiques hybrides (patterns, mots-clés, scores).
 - Génère des questions ciblées si incertitude élevée.
 - Retourne une frame riche + propose une réponse non-générique.
 """
@@ -22,11 +22,11 @@ class SemanticUnderstanding:
         self.arch = architecture
         self.memory = memory
         self.state = DialogueState()
-        # Mini-lexique interne pour “mémoriser” des termes
+        # Mini-lexique interne pour "mémoriser" des termes
         self.lexicon: Dict[str, Dict[str, Any]] = {}
         # Seuils
         self.min_intent_conf = 0.45
-        self.self_ask_uncertainty = 0.35  # plus c’est grand, plus l’IA posera des questions
+        self.self_ask_uncertainty = 0.35  # plus c'est grand, plus l'IA posera des questions
 
     # ---------- PUBLIC API ----------
     def parse_utterance(self, text: str, context: Optional[Dict[str, Any]]=None) -> UtteranceFrame:
@@ -38,7 +38,7 @@ class SemanticUnderstanding:
         acts = self._guess_dialogue_acts(intent, norm)
         slots, unknowns = self._extract_slots(intent, norm)
 
-        # Signaux d’incertitude
+        # Signaux d'incertitude
         uncertainty = self._compute_uncertainty(conf, unknowns, norm)
 
         # Enregistrer termes inconnus (pour apprentissage lexical)
@@ -57,12 +57,12 @@ class SemanticUnderstanding:
             needs=[]
         )
 
-        # Mettre à jour l’état de dialogue
+        # Mettre à jour l'état de dialogue
         self.state.update_with_frame(frame.to_dict())
         for t in unknowns:
             self.state.remember_unknown_term(t)
 
-        # Besoins d’info (explicites)
+        # Besoins d'info (explicites)
         frame.needs = self._derive_needs(frame)
 
         return frame
@@ -77,15 +77,15 @@ class SemanticUnderstanding:
         # 2) Questions auto-générées (self-ask) si incertitude
         questions = self._self_ask(frame)
         if not questions:
-            # Si on a encore des questions en attente dans l’état, on en ressort 1-2
+            # Si on a encore des questions en attente dans l'état, on en ressort 1-2
             questions = self.state.consume_pending_questions(2)
 
-        # 3) Micro-plan d’action (optionnel)
+        # 3) Micro-plan d'action (optionnel)
         plan = self._suggest_next_action(frame)
 
         parts = [summary]
         if questions:
-            parts.append("Pour avancer, j’ai besoin de précisions : " + " | ".join(f"• {q}" for q in questions))
+            parts.append("Pour avancer, j'ai besoin de précisions : " + " | ".join(f"• {q}" for q in questions))
         if plan:
             parts.append(f"Prochain pas (proposé) : {plan}")
 
@@ -141,7 +141,7 @@ class SemanticUnderstanding:
         unknowns: List[str] = []
 
         # termes entre guillemets → slot "quoted"
-        quoted = re.findall(r"[\"“”'’](.*?)[\"“”'’]", norm)
+        quoted = re.findall(r"[\"""''](.*?)[\"""'']", norm)
         if quoted:
             slots["quoted"] = quoted[-1]
 
@@ -150,7 +150,7 @@ class SemanticUnderstanding:
         if numbers:
             slots["numbers"] = numbers
 
-        # terme après "définis/defini/definition de ..."
+        # terme après "définis/defini/definition de <concept>"
         mdef = re.search(r"(?:d[eé]finis?|d[eé]finition\s+de)\s+([a-z0-9\-_ ]{2,50})", norm)
         if mdef:
             slots["term_to_define"] = mdef.group(1).strip()
@@ -170,7 +170,7 @@ class SemanticUnderstanding:
                 if len(t_l) <= 24:
                     unknowns.append(t_l)
 
-        # éviter l’explosion : top 3
+        # éviter l'explosion : top 3
         unknowns = unknowns[:3]
 
         return slots, unknowns
@@ -199,13 +199,13 @@ class SemanticUnderstanding:
         if frame.uncertainty >= self.self_ask_uncertainty:
             # Priorité aux inconnus
             for t in frame.unknown_terms:
-                qs.append(f"Que signifie « {t} » dans ton contexte ?")
+                qs.append(f'Que signifie "{t}" dans ton contexte ?')
             # Clarif objectifs
             if "clarifier_objectif" in frame.needs:
                 qs.append("Quel est le résultat concret que tu souhaites obtenir ?")
             if frame.intent == "request" and "quoted" in frame.slots:
-                qs.append(f"Tu veux que j’agisse sur « {frame.slots['quoted']} » précisément ?")
-        # Mémoriser 1–2 questions en attente
+                qs.append(f"Tu veux que j'agisse sur \"{frame.slots['quoted']}\" précisément ?")
+        # Mémoriser 1-2 questions en attente
         for q in qs[:2]:
             self.state.add_pending_question(q)
         return qs[:2]
@@ -223,28 +223,28 @@ class SemanticUnderstanding:
         else:
             self.lexicon[term]["last_seen"] = self.state.turn_index
 
-    # ---------- RÉSUMÉS & PLAN D’ACTION ----------
+    # ---------- RÉSUMÉS & PLAN D'ACTION ----------
     def _summarize_understanding(self, frame: UtteranceFrame) -> str:
         parts = []
         parts.append(f"Je pense que ton intention est **{frame.intent}** (confiance {frame.confidence:.2f}).")
         if frame.slots:
             expl = ", ".join(f"{k}={v}" for k, v in frame.slots.items())
-            parts.append(f"J’ai identifié: {expl}.")
+            parts.append(f"J'ai identifié: {expl}.")
         if frame.unknown_terms:
-            parts.append("J’ai des inconnus: " + ", ".join(f"« {t} »" for t in frame.unknown_terms) + ".")
+            parts.append("J'ai des inconnus: " + ", ".join(f'"{t}"' for t in frame.unknown_terms) + ".")
         if frame.needs:
             parts.append("Besoins détectés: " + ", ".join(frame.needs) + ".")
-        parts.append(f"Incertitude globale {frame.uncertainty:.2f} — je préfère vérifier avant d’agir.")
+        parts.append(f"Incertitude globale {frame.uncertainty:.2f} - je préfère vérifier avant d'agir.")
         return " ".join(parts)
 
     def _suggest_next_action(self, frame: UtteranceFrame) -> Optional[str]:
-        # Micro plan cohérent avec l’intent
+        # Micro plan cohérent avec l'intent
         if frame.intent == "greet":
             return "te saluer et te demander ton objectif prioritaire actuel."
         if frame.intent == "set_goal":
             return "créer/mettre à jour un objectif dans mon système si tu confirmes la formulation."
         if frame.intent == "request":
-            return "décomposer la demande en étapes et vérifier que j’ai toutes les contraintes nécessaires."
+            return "décomposer la demande en étapes et vérifier que j'ai toutes les contraintes nécessaires."
         if frame.intent == "ask":
             return "proposer une hypothèse courte puis demander validation."
         return None

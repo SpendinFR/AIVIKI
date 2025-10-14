@@ -47,7 +47,7 @@ class EmotionEngine:
         self.step_period = 2.0
         self._last_step = 0.0
 
-        # poids d’appréciation (appraisal)
+        # poids d'appréciation (appraisal)
         self.w_error = -0.35
         self.w_success = +0.25
         self.w_reward = +0.30
@@ -203,7 +203,7 @@ class EmotionEngine:
 
     def _compute_modulators(self) -> Dict[str, Any]:
         """
-        Traduit l’état émotionnel en modulations concrètes.
+        Traduit l'état émotionnel en modulations concrètes.
         """
         v = self.state.valence
         a = self.state.arousal
@@ -225,7 +225,7 @@ class EmotionEngine:
         if v > 0.3:
             goal_bias.update({"social_cognition": +0.10, "langage": +0.05})
 
-        # ton de langage (indices, pas d’imposition)
+        # ton de langage (indices, pas d'imposition)
         tone = {
             "warmth": float(max(0.0, min(1.0, 0.5 + 0.4 * v))),
             "energy": float(max(0.0, min(1.0, 0.3 + 0.7 * a))),
@@ -258,7 +258,7 @@ class EmotionEngine:
         except Exception:
             pass
 
-        # biais de priorités d’objectifs (optionnel)
+        # biais de priorités d'objectifs (optionnel)
         try:
             if goals and hasattr(goals, "apply_emotional_bias"):
                 goals.apply_emotional_bias(mods.get("goal_priority_bias", {}), mods.get("curiosity_gain", 0.0))

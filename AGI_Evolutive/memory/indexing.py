@@ -13,7 +13,7 @@ class InMemoryIndex:
 
     def __init__(self, encoder: Optional[TinyEncoder] = None):
         self.encoder = encoder or TinyEncoder()
-        self._docs: List[Dict[str, Any]] = []  # {"id": int, "text": str, "meta": {...}, "vec": [float]}
+        self._docs: List[Dict[str, Any]] = []  # {"id": int, "text": str, "meta": {"source": str}, "vec": List[float]}
         self._next_id: int = 1
 
     def add_document(self, text: str, meta: Optional[Dict[str, Any]] = None) -> int:

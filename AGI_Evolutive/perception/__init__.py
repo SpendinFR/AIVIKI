@@ -69,7 +69,7 @@ class PerceptionSystem:
         self.memory_system = memory_system
         self.creation_time = time.time()
 
-        # ——— LIAISONS INTER-MODULES ———
+        # --- LIAISONS INTER-MODULES ---
         if self.cognitive_architecture is not None:
             self.reasoning = getattr(self.cognitive_architecture, "reasoning", None)
             self.goals = getattr(self.cognitive_architecture, "goals", None)
@@ -828,7 +828,7 @@ class PerceptionSystem:
         return 0.8
     
     def _perceptual_learning_update(self, scene: PerceptualScene):
-        """Met à jour les mécanismes d’apprentissage perceptif"""
+        """Met à jour les mécanismes d'apprentissage perceptif"""
         
         # Apprentissage des détecteurs de caractéristiques
         for obj in scene.objects:
@@ -1033,7 +1033,7 @@ if __name__ == "__main__":
         Modality.TACTILE: {"pressure": 0.7, "temperature": 25.0}
     }
     
-    print("\n🎯 Traitement des entrées sensorielles...")
+    print("\n🎯 Traitement des entrées sensorielles en cours")
     perceptual_scene = perception_system.process_sensory_input(test_sensory_data)
     
     print(f"Scène perceptive créée avec {len(perceptual_scene.objects)} objets")

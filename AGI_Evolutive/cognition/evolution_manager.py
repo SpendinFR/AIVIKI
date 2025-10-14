@@ -69,7 +69,7 @@ class EvolutionManager:
         }
         os.makedirs(os.path.dirname(self.paths["state"]), exist_ok=True)
 
-        # liens (optionnels) vers l’archi
+        # liens (optionnels) vers l'archi
         self.arch = None
         self.memory = None
         self.metacog = None
@@ -350,7 +350,7 @@ class EvolutionManager:
                     recos.append({
                         "kind": "reflect_episode",
                         "reason": "Épisodes récents disponibles",
-                        "action": "Déclencher réflexion ciblée sur 1–2 épisodes pour extraire leçons causales."
+                        "action": "Déclencher réflexion ciblée sur 1-2 épisodes pour extraire leçons causales."
                     })
             except Exception:
                 pass
@@ -372,7 +372,7 @@ class EvolutionManager:
                 "type": "adjust_drive",
                 "target": "curiosity",
                 "delta": +0.1,
-                "rationale": "Learning rate bas sur 8 cycles — stimuler exploration."
+                "rationale": "Learning rate bas sur 8 cycles - stimuler exploration."
             })
 
         # Exemple 2 : créer macro-goal d'étude d'un concept central
@@ -452,7 +452,7 @@ class EvolutionManager:
         self.path = data_path
         self.state = {
             "cycle_count": 0,
-            "metrics_history": [],   # [{"ts":..., "intr":..,"extr":..,"learn":..,"uncert":..}]
+            "metrics_history": [],   # [{"ts": <timestamp>, "intr": <float>, "extr": <float>, "learn": <float>, "uncert": <float>}]
             "strategies": []         # notes d'ajustement
         }
         self._load()
@@ -492,7 +492,7 @@ class EvolutionManager:
         if avg_unc > 0.65:
             notes.append("Augmenter exploration (curiosity), planifier plus de questions ciblées.")
         if avg_learn < 0.45:
-            notes.append("Changer stratégie d’étude: plus d’exemples concrets et feedback.")
+            notes.append("Changer stratégie d'étude: plus d'exemples concrets et feedback.")
         if not notes:
             notes.append("Maintenir les stratégies actuelles, progression stable.")
         self.state["strategies"].append({"ts": time.time(), "notes": notes})

@@ -206,7 +206,7 @@ class EpisodicLinker:
         # fallback minimal : 1ère et dernière phrases tronquées
         first = (mems[0].get("content") or "")[:180]
         last = (mems[-1].get("content") or "")[:180]
-        return f"Épisode ({len(mems)} mémoires) — début: {first} ... fin: {last}"
+        return f"Épisode ({len(mems)} mémoires) - début: {first} · fin: {last}"
 
     # ---------- apply backlinks + emit episode mem ----------
     def _apply_backlinks(self, relations: List[Dict[str, Any]]):

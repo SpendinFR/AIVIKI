@@ -42,7 +42,7 @@ class Proposer:
             self.last_proposal_ts = now
             self.memory.add_memory({
                 "kind": "reflection",
-                "text": f"{len(proposals)} propositions d’adaptation générées",
+                "text": f"{len(proposals)} propositions d'adaptation générées",
                 "proposals": proposals,
                 "ts": now
             })
