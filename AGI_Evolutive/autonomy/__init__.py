@@ -448,3 +448,8 @@ class AutonomyManager:
         # echo console minimal
         print(f"[Autonomy] {msg}")
 
+"""Autonomy related helpers."""
+
+from .core import AutonomyCore
+
+__all__ = ["AutonomyCore"]
