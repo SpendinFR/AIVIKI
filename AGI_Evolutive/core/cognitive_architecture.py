@@ -15,6 +15,8 @@ from metacognition import MetacognitiveSystem
 from creativity import CreativitySystem
 from world_model import PhysicsEngine
 from language import SemanticUnderstanding
+from io.action_interface import ActionInterface
+from io.perception_interface import PerceptionInterface
 from cognition.reward_engine import RewardEngine
 from language.style_profiler import StyleProfiler
 from autonomy import AutonomyManager
@@ -91,6 +93,8 @@ class CognitiveArchitecture:
 
         self.telemetry.log("init", "core", {"stage": "language"})
         self.language = SemanticUnderstanding(self, self.memory)
+        self.action_interface = ActionInterface()
+        self.perception_interface = PerceptionInterface()
 
         # --- nouveaux sous-systèmes (Gap 1) ---
         self.style_profiler = StyleProfiler(persist_path="data/style_profiles.json")
@@ -118,6 +122,31 @@ class CognitiveArchitecture:
         self.last_output_text = ""
         self.last_user_id = "default"
 
+        # bind souple
+        policy = getattr(self, "policy", None)
+        self.action_interface.bind(
+            arch=self,
+            goals=getattr(self, "goals", None),
+            policy=policy,
+            memory=getattr(self, "memory", None),
+            metacog=getattr(self, "metacognition", None)
+            or getattr(self, "metacognitive_system", None)
+            or getattr(self, "metacognition", None),
+            emotions=getattr(self, "emotions", None),
+            language=getattr(self, "language", None),
+        )
+        self.perception_interface.bind(
+            arch=self,
+            memory=getattr(self, "memory", None),
+            metacog=getattr(self, "metacognition", None)
+            or getattr(self, "metacognitive_system", None)
+            or getattr(self, "metacognition", None),
+            emotions=getattr(self, "emotions", None),
+            language=getattr(self, "language", None),
+        )
+
+    def cycle(self, user_msg: Optional[str] = None, inbox_docs=None):
+        """One simple cognitive cycle: perceive -> reason -> plan -> act -> learn -> reflect."""
     def cycle(self, user_msg: Optional[str] = None, inbox_docs=None, user_id: str = "default"):
         """
         Un cycle : perçoit -> (raisonne) -> répond, avec mimétisme stylistique et
@@ -188,6 +217,34 @@ class CognitiveArchitecture:
             except Exception:
                 # fallback minimal
                 response = f"Reçu: {user_msg}"
+
+        # Ingestion du message utilisateur comme perception (si fourni)
+        if user_msg and hasattr(self, "perception_interface") and self.perception_interface:
+            try:
+                self.perception_interface.ingest_user_message(user_msg, speaker="user", meta={"channel": "cli"})
+            except Exception:
+                pass
+
+        # Step perception (scan inbox, etc.)
+        try:
+            if hasattr(self, "perception_interface") and self.perception_interface:
+                self.perception_interface.step()
+        except Exception:
+            pass
+
+        # Step émotions (mood/mode)
+        try:
+            if hasattr(self, "emotions") and self.emotions and hasattr(self.emotions, "step"):
+                self.emotions.step()
+        except Exception:
+            pass
+
+        # Step actions (exécute 0/1 action)
+        try:
+            if hasattr(self, "action_interface") and self.action_interface:
+                self.action_interface.step()
+        except Exception:
+            pass
 
         try:
             if hasattr(self, "emotions") and self.emotions:

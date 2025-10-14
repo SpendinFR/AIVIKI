@@ -202,6 +202,19 @@ class GoalSystem:
 
         print("🎯 Système de buts initialisé")
 
+    def get_next_action(self):
+        """
+        Retourne soit None, soit un dict: {"type": str, "payload": {...}, "priority": float}
+        Exemple: {"type": "learn_concept", "payload": {"concept": "émotions humaines"}, "priority": 0.6}
+        """
+        try:
+            if hasattr(self, "planner") and hasattr(self.planner, "pop_next_action"):
+                return self.planner.pop_next_action()
+            if getattr(self, "pending_actions", None):
+                return self.pending_actions.pop(0)
+        except Exception:
+            pass
+        return None
     def apply_emotional_bias(self, bias_by_domain: dict, curiosity_gain: float = 0.0):
         """
         bias_by_domain: ex {"attention": +0.15, "langage": +0.05}
