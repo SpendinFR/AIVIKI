@@ -2,6 +2,7 @@
 import os, sys, glob, time, traceback
 from core.cognitive_architecture import CognitiveArchitecture
 from core.autopilot import Autopilot
+from orchestrator import Orchestrator
 
 BANNER = """
 ╔══════════════════════════════════════════════╗
@@ -32,7 +33,8 @@ def run_cli():
     print("Chargement de l’architecture cognitive…")
     try:
         arch = CognitiveArchitecture()
-        auto = Autopilot(arch)
+        orc = Orchestrator(arch)
+        auto = Autopilot(arch, orchestrator=orc)
     except Exception as e:
         print("❌ Erreur d’initialisation :", e)
         traceback.print_exc()
