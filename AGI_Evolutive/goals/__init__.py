@@ -88,6 +88,10 @@ class GoalSystem:
         self.active_goal_id: Optional[str] = self.store.active_goal_id
         self.last_auto_proposal_at = 0.0
         self.auto_proposal_interval = 180.0  # toutes les 3 minutes par défaut
+        self.pending_actions: deque = deque()
+        # Si l'architecture dispose déjà d'un planner partagé, le réutiliser
+        # afin que les actions planifiées soient visibles par l'interface d'action.
+        self.planner = getattr(architecture, "planner", None)
 
         if len(self.store.nodes) == 0:
             root = self.store.add_goal(
@@ -210,13 +214,232 @@ class GoalSystem:
         Exemple: {"type": "learn_concept", "payload": {"concept": "émotions humaines"}, "priority": 0.6}
         """
         try:
-            if hasattr(self, "planner") and hasattr(self.planner, "pop_next_action"):
-                return self.planner.pop_next_action()
-            if getattr(self, "pending_actions", None):
-                return self.pending_actions.pop(0)
+            planner_action = self._dequeue_planner_action()
+            if planner_action:
+                return planner_action
+
+            self._ensure_pending_actions()
+            if self.pending_actions:
+                return self.pending_actions.popleft()
         except Exception:
             pass
         return None
+
+    # ---------- Gestion interne des actions ----------
+    def _dequeue_planner_action(self) -> Optional[Dict[str, Any]]:
+        planner = getattr(self, "planner", None)
+        if planner is None and hasattr(self, "arch") and hasattr(self.arch, "planner"):
+            planner = self.arch.planner
+            self.planner = planner
+        if not planner or not hasattr(planner, "pop_next_action"):
+            return None
+
+        goal_id = None
+        goal_ref = None
+        try:
+            goal_ref = self.store.get_active()
+        except Exception:
+            goal_ref = None
+
+        if goal_ref:
+            goal_id = goal_ref.id
+        else:
+            try:
+                top = self.store.topk(1, only_pending=True)
+            except Exception:
+                top = []
+            if top:
+                goal_ref = top[0]
+                goal_id = goal_ref.id
+                try:
+                    self.store.set_active(goal_id)
+                    self.active_goal_id = goal_id
+                except Exception:
+                    pass
+
+        if goal_id is None:
+            try:
+                plans = getattr(planner, "state", {}).get("plans", {})
+                if plans:
+                    goal_id = next(iter(plans))
+            except Exception:
+                goal_id = None
+
+        if goal_id is None:
+            return None
+
+        try:
+            step = planner.pop_next_action(goal_id)
+        except TypeError:
+            step = planner.pop_next_action(goal_id=goal_id)
+
+        if not step:
+            return None
+
+        priority = self._priority_from_goal(goal_ref)
+        payload = {
+            "goal_id": goal_id,
+            "step_id": step.get("id"),
+            "description": step.get("desc"),
+            "origin": "planner",
+        }
+        return {
+            "type": self._infer_action_type(step.get("desc")),
+            "payload": payload,
+            "priority": priority,
+        }
+
+    def _ensure_pending_actions(self) -> None:
+        if not hasattr(self, "pending_actions") or self.pending_actions is None:
+            self.pending_actions = deque()
+        if self.pending_actions:
+            return
+
+        goal = self._pick_next_goal()
+        if not goal:
+            return
+
+        existing = set()
+        for queued in self.pending_actions:
+            payload = queued.get("payload") or {}
+            existing.add((payload.get("goal_id"), payload.get("step_id")))
+
+        for action in self._goal_to_action_blueprints(goal):
+            payload = action.get("payload") or {}
+            key = (payload.get("goal_id"), payload.get("step_id"))
+            if key in existing:
+                continue
+            self.pending_actions.append(action)
+            existing.add(key)
+
+    def _pick_next_goal(self) -> Optional[Any]:
+        try:
+            node = self.store.get_active()
+        except Exception:
+            node = None
+        if node:
+            return node
+
+        try:
+            top = self.store.topk(1, only_pending=True)
+        except Exception:
+            top = []
+        if top:
+            chosen = top[0]
+            try:
+                self.store.set_active(chosen.id)
+                self.active_goal_id = chosen.id
+            except Exception:
+                pass
+            return chosen
+
+        if self.active_goal_id and self.active_goal_id in self.goals_database:
+            return self.goals_database[self.active_goal_id]
+
+        for gid in list(self.active_goals):
+            goal = self.goals_database.get(gid)
+            if goal:
+                self.active_goal_id = gid
+                return goal
+
+        return None
+
+    def _goal_to_action_blueprints(self, goal: Any) -> List[Dict[str, Any]]:
+        actions: List[Dict[str, Any]] = []
+        if goal is None:
+            return actions
+
+        if isinstance(goal, GoalNode):
+            meta = self.goals_database.get(goal.id)
+            action_type = self._infer_action_type(goal.description, meta)
+            base_priority = self._priority_from_goal(goal)
+            payload: Dict[str, Any] = {
+                "goal_id": goal.id,
+                "description": goal.description,
+                "criteria": list(getattr(goal, "criteria", [])),
+                "origin": "goal_system",
+            }
+            if meta:
+                payload.update({
+                    "goal_type": meta.goal_type.value if isinstance(meta.goal_type, GoalType) else meta.goal_type,
+                    "success_criteria": meta.success_criteria,
+                })
+            actions.append({
+                "type": action_type,
+                "payload": payload,
+                "priority": base_priority,
+            })
+
+            for child_id in getattr(goal, "child_ids", []):
+                child = self.store.get_goal(child_id)
+                if not child:
+                    continue
+                child_meta = self.goals_database.get(child.id)
+                child_payload: Dict[str, Any] = {
+                    "goal_id": child.id,
+                    "description": child.description,
+                    "parent_id": goal.id,
+                    "criteria": list(getattr(child, "criteria", [])),
+                    "origin": "goal_system",
+                }
+                if child_meta:
+                    child_payload.update({
+                        "goal_type": child_meta.goal_type.value if isinstance(child_meta.goal_type, GoalType) else child_meta.goal_type,
+                        "success_criteria": child_meta.success_criteria,
+                    })
+                actions.append({
+                    "type": self._infer_action_type(child.description, child_meta),
+                    "payload": child_payload,
+                    "priority": self._priority_from_goal(child),
+                })
+            return actions
+
+        if isinstance(goal, Goal):
+            actions.append({
+                "type": self._infer_action_type(goal.description, goal),
+                "payload": {
+                    "goal_id": goal.id,
+                    "description": goal.description,
+                    "goal_type": goal.goal_type.value if isinstance(goal.goal_type, GoalType) else goal.goal_type,
+                    "success_criteria": goal.success_criteria,
+                    "origin": "goal_system",
+                },
+                "priority": self._priority_from_goal(goal),
+            })
+        return actions
+
+    def _priority_from_goal(self, goal: Any) -> float:
+        try:
+            if isinstance(goal, GoalNode):
+                return float(max(0.0, min(1.0, getattr(goal, "priority", 0.5))))
+            if isinstance(goal, Goal):
+                mapping = {
+                    PriorityLevel.CRITICAL: 0.95,
+                    PriorityLevel.HIGH: 0.8,
+                    PriorityLevel.MEDIUM: 0.6,
+                    PriorityLevel.LOW: 0.4,
+                    PriorityLevel.BACKGROUND: 0.2,
+                }
+                return float(mapping.get(goal.priority, 0.5))
+        except Exception:
+            pass
+        return 0.5
+
+    def _infer_action_type(self, description: Optional[str], goal_meta: Optional[Any] = None) -> str:
+        if isinstance(goal_meta, Goal):
+            gtype = goal_meta.goal_type
+            if isinstance(gtype, GoalType) and gtype in {GoalType.COGNITIVE, GoalType.GROWTH, GoalType.EXPLORATION}:
+                return "learn_concept"
+
+        desc = (description or "").lower()
+        learning_keywords = ("apprendre", "learn", "comprendre", "étudier", "analyse", "analyser")
+        memory_keywords = ("mémoire", "memory", "souvenir", "retrouve", "recherche", "history")
+
+        if any(k in desc for k in learning_keywords):
+            return "learn_concept"
+        if any(k in desc for k in memory_keywords):
+            return "search_memory"
+        return "reflect"
     def apply_emotional_bias(self, bias_by_domain: dict, curiosity_gain: float = 0.0):
         """
         bias_by_domain: ex {"attention": +0.15, "langage": +0.05}
