@@ -1,5 +1,3 @@
-from .understanding import SemanticUnderstanding
-
 # language/__init__.py
 """
 Module Language — auto‑contenu, optimisé et complet pour ton AGI.

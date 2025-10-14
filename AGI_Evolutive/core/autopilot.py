@@ -23,6 +23,8 @@ class Autopilot:
         self,
         arch,
         project_root: Optional[str] = None,
+        orchestrator: Optional[Orchestrator] = None,
+    ):
         orchestrator: Optional["Orchestrator"] = None,
     ) -> None:
         self.arch = arch
@@ -33,6 +35,16 @@ class Autopilot:
         self.ingest = DocumentIngest(arch, self.inbox_dir)
         self.persist = PersistenceManager(arch)
         self.questions = QuestionManager(arch)
+        self.orchestrator = orchestrator or Orchestrator(arch)
+        # charger un état si disponible
+        self.persist.load()
+
+    def step(self, user_msg: Optional[str] = None):
+        # 1) intégrer docs nouveaux
+        self.ingest.integrate()
+        # 2) appel d'un cycle cognitif
+        out = self.arch.cycle(user_msg=user_msg, inbox_docs=None)
+        # 2b) orchestrateur étendu
 
         if orchestrator is not None:
             self.orchestrator = orchestrator
@@ -72,6 +84,8 @@ class Autopilot:
             try:
                 self.orchestrator.run_once_cycle(user_msg=user_msg)
             except Exception:
+                # L'orchestrateur est auxiliaire : une erreur ne doit pas
+                # interrompre la boucle principale.
                 pass
 
         # 4) Maybe create follow-up questions for the user.
