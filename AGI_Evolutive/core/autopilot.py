@@ -4,16 +4,11 @@
 from __future__ import annotations
 
 import os
-from typing import Optional
+from typing import Any, Optional
 
 from .document_ingest import DocumentIngest
 from .persistence import PersistenceManager
 from .question_manager import QuestionManager
-
-try:  # Orchestrator is optional when running minimal setups.
-    from orchestrator import Orchestrator  # type: ignore
-except Exception:  # pragma: no cover - defensive import guard
-    Orchestrator = None  # type: ignore
 
 
 class Autopilot:
@@ -23,7 +18,7 @@ class Autopilot:
         self,
         arch,
         project_root: Optional[str] = None,
-        orchestrator: Optional[Orchestrator] = None,
+        orchestrator: Optional[Any] = None,
     ) -> None:
         self.arch = arch
         self.project_root = project_root or os.path.abspath(
@@ -34,15 +29,7 @@ class Autopilot:
         self.persist = PersistenceManager(arch)
         self.questions = QuestionManager(arch)
 
-        if orchestrator is not None:
-            self.orchestrator = orchestrator
-        elif Orchestrator is not None:
-            try:
-                self.orchestrator = Orchestrator(arch)
-            except Exception:
-                self.orchestrator = None
-        else:
-            self.orchestrator = None
+        self.orchestrator = orchestrator
 
         try:
             self.persist.load()
