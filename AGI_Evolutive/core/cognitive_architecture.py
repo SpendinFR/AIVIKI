@@ -13,6 +13,7 @@ from metacognition import MetacognitiveSystem
 from creativity import CreativitySystem
 from world_model import PhysicsEngine
 from language import SemanticUnderstanding
+from autonomy import AutonomyManager
 
 
 class CognitiveArchitecture:
@@ -30,6 +31,14 @@ class CognitiveArchitecture:
         )
         self.world_model = PhysicsEngine(self, self.memory)
         self.language = SemanticUnderstanding(self, self.memory)
+        self.autonomy = AutonomyManager(
+            architecture=self,
+            goal_system=self.goals,
+            metacognition=self.metacognition,
+            memory=self.memory,
+            perception=self.perception,
+            language=self.language
+        )
         self.global_activation = 0.5
         self.start_time = time.time()
 
@@ -43,6 +52,12 @@ class CognitiveArchitecture:
                 response = f"Reçu: {parsed.surface_form if hasattr(parsed, 'surface_form') else user_msg}"
             except Exception:
                 response = f"Reçu: {user_msg}"
+        try:
+            if hasattr(self, "autonomy") and self.autonomy:
+                self.autonomy.tick()
+        except Exception as _e:
+            print(f"[Autonomy] ⚠️ Tick error: {_e}")
+
         return response or "OK"
 
     # ----------------------------------------------------------------------
