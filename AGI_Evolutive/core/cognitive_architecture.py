@@ -91,6 +91,47 @@ class CognitiveArchitecture:
         self.global_activation = 0.5
         self.start_time = time.time()
 
+    def cycle(self, user_msg: Optional[str]=None, inbox_docs=None):
+        """
+        Une boucle cognitive simple:
+        - Percevoir / intégrer (si nécessaire)
+        - Comprendre (Language v2)
+        - Raisonner sommairement (si branché)
+        - Répondre de façon introspective (self-ask si incertain)
+        - (Optionnel) Apprendre / journaliser
+        """
+        response = None
+
+        # Exemple d’intégration future: perception des inbox_docs
+        # if inbox_docs: self.perception.ingest(inbox_docs)
+
+        if user_msg:
+            try:
+                # Language v2 -> réponse introspective
+                response = self.language.respond(user_msg, context={
+                    "global_activation": getattr(self, "global_activation", 0.5),
+                })
+
+                # Journalisation épisodique (si ton MemorySystem a une API ; sinon no-op)
+                try:
+                    if hasattr(self.memory, "store_interaction"):
+                        self.memory.store_interaction({
+                            "ts": time.time(),
+                            "user": user_msg,
+                            "agent": response,
+                            "lang_state": getattr(self.language.state, "to_dict", lambda: {})(),
+                        })
+                except Exception:
+                    pass
+
+            except Exception:
+                # fallback minimal
+                response = f"Reçu: {user_msg}"
+        else:
+            # Pas de message utilisateur: on peut retourner un statut simple
+            response = "OK"
+
+        return response or "OK"
         # Autonomie idle
         self.autonomy = AutonomyCore(self, self.logger, self.goal_dag)
         self.autonomy.start()

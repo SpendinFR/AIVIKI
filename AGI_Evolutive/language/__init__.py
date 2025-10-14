@@ -1,3 +1,4 @@
+from .understanding import SemanticUnderstanding
 
 # language/__init__.py
 """
