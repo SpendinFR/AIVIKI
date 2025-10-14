@@ -288,12 +288,24 @@ class ConceptExtractor:
                 # extrait court pour contexte
                 entry["sample"] = text[:240]
             self.concept_index[concept] = entry
-            # node graph
+
+        # persister l'index des concepts
+        with open(self.paths["concept_index"], "w", encoding="utf-8") as f:
+            json.dump(self.concept_index, f, ensure_ascii=False, indent=2)
+
+    def _update_graph(self, top: List[Tuple[str, float]]) -> None:
+        """Met à jour le graphe de cooccurrence pour les concepts détectés."""
+
+        if not top:
+            return
+
+        # mise à jour des noeuds
+        for concept, _ in top:
             node = self.graph["nodes"].get(concept, {"count": 0})
             node["count"] += 1
             self.graph["nodes"][concept] = node
 
-        # edges (co-occur)
+        # mise à jour des arêtes (co-occurrences)
         concepts = [concept for concept, _ in top]
         for i in range(len(concepts)):
             for j in range(i + 1, len(concepts)):
@@ -302,9 +314,7 @@ class ConceptExtractor:
                 edge["w"] += 1.0
                 self.graph["edges"][key] = edge
 
-        # persister
-        with open(self.paths["concept_index"], "w", encoding="utf-8") as f:
-            json.dump(self.concept_index, f, ensure_ascii=False, indent=2)
+        # persister l'état du graphe
         with open(self.paths["concept_graph"], "w", encoding="utf-8") as f:
             json.dump(self.graph, f, ensure_ascii=False)
 
