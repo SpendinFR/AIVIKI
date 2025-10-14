@@ -15,6 +15,7 @@ from metacognition import MetacognitiveSystem
 from creativity import CreativitySystem
 from world_model import PhysicsEngine
 from language import SemanticUnderstanding
+from autonomy import AutonomyManager
 
 from runtime.logger import JSONLLogger
 from runtime.response import format_agent_reply, ensure_contract
@@ -86,6 +87,14 @@ class CognitiveArchitecture:
 
         self.telemetry.log("init", "core", {"stage": "language"})
         self.language = SemanticUnderstanding(self, self.memory)
+        self.autonomy = AutonomyManager(
+            architecture=self,
+            goal_system=self.goals,
+            metacognition=self.metacognition,
+            memory=self.memory,
+            perception=self.perception,
+            language=self.language
+        )
 
         # Etat global
         self.global_activation = 0.5
@@ -134,6 +143,11 @@ class CognitiveArchitecture:
             except Exception:
                 # fallback minimal
                 response = f"Reçu: {user_msg}"
+        try:
+            if hasattr(self, "autonomy") and self.autonomy:
+                self.autonomy.tick()
+        except Exception as _e:
+            print(f"[Autonomy] ⚠️ Tick error: {_e}")
         else:
             # Pas de message utilisateur: on peut retourner un statut simple
             response = "OK"
