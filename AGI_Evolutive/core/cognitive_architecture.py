@@ -13,6 +13,8 @@ from metacognition import MetacognitiveSystem
 from creativity import CreativitySystem
 from world_model import PhysicsEngine
 from language import SemanticUnderstanding
+from cognition.reward_engine import RewardEngine
+from language.style_profiler import StyleProfiler
 
 
 class CognitiveArchitecture:
@@ -30,20 +32,77 @@ class CognitiveArchitecture:
         )
         self.world_model = PhysicsEngine(self, self.memory)
         self.language = SemanticUnderstanding(self, self.memory)
+
+        # --- nouveaux sous-systèmes (Gap 1) ---
+        self.style_profiler = StyleProfiler(persist_path="data/style_profiles.json")
+        self.reward_engine = RewardEngine(
+            architecture=self,
+            memory=self.memory,
+            emotions=self.emotions,
+            goals=self.goals,
+            metacognition=self.metacognition,
+            persist_dir="data",
+        )
+
         self.global_activation = 0.5
         self.start_time = time.time()
+        self.last_output_text = ""
+        self.last_user_id = "default"
 
-    def cycle(self, user_msg: Optional[str] = None, inbox_docs=None):
-        """One simple cognitive cycle: perceive -> reason -> plan -> act -> learn -> reflect."""
+    def cycle(self, user_msg: Optional[str] = None, inbox_docs=None, user_id: str = "default"):
+        """
+        Un cycle : perçoit -> (raisonne) -> répond, avec mimétisme stylistique et
+        récompense extrinsèque dérivée du feedback utilisateur.
+        """
+        self.last_user_id = user_id or "default"
+
+        if user_msg:
+            try:
+                self.style_profiler.observe(self.last_user_id, user_msg)
+            except Exception:
+                pass
+
+            try:
+                context = {
+                    "last_assistant_output": self.last_output_text,
+                    "active_goal_id": getattr(self.goals, "active_goal_id", None),
+                }
+                self.reward_engine.ingest_user_message(
+                    self.last_user_id, user_msg, context=context, channel="chat"
+                )
+            except Exception:
+                pass
+
         response = None
         if user_msg:
-            # Use language understanding to parse, then use generation to reply
             try:
                 parsed = self.language.parse_utterance(user_msg, context={})
                 response = f"Reçu: {parsed.surface_form if hasattr(parsed, 'surface_form') else user_msg}"
             except Exception:
                 response = f"Reçu: {user_msg}"
-        return response or "OK"
+
+        try:
+            response = self.style_profiler.rewrite_to_match(response or "OK", self.last_user_id)
+        except Exception:
+            pass
+
+        self.last_output_text = response or "OK"
+
+        try:
+            if self.memory and hasattr(self.memory, "add_memory"):
+                self.memory.add_memory(
+                    "dialog_turn",
+                    {
+                        "t": time.time(),
+                        "user_id": self.last_user_id,
+                        "user_msg": user_msg,
+                        "assistant_msg": self.last_output_text,
+                    },
+                )
+        except Exception:
+            pass
+
+        return self.last_output_text
 
     # ----------------------------------------------------------------------
     # ✅ Méthode demandée par la métacognition : état global du système
