@@ -32,6 +32,7 @@ class CognitiveArchitecture:
         self.language = SemanticUnderstanding(self, self.memory)
         self.global_activation = 0.5
         self.start_time = time.time()
+        self.last_output_text = ""
 
     def cycle(self, user_msg: Optional[str] = None, inbox_docs=None):
         """One simple cognitive cycle: perceive -> reason -> plan -> act -> learn -> reflect."""
@@ -43,7 +44,16 @@ class CognitiveArchitecture:
                 response = f"Reçu: {parsed.surface_form if hasattr(parsed, 'surface_form') else user_msg}"
             except Exception:
                 response = f"Reçu: {user_msg}"
-        return response or "OK"
+        self.last_output_text = response or "OK"
+
+        try:
+            if hasattr(self, "goals") and self.goals:
+                # on alimente le moteur d'objectifs à chaque tour
+                self.goals.step(user_msg=user_msg)
+        except Exception:
+            pass
+
+        return self.last_output_text
 
     # ----------------------------------------------------------------------
     # ✅ Méthode demandée par la métacognition : état global du système
