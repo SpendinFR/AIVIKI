@@ -320,7 +320,11 @@ class AutonomyManager:
             if score > best_score:
                 best_score = score
                 best_idx = i
-        return self.agenda.pop(best_idx) if best_idx is not None else None
+        if best_idx is None:
+            return None
+        best_item = self.agenda[best_idx]
+        del self.agenda[best_idx]
+        return best_item
 
     def _agenda_is_poor(self) -> bool:
         """Heuristique: pas d’items 'intake'/'learning'/'alignment' à priorité >= 0.6"""
