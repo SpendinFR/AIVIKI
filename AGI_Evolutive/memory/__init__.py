@@ -13,6 +13,7 @@ from enum import Enum
 import heapq
 import json
 import hashlib
+from .retrieval import MemoryRetrieval
 
 class MemoryType(Enum):
     """Types de mémoire dans le système"""
@@ -64,6 +65,11 @@ class MemorySystem:
     def __init__(self, cognitive_architecture=None):
         self.cognitive_architecture = cognitive_architecture
         self.creation_time = time.time()
+
+        try:
+            self.retrieval = MemoryRetrieval()
+        except Exception:
+            self.retrieval = None
 
         # ——— LIAISONS INTER-MODULES ———
         if self.cognitive_architecture is not None:
@@ -160,6 +166,30 @@ class MemorySystem:
         self._initialize_innate_memories()
         
         print("💾 Système de mémoire initialisé")
+
+    def store_interaction(self, record: Dict[str, Any]):
+        """
+        Enregistre une interaction pour retrieval.
+        record attendu: {"user": str, "agent": str, ...}
+        """
+        if not getattr(self, "retrieval", None):
+            return
+        try:
+            user = str(record.get("user", ""))
+            agent = str(record.get("agent", ""))
+            extra = {k: v for k, v in record.items() if k not in ("user", "agent")}
+            self.retrieval.add_interaction(user=user, agent=agent, extra=extra)
+        except Exception:
+            pass
+
+    def ingest_document(self, text: str, title: Optional[str] = None, source: Optional[str] = None):
+        """Ajoute un document arbitraire dans l’index."""
+        if not getattr(self, "retrieval", None):
+            return
+        try:
+            self.retrieval.add_document(text=text, title=title, source=source)
+        except Exception:
+            pass
     
     def _initialize_innate_memories(self):
         """Initialise les mémoires innées et fondamentales"""

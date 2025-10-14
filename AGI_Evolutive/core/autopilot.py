@@ -16,6 +16,7 @@ from orchestrator import Orchestrator
 
 class Autopilot:
     def __init__(self, arch, project_root: Optional[str] = None, orchestrator: Optional[Orchestrator] = None):
+    def __init__(self, arch, project_root: Optional[str] = None, orchestrator=None):
         self.arch = arch
         self.project_root = project_root or os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
         self.inbox_dir = os.path.join(self.project_root, "inbox")
@@ -23,6 +24,7 @@ class Autopilot:
         self.persist = PersistenceManager(arch)
         self.questions = QuestionManager(arch)
         self.orchestrator = orchestrator or Orchestrator(arch)
+        self.orchestrator = orchestrator
         # charger un état si disponible
         self.persist.load()
 
@@ -34,6 +36,12 @@ class Autopilot:
         # 2b) orchestrateur étendu
         if self.orchestrator is not None:
             self.orchestrator.run_once_cycle(user_msg=user_msg)
+        # 2b) orchestrateur global
+        if self.orchestrator is not None:
+            try:
+                self.orchestrator.run_once_cycle(user_msg=user_msg)
+            except Exception:
+                pass
         # 3) générer éventuellement des questions
         self.questions.maybe_generate_questions()
         # 4) autosave
