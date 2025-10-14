@@ -137,9 +137,14 @@ class SemanticUnderstanding:
         if len(self.history) > 200:
             self.history.pop(0)
         # informer la méta du niveau d’incertitude
-        if getattr(self, "metacognition", None) and hasattr(self.metacognition, "register_language_parse"):
+        if getattr(self, "metacognition", None) and hasattr(
+            self.metacognition, "register_language_parse"
+        ):
             try:
-                self.metacognition.register_language_parse(utt.frame.confidence if utt.frame else 0.3, prag.get("uncertainty", 0.0))
+                self.metacognition.register_language_parse(
+                    utt.frame.confidence if utt.frame else 0.3,
+                    prag.get("uncertainty", 0.0),
+                )
             except Exception:
                 pass
         return utt
