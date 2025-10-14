@@ -1,3 +1,4 @@
+"""High-level cognition helpers (homeostasis, planning, metacognition, etc.)."""
 """Cognition subpackage exposing planner, homeostasis and proposer."""
 
 from .planner import Planner  # noqa: F401
