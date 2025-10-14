@@ -39,10 +39,19 @@ class CognitiveArchitecture:
         if user_msg:
             # Use language understanding to parse, then use generation to reply
             try:
-                parsed = self.language.parse_utterance(user_msg, context={})
+                style = getattr(self.language, "style_hints", {})
+                parsed = self.language.parse_utterance(user_msg, context={"style_hints": style})
                 response = f"Reçu: {parsed.surface_form if hasattr(parsed, 'surface_form') else user_msg}"
             except Exception:
                 response = f"Reçu: {user_msg}"
+
+        try:
+            if hasattr(self, "emotions") and self.emotions:
+                # met à jour mood + dispatch modulateurs
+                self.emotions.step()
+        except Exception:
+            pass
+
         return response or "OK"
 
     # ----------------------------------------------------------------------
