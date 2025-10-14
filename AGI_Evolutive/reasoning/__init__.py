@@ -242,7 +242,8 @@ class ReasoningSystem:
         # Historique structuré (attendu par la méta)
         self.reasoning_history: Dict[str, Any] = {
             "recent_inferences": deque(maxlen=200),
-            "learning_trajectory": deque(maxlen=500),
+            # Trajectoire sur liste afin que slicing reste supporté par métacognition
+            "learning_trajectory": [],
             "errors": deque(maxlen=200),
             "stats": {
                 "n_episodes": 0,
@@ -437,8 +438,10 @@ class ReasoningSystem:
         st["strategy_preferences"][strat] = st["strategy_preferences"].get(strat, 0.0) + 0.05
 
     def _learn(self, final_conf: float, strategy: str) -> None:
-        traj = self.reasoning_history["learning_trajectory"]
+        traj: List[Dict[str, Any]] = self.reasoning_history["learning_trajectory"]
         traj.append({"t": time.time(), "confidence": float(final_conf), "strategy": strategy})
+        if len(traj) > 500:
+            del traj[0]
 
     def _make_readable_summary(
         self,
