@@ -15,6 +15,8 @@ from metacognition import MetacognitiveSystem
 from creativity import CreativitySystem
 from world_model import PhysicsEngine
 from language import SemanticUnderstanding
+from memory.concept_extractor import ConceptExtractor
+from memory.episodic_linker import EpisodicLinker
 from io.action_interface import ActionInterface
 from io.perception_interface import PerceptionInterface
 from cognition.reward_engine import RewardEngine
@@ -93,6 +95,23 @@ class CognitiveArchitecture:
 
         self.telemetry.log("init", "core", {"stage": "language"})
         self.language = SemanticUnderstanding(self, self.memory)
+        self.concept_extractor = ConceptExtractor(data_dir="data")
+        self.episodic_linker = EpisodicLinker(data_dir="data")
+
+        self.concept_extractor.bind(
+            memory=getattr(self, "memory", None),
+            emotions=getattr(self, "emotions", None),
+            metacog=getattr(self, "metacognition", None)
+            or getattr(self, "metacognitive_system", None),
+            language=getattr(self, "language", None),
+        )
+        self.episodic_linker.bind(
+            memory=getattr(self, "memory", None),
+            language=getattr(self, "language", None),
+            metacog=getattr(self, "metacognition", None)
+            or getattr(self, "metacognitive_system", None),
+            emotions=getattr(self, "emotions", None),
+        )
         self.action_interface = ActionInterface()
         self.perception_interface = PerceptionInterface()
 
@@ -217,6 +236,18 @@ class CognitiveArchitecture:
             except Exception:
                 # fallback minimal
                 response = f"Reçu: {user_msg}"
+        try:
+            if getattr(self, "concept_extractor", None):
+                self.concept_extractor.step()
+        except Exception:
+            pass
+
+        try:
+            if getattr(self, "episodic_linker", None):
+                self.episodic_linker.step()
+        except Exception:
+            pass
+
 
         # Ingestion du message utilisateur comme perception (si fourni)
         if user_msg and hasattr(self, "perception_interface") and self.perception_interface:
