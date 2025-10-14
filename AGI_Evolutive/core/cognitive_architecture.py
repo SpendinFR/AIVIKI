@@ -59,6 +59,8 @@ class CognitiveArchitecture:
         # Instanciation des sous-systèmes avec télémétrie détaillée
         self.telemetry.log("init", "core", {"stage": "memory"})
         self.memory = MemorySystem(self)
+        from memory.semantic_manager import SemanticMemoryManager  # local import to avoid cycles during init
+        self.memory.semantic = SemanticMemoryManager(self.memory, architecture=self)
 
         self.telemetry.log("init", "core", {"stage": "perception"})
         self.perception = PerceptionSystem(self, self.memory)
@@ -183,6 +185,13 @@ class CognitiveArchitecture:
             except Exception:
                 # fallback minimal
                 response = f"Reçu: {user_msg}"
+
+        try:
+            if hasattr(self.memory, "semantic") and self.memory.semantic:
+                self.memory.semantic.step()
+        except Exception:
+            pass
+
         self.last_output_text = response or "OK"
 
         try:
