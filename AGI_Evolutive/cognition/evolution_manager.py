@@ -1,4 +1,8 @@
-import os, json, time, statistics
+import json
+import os
+import statistics
+import threading
+import time
 from typing import Any, Dict, List, Optional
 
 
@@ -94,6 +98,7 @@ class EvolutionManager:
             "risk_flags": [],  # ex: "regression_learning", "high_fatigue"
         })
         self.horizon = horizon_cycles
+        self._state_lock = threading.RLock()
 
     # ---------- binding ----------
     def bind(self, architecture=None, memory=None, metacog=None,
@@ -112,41 +117,42 @@ class EvolutionManager:
         Capture l'état courant des métriques utiles, loggue en JSONL, met à jour l'état.
         Appelle ensuite evaluate_cycle() pour calculer tendances + risques.
         """
-        cycle_id = self.state["last_cycle_id"] + 1
-        snap = {
-            "t": _now(),
-            "cycle_id": cycle_id,
-            "metrics": self._collect_metrics_snapshot(),
-            "tags": extra_tags or {}
-        }
-        _append_jsonl(self.paths["cycles"], snap)
+        with self._state_lock:
+            cycle_id = self.state["last_cycle_id"] + 1
+            snap = {
+                "t": _now(),
+                "cycle_id": cycle_id,
+                "metrics": self._collect_metrics_snapshot(),
+                "tags": extra_tags or {}
+            }
+            _append_jsonl(self.paths["cycles"], snap)
 
-        # pousser les séries
-        hist = self.state["history"]
-        m = snap["metrics"]
-        hist["reasoning_speed"].append(m.get("reasoning_speed", 0.0))
-        hist["reasoning_confidence"].append(m.get("reasoning_confidence", 0.0))
-        hist["learning_rate"].append(m.get("learning_rate", 0.0))
-        hist["recall_accuracy"].append(m.get("recall_accuracy", 0.0))
-        hist["cognitive_load"].append(m.get("cognitive_load", 0.0))
-        hist["fatigue"].append(m.get("fatigue", 0.0))
-        hist["error_rate"].append(m.get("error_rate", 0.0))
-        hist["goals_progress"].append(m.get("goals_progress", 0.0))
-        hist["affect_valence"].append(m.get("affect_valence", 0.0))
+            # pousser les séries
+            hist = self.state["history"]
+            m = snap["metrics"]
+            hist["reasoning_speed"].append(m.get("reasoning_speed", 0.0))
+            hist["reasoning_confidence"].append(m.get("reasoning_confidence", 0.0))
+            hist["learning_rate"].append(m.get("learning_rate", 0.0))
+            hist["recall_accuracy"].append(m.get("recall_accuracy", 0.0))
+            hist["cognitive_load"].append(m.get("cognitive_load", 0.0))
+            hist["fatigue"].append(m.get("fatigue", 0.0))
+            hist["error_rate"].append(m.get("error_rate", 0.0))
+            hist["goals_progress"].append(m.get("goals_progress", 0.0))
+            hist["affect_valence"].append(m.get("affect_valence", 0.0))
 
-        # limiter l'horizon
-        for k in hist.keys():
-            if len(hist[k]) > self.horizon:
-                hist[k] = hist[k][-self.horizon:]
+            # limiter l'horizon
+            for k in hist.keys():
+                if len(hist[k]) > self.horizon:
+                    hist[k] = hist[k][-self.horizon:]
 
-        self.state["last_cycle_id"] = cycle_id
+            self.state["last_cycle_id"] = cycle_id
 
-        # évaluation et recommandations
-        eval_out = self.evaluate_cycle()
-        dash = self._make_dashboard_snapshot()
-        _safe_write_json(self.paths["dashboard"], dash)
-        _safe_write_json(self.paths["state"], self.state)
-        return {"snapshot": snap, "evaluation": eval_out, "dashboard": dash}
+            # évaluation et recommandations
+            eval_out = self.evaluate_cycle()
+            dash = self._make_dashboard_snapshot()
+            _safe_write_json(self.paths["dashboard"], dash)
+            _safe_write_json(self.paths["state"], self.state)
+            return {"snapshot": snap, "evaluation": eval_out, "dashboard": dash}
 
     # ---------- collect ----------
     def _collect_metrics_snapshot(self) -> Dict[str, float]:
@@ -234,50 +240,51 @@ class EvolutionManager:
         """
         Analyse tendances courtes et longues; pose des flags de risque; émet des recommandations.
         """
-        hist = self.state["history"]
-        eval_out = {
-            "t": _now(),
-            "rolling": {
-                "speed_5": _rolling(hist["reasoning_speed"], 5),
-                "learn_5": _rolling(hist["learning_rate"], 5),
-                "conf_5": _rolling(hist["reasoning_confidence"], 5),
-                "recall_5": _rolling(hist["recall_accuracy"], 5),
-                "fatigue_5": _rolling(hist["fatigue"], 5),
-                "load_5": _rolling(hist["cognitive_load"], 5),
-                "errors_20": _rolling(hist["error_rate"], 20),
-            },
-            "flags": [],
-            "recommendations": []
-        }
+        with self._state_lock:
+            hist = self.state["history"]
+            eval_out = {
+                "t": _now(),
+                "rolling": {
+                    "speed_5": _rolling(hist["reasoning_speed"], 5),
+                    "learn_5": _rolling(hist["learning_rate"], 5),
+                    "conf_5": _rolling(hist["reasoning_confidence"], 5),
+                    "recall_5": _rolling(hist["recall_accuracy"], 5),
+                    "fatigue_5": _rolling(hist["fatigue"], 5),
+                    "load_5": _rolling(hist["cognitive_load"], 5),
+                    "errors_20": _rolling(hist["error_rate"], 20),
+                },
+                "flags": [],
+                "recommendations": []
+            }
 
-        r = eval_out["rolling"]
-        # flags
-        if r["learn_5"] < 0.35 and r["conf_5"] < 0.45:
-            eval_out["flags"].append("learning_regression")
-        if r["fatigue_5"] > 0.7:
-            eval_out["flags"].append("high_fatigue")
-        if r["load_5"] > 0.8:
-            eval_out["flags"].append("overload")
-        if r["errors_20"] > 0.05:
-            eval_out["flags"].append("high_error_rate")
+            r = eval_out["rolling"]
+            # flags
+            if r["learn_5"] < 0.35 and r["conf_5"] < 0.45:
+                eval_out["flags"].append("learning_regression")
+            if r["fatigue_5"] > 0.7:
+                eval_out["flags"].append("high_fatigue")
+            if r["load_5"] > 0.8:
+                eval_out["flags"].append("overload")
+            if r["errors_20"] > 0.05:
+                eval_out["flags"].append("high_error_rate")
 
-        # recos : stratégie & expérimentation
-        eval_out["recommendations"] += self._strategy_recommendations(r)
-        eval_out["recommendations"] += self._exploration_recommendations()
+            # recos : stratégie & expérimentation
+            eval_out["recommendations"] += self._strategy_recommendations(r)
+            eval_out["recommendations"] += self._exploration_recommendations()
 
-        # persiste recos + flags en JSONL
-        _append_jsonl(self.paths["reco"], {
-            "t": eval_out["t"],
-            "cycle_id": self.state["last_cycle_id"],
-            "flags": eval_out["flags"],
-            "recommendations": eval_out["recommendations"]
-        })
+            # persiste recos + flags en JSONL
+            _append_jsonl(self.paths["reco"], {
+                "t": eval_out["t"],
+                "cycle_id": self.state["last_cycle_id"],
+                "flags": eval_out["flags"],
+                "recommendations": eval_out["recommendations"]
+            })
 
-        # ajoute aux risk_flags si nouveau
-        for f in eval_out["flags"]:
-            if f not in self.state["risk_flags"]:
-                self.state["risk_flags"].append(f)
-        return eval_out
+            # ajoute aux risk_flags si nouveau
+            for f in eval_out["flags"]:
+                if f not in self.state["risk_flags"]:
+                    self.state["risk_flags"].append(f)
+            return eval_out
 
     def _strategy_recommendations(self, r: Dict[str, float]) -> List[Dict[str, Any]]:
         recos = []
