@@ -97,23 +97,25 @@ class GoalSystem:
                 value=0.8,
                 competence=0.5,
                 curiosity=0.7,
-        self.dag = GoalDAG()
-        # noeud racine
-        self.dag.add_goal(
-            "root",
-            description="Racine des objectifs auto-générés",
-            value=0.8,
-            competence=0.5,
-            success_criteria={"type": "hierarchical"}
-        )
-        # exemple de macro-goal de départ (tu peux en créer d'autres à chaud)
-        self.dag.add_subgoal(
-            "root", "understand_humans",
-            description="Comprendre les humains (actes de langage, intentions, feedback)",
-            value=0.9, competence=0.4,
-            success_criteria={"evidence": "capable d'expliquer une interaction en 3 actes"}
-        )
-        self.dag.save()
+        self.dag = GoalDAG.load()
+        if not self.dag.nodes or "root" not in self.dag.nodes:
+            # noeud racine
+            self.dag.add_goal(
+                "root",
+                description="Racine des objectifs auto-générés",
+                value=0.8,
+                competence=0.5,
+                success_criteria={"type": "hierarchical"}
+            )
+            # exemple de macro-goal de départ (tu peux en créer d'autres à chaud)
+            if "understand_humans" not in self.dag.nodes:
+                self.dag.add_subgoal(
+                    "root", "understand_humans",
+                    description="Comprendre les humains (actes de langage, intentions, feedback)",
+                    value=0.9, competence=0.4,
+                    success_criteria={"evidence": "capable d'expliquer une interaction en 3 actes"}
+                )
+            self.dag.save()
 
         # ——— LIAISONS INTER-MODULES ———
         if self.cognitive_architecture is not None:
