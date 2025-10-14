@@ -1,8 +1,13 @@
 # 🚀 main.py - Point d'entrée AGI Évolutive
-import os, sys, glob, time, traceback
-from core.cognitive_architecture import CognitiveArchitecture
-from core.autopilot import Autopilot
-from orchestrator import Orchestrator
+import glob
+import os
+import sys
+import time
+import traceback
+
+from AGI_Evolutive.core.autopilot import Autopilot
+from AGI_Evolutive.core.cognitive_architecture import CognitiveArchitecture
+from AGI_Evolutive.orchestrator import Orchestrator
 
 BANNER = """
 ╔══════════════════════════════════════════════╗

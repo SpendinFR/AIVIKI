@@ -1,31 +1,31 @@
 import time
 from typing import Any, Dict, Optional
 
-from autonomy import AutonomyManager
-from cognition.evolution_manager import EvolutionManager
-from cognition.reward_engine import RewardEngine
-from core.telemetry import Telemetry
-from creativity import CreativitySystem
-from emotions import EmotionalSystem
-from goals import GoalSystem
-from goals.dag_store import GoalDAG
-from io.action_interface import ActionInterface
-from io.perception_interface import PerceptionInterface
-from language import SemanticUnderstanding
-from language.policy import StylePolicy
-from language.social_reward import extract_social_reward
-from language.style_profiler import StyleProfiler
-from learning import ExperientialLearning
-from memory import MemorySystem
-from memory.concept_extractor import ConceptExtractor
-from memory.episodic_linker import EpisodicLinker
-from metacognition import MetacognitiveSystem
-from perception import PerceptionSystem
-from reasoning import ReasoningSystem
-from runtime.logger import JSONLLogger
-from runtime.response import ensure_contract, format_agent_reply
-from runtime.scheduler import Scheduler
-from world_model import PhysicsEngine
+from AGI_Evolutive.autonomy import AutonomyManager
+from AGI_Evolutive.cognition.evolution_manager import EvolutionManager
+from AGI_Evolutive.cognition.reward_engine import RewardEngine
+from AGI_Evolutive.core.telemetry import Telemetry
+from AGI_Evolutive.creativity import CreativitySystem
+from AGI_Evolutive.emotions import EmotionalSystem
+from AGI_Evolutive.goals import GoalSystem
+from AGI_Evolutive.goals.dag_store import GoalDAG
+from AGI_Evolutive.io.action_interface import ActionInterface
+from AGI_Evolutive.io.perception_interface import PerceptionInterface
+from AGI_Evolutive.language import SemanticUnderstanding
+from AGI_Evolutive.language.policy import StylePolicy
+from AGI_Evolutive.language.social_reward import extract_social_reward
+from AGI_Evolutive.language.style_profiler import StyleProfiler
+from AGI_Evolutive.learning import ExperientialLearning
+from AGI_Evolutive.memory import MemorySystem
+from AGI_Evolutive.memory.concept_extractor import ConceptExtractor
+from AGI_Evolutive.memory.episodic_linker import EpisodicLinker
+from AGI_Evolutive.metacognition import MetacognitiveSystem
+from AGI_Evolutive.perception import PerceptionSystem
+from AGI_Evolutive.reasoning import ReasoningSystem
+from AGI_Evolutive.runtime.logger import JSONLLogger
+from AGI_Evolutive.runtime.response import ensure_contract, format_agent_reply
+from AGI_Evolutive.runtime.scheduler import Scheduler
+from AGI_Evolutive.world_model import PhysicsEngine
 
 
 class CognitiveArchitecture:
@@ -48,7 +48,7 @@ class CognitiveArchitecture:
         # Core subsystems
         self.telemetry.log("init", "core", {"stage": "memory"})
         self.memory = MemorySystem(self)
-        from memory.semantic_manager import (  # type: ignore  # local import avoids circular init
+        from AGI_Evolutive.memory.semantic_manager import (  # type: ignore  # local import avoids circular init
             SemanticMemoryManager,
         )
 

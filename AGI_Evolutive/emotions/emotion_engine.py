@@ -97,6 +97,94 @@ class EmotionEngine:
         if now - self.last_save > 10.0:
             self._save()
 
+    # ------------------------------------------------------------------
+    # Compatibility helpers (legacy orchestrator expectations)
+    def update_from_recent_memories(self, recent: List[Dict[str, Any]]):
+        """Legacy heuristic interface preserved for backwards compatibility."""
+
+        if not isinstance(recent, list):
+            recent = []
+
+        positive_cues = ("bravo", "merci", "good", "bien")
+        negative_cues = ("erreur", "fail", "mauvais", "wrong", "error")
+
+        for memory in recent:
+            text = str((memory or {}).get("text", "")).lower()
+            kind = str((memory or {}).get("kind", "")).lower()
+
+            if any(token in text for token in positive_cues):
+                self.register_event(
+                    "positive_feedback",
+                    intensity=0.5,
+                    valence_hint=0.7,
+                    arousal_hint=0.2,
+                    dominance_hint=0.1,
+                )
+
+            if "error" in kind or any(token in text for token in negative_cues):
+                self.register_event(
+                    "error_feedback",
+                    intensity=0.6,
+                    valence_hint=-0.7,
+                    arousal_hint=0.3,
+                    dominance_hint=-0.2,
+                )
+
+            if "?" in text:
+                self.register_event(
+                    "curiosity_signal",
+                    intensity=0.3,
+                    valence_hint=0.1,
+                    arousal_hint=0.2,
+                )
+
+        # Force an immediate step so that modulators are refreshed even if
+        # the nominal period has not elapsed.
+        self.step(force=True)
+
+    def modulate_homeostasis(self, homeostasis) -> None:
+        """Apply current affective modulators to a legacy Homeostasis object."""
+
+        if homeostasis is None:
+            return
+
+        # Ensure the latest modulators are available.
+        self.step(force=True)
+        if not self.last_modulators:
+            self.last_modulators = self._compute_modulators()
+
+        mods = self.last_modulators
+        curiosity_boost = float(mods.get("curiosity_gain", 0.0))
+        activation_delta = float(mods.get("activation_delta", 0.0))
+        valence = float(self.state.valence)
+        dominance = float(self.state.dominance)
+
+        def _current(name: str) -> float:
+            try:
+                return float(homeostasis.state.get("drives", {}).get(name, 0.5))
+            except Exception:
+                return 0.5
+
+        def _apply(name: str, delta: float) -> None:
+            if hasattr(homeostasis, "adjust_drive"):
+                try:
+                    homeostasis.adjust_drive(name, delta)
+                    return
+                except Exception:
+                    pass
+            # Fallback direct mutation if adjust_drive is unavailable
+            drives_dict = homeostasis.state.setdefault("drives", {})
+            drives_dict[name] = max(0.0, min(1.0, _current(name) + delta))
+            if hasattr(homeostasis, "_save"):
+                try:
+                    homeostasis._save()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+
+        _apply("curiosity", 0.05 * (curiosity_boost + self.state.arousal - 0.5))
+        _apply("competence", 0.04 * (dominance - 0.5 + activation_delta))
+        _apply("social_bonding", 0.04 * valence)
+
     def get_state(self) -> Dict[str, Any]:
         s = asdict(self.state)
         s["label"] = self._label()

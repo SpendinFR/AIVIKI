@@ -1,21 +1,22 @@
 import time
-from core.config import load_config
-from core.self_model import SelfModel
-from core.policy import PolicyEngine
-from memory.memory_store import MemoryStore
-from memory.consolidator import Consolidator
-from memory.concept_extractor import ConceptExtractor
-from memory.episodic_linker import EpisodicLinker
-from cognition.homeostasis import Homeostasis
-from cognition.proposer import Proposer
-from cognition.planner import Planner
-from cognition.meta_cognition import MetaCognition
-from cognition.reflection_loop import ReflectionLoop
-from cognition.emotion_engine import EmotionEngine
-from cognition.evolution_manager import EvolutionManager
-from io.perception_interface import PerceptionInterface
-from io.action_interface import ActionInterface
-from scheduler import Scheduler
+
+from AGI_Evolutive.cognition.evolution_manager import EvolutionManager
+from AGI_Evolutive.cognition.homeostasis import Homeostasis
+from AGI_Evolutive.cognition.meta_cognition import MetaCognition
+from AGI_Evolutive.cognition.planner import Planner
+from AGI_Evolutive.cognition.proposer import Proposer
+from AGI_Evolutive.cognition.reflection_loop import ReflectionLoop
+from AGI_Evolutive.core.config import load_config
+from AGI_Evolutive.core.policy import PolicyEngine
+from AGI_Evolutive.core.self_model import SelfModel
+from AGI_Evolutive.emotions.emotion_engine import EmotionEngine
+from AGI_Evolutive.io.action_interface import ActionInterface
+from AGI_Evolutive.io.perception_interface import PerceptionInterface
+from AGI_Evolutive.memory.concept_extractor import ConceptExtractor
+from AGI_Evolutive.memory.consolidator import Consolidator
+from AGI_Evolutive.memory.episodic_linker import EpisodicLinker
+from AGI_Evolutive.memory.memory_store import MemoryStore
+from AGI_Evolutive.runtime.scheduler import Scheduler
 
 class Orchestrator:
     """
@@ -161,14 +162,14 @@ class Orchestrator:
                 self.memory.add_memory({"kind":"strategy","text":" | ".join(notes),"ts":time.time()})
 from typing import Optional
 
-from core.config import load_config
-from core.policy import PolicyEngine
-from core.self_model import SelfModel
-from memory.memory_store import MemoryStore
-from memory.consolidator import Consolidator
-from cognition.homeostasis import Homeostasis
-from cognition.proposer import Proposer
-from cognition.planner import Planner
+from AGI_Evolutive.cognition.homeostasis import Homeostasis
+from AGI_Evolutive.cognition.planner import Planner
+from AGI_Evolutive.cognition.proposer import Proposer
+from AGI_Evolutive.core.config import load_config
+from AGI_Evolutive.core.policy import PolicyEngine
+from AGI_Evolutive.core.self_model import SelfModel
+from AGI_Evolutive.memory.consolidator import Consolidator
+from AGI_Evolutive.memory.memory_store import MemoryStore
 
 
 class Orchestrator:
