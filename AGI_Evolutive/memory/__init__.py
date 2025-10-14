@@ -6,6 +6,7 @@ Intègre mémoire de travail, épisodique, sémantique, procédurale et consolid
 
 import numpy as np
 import time
+from collections import deque
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
@@ -65,6 +66,15 @@ class MemorySystem:
     def __init__(self, cognitive_architecture=None):
         self.cognitive_architecture = cognitive_architecture
         self.creation_time = time.time()
+
+        # Buffer circulaire des interactions les plus récentes pour les modules
+        # comme le SemanticConceptExtractor ou l'EmotionEngine qui ont besoin
+        # d'accéder rapidement à l'historique court terme sans interroger tout
+        # le système de mémoire hiérarchique.
+        self._recent_memories: "deque[Dict[str, Any]]" = deque(maxlen=1000)
+        # Compatibilité avec les anciens composants qui accèdent directement à
+        # l'attribut `memories`.
+        self.memories = self._recent_memories
 
         try:
             self.retrieval = MemoryRetrieval()
@@ -367,10 +377,61 @@ class MemorySystem:
         
         # Mise à jour des métadonnées
         self.memory_metadata["total_memories"] += 1
-        
+
         print(f"💾 Mémoire encodée: {memory_type.value} - {memory_id}")
-        
+
+        # Ajout dans le buffer récent pour les composants analytiques.
+        self._append_recent_memory(memory_trace)
+
         return memory_id
+
+    def _append_recent_memory(self, memory_trace: MemoryTrace) -> None:
+        """Conserve une représentation légère des souvenirs récents."""
+
+        try:
+            content = memory_trace.content
+            text_payload = ""
+            if isinstance(content, str):
+                text_payload = content
+            elif isinstance(content, dict):
+                text_payload = " ".join(
+                    str(value)
+                    for value in content.values()
+                    if isinstance(value, str)
+                )
+            elif isinstance(content, (list, tuple)):
+                text_payload = " ".join(
+                    str(item)
+                    for item in content
+                    if isinstance(item, str)
+                )
+
+            recent_entry: Dict[str, Any] = {
+                "id": memory_trace.id,
+                "memory_type": memory_trace.memory_type.value,
+                "content": content,
+                "context": dict(memory_trace.context),
+                "strength": memory_trace.strength,
+                "valence": memory_trace.valence,
+                "timestamp": memory_trace.timestamp,
+                "ts": memory_trace.timestamp,
+                "t": memory_trace.timestamp,
+            }
+
+            if text_payload:
+                recent_entry["text"] = text_payload
+
+            self._recent_memories.append(recent_entry)
+        except Exception:
+            # La collecte récente ne doit jamais interrompre l'encodage principal.
+            pass
+
+    def get_recent_memories(self, n: int = 100) -> List[Dict[str, Any]]:
+        """Retourne les souvenirs les plus récents encodés par le système."""
+
+        if n <= 0:
+            return []
+        return list(self._recent_memories)[-n:]
     
     def _generate_memory_id(self, content: Any, context: Dict, timestamp: float) -> str:
         """Génère un ID unique pour une mémoire"""
