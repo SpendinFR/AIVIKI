@@ -48,7 +48,7 @@ class MemoryTrace:
     access_count: int
 
 @dataclass
-class MemoryRetrieval:
+class MemoryRetrievalResult:
     """Résultat d'une récupération mémoire"""
     memory_traces: List[MemoryTrace]
     confidence: float
@@ -423,7 +423,7 @@ class MemorySystem:
     def retrieve_memories(self,
                          cues: Dict[str, Any],
                          memory_type: MemoryType = None,
-                         max_results: int = 10) -> MemoryRetrieval:
+                         max_results: int = 10) -> MemoryRetrievalResult:
         """
         Récupère des mémoires basées sur des indices de récupération
         """
@@ -453,7 +453,7 @@ class MemorySystem:
         
         retrieval_time = time.time() - start_time
         
-        return MemoryRetrieval(
+        return MemoryRetrievalResult(
             memory_traces=retrieved_memories,
             confidence=confidence,
             retrieval_time=retrieval_time,
