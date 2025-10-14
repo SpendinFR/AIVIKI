@@ -13,6 +13,8 @@ from metacognition import MetacognitiveSystem
 from creativity import CreativitySystem
 from world_model import PhysicsEngine
 from language import SemanticUnderstanding
+from memory.concept_extractor import ConceptExtractor
+from memory.episodic_linker import EpisodicLinker
 
 
 class CognitiveArchitecture:
@@ -30,6 +32,23 @@ class CognitiveArchitecture:
         )
         self.world_model = PhysicsEngine(self, self.memory)
         self.language = SemanticUnderstanding(self, self.memory)
+        self.concept_extractor = ConceptExtractor(data_dir="data")
+        self.episodic_linker = EpisodicLinker(data_dir="data")
+
+        self.concept_extractor.bind(
+            memory=getattr(self, "memory", None),
+            emotions=getattr(self, "emotions", None),
+            metacog=getattr(self, "metacognition", None)
+            or getattr(self, "metacognitive_system", None),
+            language=getattr(self, "language", None),
+        )
+        self.episodic_linker.bind(
+            memory=getattr(self, "memory", None),
+            language=getattr(self, "language", None),
+            metacog=getattr(self, "metacognition", None)
+            or getattr(self, "metacognitive_system", None),
+            emotions=getattr(self, "emotions", None),
+        )
         self.global_activation = 0.5
         self.start_time = time.time()
 
@@ -43,6 +62,18 @@ class CognitiveArchitecture:
                 response = f"Reçu: {parsed.surface_form if hasattr(parsed, 'surface_form') else user_msg}"
             except Exception:
                 response = f"Reçu: {user_msg}"
+        try:
+            if getattr(self, "concept_extractor", None):
+                self.concept_extractor.step()
+        except Exception:
+            pass
+
+        try:
+            if getattr(self, "episodic_linker", None):
+                self.episodic_linker.step()
+        except Exception:
+            pass
+
         return response or "OK"
 
     # ----------------------------------------------------------------------
