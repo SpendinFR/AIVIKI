@@ -6,6 +6,11 @@ from typing import Dict
 
 @dataclass
 class StylePolicy:
+    params: Dict[str, float] = field(default_factory=lambda: {
+        "concretude_bias": 0.6,
+        "hedging": 0.3,
+        "warmth": 0.5,
+    })
     """Petite politique de style adaptative basée sur un signal social cumulatif."""
 
     params: Dict[str, float] = field(
@@ -33,6 +38,11 @@ class StylePolicy:
     def as_dict(self) -> Dict[str, float]:
         return dict(self.params)
 
+    def update_from_reward(self, reward: float) -> None:
+        reward = float(max(-1.0, min(1.0, reward)))
+        self.params["concretude_bias"] = min(1.0, max(0.0, self.params["concretude_bias"] + 0.1 * reward))
+        self.params["hedging"] = min(1.0, max(0.0, self.params["hedging"] - 0.05 * reward))
+        self.params["warmth"] = min(1.0, max(0.0, self.params["warmth"] + 0.08 * reward))
     @staticmethod
     def _clip(val: float, lo: float = 0.0, hi: float = 1.0) -> float:
         return max(lo, min(hi, val))
