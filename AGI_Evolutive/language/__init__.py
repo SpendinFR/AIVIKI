@@ -97,6 +97,7 @@ class SemanticUnderstanding:
 
     def __init__(self, cognitive_architecture: Any = None, memory_system: Any = None):
         self.cognitive_arch = cognitive_architecture
+        self.arch = cognitive_architecture
         self.memory_system = memory_system
         self.history: List[Utterance] = []
         self.lang = "fr"
@@ -132,6 +133,53 @@ class SemanticUnderstanding:
             except Exception:
                 pass
         return utt
+
+    def respond(self, user_text: str, context: Optional[Dict[str, Any]] = None) -> str:
+        """Parse l’énoncé utilisateur et orchestre un raisonnement léger pour répondre."""
+        context = context or {}
+        utterance = self.parse_utterance(user_text, context)
+        frame = getattr(utterance, "frame", None)
+
+        arch = getattr(self, "arch", None) or getattr(self, "cognitive_arch", None)
+        reasoner = getattr(arch, "reasoning", None) if arch else None
+        if reasoner is None:
+            reasoner = getattr(self, "reasoning", None)
+
+        reasoned = None
+        if reasoner and hasattr(reasoner, "reason"):
+            try:
+                q = (
+                    getattr(utterance, "surface_form", None)
+                    or getattr(frame, "normalized_text", None)
+                    or user_text
+                )
+                reasoned = reasoner.reason(q, context={"frame_intent": getattr(frame, "intent", "")})
+            except Exception:
+                reasoned = None
+
+        if reasoned:
+            steps_lines = [
+                f"– {t['strategy']}: {t['notes']}"
+                for t in reasoned.get("trace", [])
+                if t.get("notes")
+            ]
+            steps = "\n".join(steps_lines) if steps_lines else "– (aucune note)"
+            support = reasoned.get("support", [])
+            support_lines = (
+                "\nContexte mémoire:\n" + "\n".join([f"• {s}" for s in support])
+            ) if support else ""
+            meta = reasoned.get("meta") or {}
+            confidence = float(reasoned.get("confidence", 0.0))
+            complexity = float(meta.get("complexity", 0.0))
+            response = (
+                f"{reasoned.get('answer', '')}\n"
+                f"(confiance ~ {confidence:.2f}, complexité {complexity:.2f})\n"
+                f"Démarche:\n{steps}{support_lines}"
+            )
+        else:
+            response = f"Reçu: {getattr(utterance, 'surface_form', user_text)}"
+
+        return response
 
     # --------- Étapes internes ---------
 
