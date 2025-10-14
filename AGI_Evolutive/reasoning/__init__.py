@@ -299,7 +299,7 @@ class ReasoningSystem:
         ep = episode_record(
             user_msg=prompt,
             hypotheses=hypos,
-            chosen=chosen_idx,
+            chosen_index=chosen_idx,
             tests=tests,
             evidence=evidence,
             result_text=evidence.notes,
