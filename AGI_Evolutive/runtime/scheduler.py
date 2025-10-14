@@ -1,5 +1,28 @@
-import os, json, time, threading, traceback
-from typing import Any, Dict, Callable
+"""Background maintenance scheduler for the cognitive architecture.
+
+The previous version of this module had two issues that prevented the
+scheduler from running correctly once imported:
+
+* The standard library modules it relied on (``time``, ``os``, ``json`` …)
+  were never imported.  Python therefore raised ``NameError`` exceptions as
+  soon as the helper functions such as :func:`_now` or :func:`_safe_json`
+  were executed.
+* The reflection task attempted to import ``CognitiveDomain`` from a
+  top-level ``metacognition`` module.  Inside the package hierarchy the
+  correct import path is ``AGI_Evolutive.metacognition``; the truncated
+  import made the task crash at runtime.
+
+Both problems manifested as "truncated command"/runtime failures even
+though the file passed static syntax checks.  Restoring the missing imports
+and using the fully qualified package path fixes the scheduler logic.
+"""
+
+import json
+import os
+import threading
+import time
+import traceback
+from typing import Any, Callable, Dict
 
 
 def _now() -> float:
@@ -189,7 +212,7 @@ class Scheduler:
         if mc and hasattr(mc, "trigger_reflection"):
             try:
                 # réflexion légère récurrente (domain REASONING par défaut)
-                from metacognition import CognitiveDomain
+                from AGI_Evolutive.metacognition import CognitiveDomain
                 mc.trigger_reflection(
                     trigger="periodic_scheduler",
                     domain=CognitiveDomain.REASONING,
