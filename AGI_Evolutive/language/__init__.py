@@ -65,6 +65,7 @@ class Utterance:
     frame: Optional[Frame] = None
     pragmatics: Dict[str, Any] = field(default_factory=dict)  # act, politeness, uncertainty
     timestamp: float = field(default_factory=_now)
+    normalized_text: str = ""
 
 
 # ============================================================
@@ -97,6 +98,7 @@ class SemanticUnderstanding:
 
     def __init__(self, cognitive_architecture: Any = None, memory_system: Any = None):
         self.cognitive_arch = cognitive_architecture
+        self.arch = cognitive_architecture
         self.memory_system = memory_system
         self.history: List[Utterance] = []
         self.lang = "fr"
@@ -120,8 +122,17 @@ class SemanticUnderstanding:
         ents = self._ner(text)
         frame = self._frame(text, toks, ents)
         prag = self._pragmatics(text, toks)
+        normalized = " ".join(toks).lower()
 
-        utt = Utterance(surface_form=text, lang=self.lang, tokens=toks, entities=ents, frame=frame, pragmatics=prag)
+        utt = Utterance(
+            surface_form=text,
+            lang=self.lang,
+            tokens=toks,
+            entities=ents,
+            frame=frame,
+            pragmatics=prag,
+            normalized_text=normalized,
+        )
         self.history.append(utt)
         if len(self.history) > 200:
             self.history.pop(0)
@@ -132,6 +143,89 @@ class SemanticUnderstanding:
             except Exception:
                 pass
         return utt
+
+    def _retrieve_context(self, frame) -> List[dict]:
+        """
+        Cherche 3 éléments pertinents (interactions + docs) à partir du texte normalisé
+        et des slots importants. Tolérant si memory absent.
+        """
+        results: List[dict] = []
+        try:
+            arch = getattr(self, "arch", None)
+            mem = getattr(self, "memory_system", None) or (getattr(arch, "memory", None) if arch else None)
+            retr = getattr(mem, "retrieval", None)
+            if not retr:
+                return results
+
+            q = getattr(frame, "normalized_text", "") or getattr(frame, "surface_form", "")
+            extras: List[str] = []
+
+            slots_obj = getattr(frame, "slots", None)
+            if slots_obj is None and getattr(frame, "frame", None):
+                slots_obj = getattr(frame.frame, "slots", None)
+
+            if isinstance(slots_obj, dict):
+                for k in ("quoted", "goal", "term_to_define"):
+                    if k in slots_obj:
+                        val = slots_obj[k]
+                        if isinstance(val, (list, tuple)):
+                            extras.extend([str(v) for v in val])
+                        else:
+                            extras.append(str(val))
+            if extras:
+                q = (q + " " + " ".join(extras)).strip()
+
+            if not q:
+                return results
+
+            hits = retr.search_text(q, top_k=3)
+            for h in hits:
+                txt = h.get("text", "")
+                meta = h.get("meta", {})
+                snippet = (txt[:180] + "…") if len(txt) > 180 else txt
+                title = meta.get("title") or meta.get("source") or meta.get("type", "")
+                results.append({
+                    "score": h.get("score", 0.0),
+                    "title": title,
+                    "snippet": snippet,
+                })
+        except Exception:
+            return []
+        return results
+
+    def respond(self, text: str, context: Optional[Dict[str, Any]] = None) -> str:
+        frame = self.parse_utterance(text, context=context)
+        contexts = self._retrieve_context(frame)
+
+        utter_frame = frame.frame if isinstance(frame, Utterance) else getattr(frame, "frame", None)
+        if utter_frame is None and isinstance(frame, Frame):
+            utter_frame = frame
+
+        intent = utter_frame.intent if utter_frame else "inform"
+        conf = utter_frame.confidence if utter_frame else 0.5
+        slots = utter_frame.slots if utter_frame else {}
+
+        slot_bits: List[str] = []
+        for key, val in (slots or {}).items():
+            if isinstance(val, (list, tuple)):
+                slot_bits.append(f"{key}=" + ", ".join(str(v) for v in val))
+            else:
+                slot_bits.append(f"{key}={val}")
+
+        summary = f"Intent détecté: {intent} (confiance {conf:.2f})."
+        if slot_bits:
+            summary += " Slots: " + "; ".join(slot_bits)
+
+        parts = [summary]
+
+        if contexts:
+            ctx_lines = []
+            for c in contexts:
+                lbl = f"{c['title']}" if c["title"] else "mémoire"
+                ctx_lines.append(f"• ({c['score']:.2f}) {lbl}: {c['snippet']}")
+            parts.append("Contexte pertinent retrouvé :\n" + "\n".join(ctx_lines))
+
+        return "\n\n".join(parts)
 
     # --------- Étapes internes ---------
 
@@ -189,6 +283,7 @@ class SemanticUnderstanding:
                 "frame": u.frame.__dict__ if u.frame else None,
                 "pragmatics": u.pragmatics,
                 "timestamp": u.timestamp,
+                "normalized_text": u.normalized_text,
             } for u in self.history[-100:]]
         }
 
@@ -207,6 +302,7 @@ class SemanticUnderstanding:
                 frame=fr,
                 pragmatics=d.get("pragmatics", {}),
                 timestamp=d.get("timestamp", _now()),
+                normalized_text=d.get("normalized_text", ""),
             ))
 
 
