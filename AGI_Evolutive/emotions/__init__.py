@@ -16,6 +16,8 @@ import math
 import json
 import random
 
+from .emotion_engine import EmotionEngine
+
 class EmotionalState(Enum):
     """États émotionnels fondamentaux"""
     JOY = "joie"
@@ -105,6 +107,15 @@ class EmotionalSystem:
             self.reasoning = getattr(self.cognitive_architecture, "reasoning", None)
             self.perception = getattr(self.cognitive_architecture, "perception", None)
             self.language = getattr(self.cognitive_architecture, "language", None)
+
+        self.engine = EmotionEngine()
+        self.engine.bind(
+            arch=self.cognitive_architecture,
+            memory=self.memory_system,
+            metacog=self.metacognitive_system,
+            goals=getattr(self.cognitive_architecture, "goals", None) if self.cognitive_architecture else None,
+            language=getattr(self.cognitive_architecture, "language", None) if self.cognitive_architecture else None,
+        )
 
         
         # === ÉTATS ÉMOTIONNELS ACTUELS ===
@@ -232,8 +243,23 @@ class EmotionalSystem:
         
         # Initialisation des systèmes
         self._initialize_emotional_system()
-        
+
         print("💖 Système Émotionnel Initialisé")
+
+    def step(self):
+        try:
+            self.engine.step()
+        except Exception as e:
+            print(f"[emotion] step error: {e}")
+
+    def get_affect_state(self):
+        return self.engine.get_state()
+
+    def get_emotional_modulators(self):
+        return self.engine.get_modulators()
+
+    def register_emotion_event(self, kind, **kw):
+        self.engine.register_event(kind, **kw)
     
     def _initialize_emotional_system(self):
         """Initialise le système émotionnel avec des capacités de base"""
