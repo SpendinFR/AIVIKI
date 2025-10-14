@@ -98,6 +98,7 @@ class SemanticUnderstanding:
     def __init__(self, cognitive_architecture: Any = None, memory_system: Any = None):
         self.cognitive_arch = cognitive_architecture
         self.memory_system = memory_system
+        self.memory = memory_system  # alias pour compatibilité/reflexive replies
         self.history: List[Utterance] = []
         self.lang = "fr"
 
@@ -132,6 +133,80 @@ class SemanticUnderstanding:
             except Exception:
                 pass
         return utt
+
+    def generate_reflective_reply(self, arch, user_msg: str) -> str:
+        """Génère une réponse réflexive courte et lisible."""
+        status = {}
+        try:
+            status = arch.get_cognitive_status()
+        except Exception:
+            status = {}
+
+        tokens = re.findall(r"[a-zA-ZÀ-ÿ0-9_]+", user_msg.lower())
+        unknown = []
+        try:
+            memory = getattr(self, "memory", None) or getattr(self, "memory_system", None)
+            if memory and hasattr(memory, "knows"):
+                unknown = [t for t in tokens if not memory.knows(t)]
+            elif memory and hasattr(memory, "retrieve"):
+                for t in tokens:
+                    try:
+                        res = memory.retrieve(t, top_k=1)
+                        if not res:
+                            unknown.append(t)
+                    except Exception:
+                        pass
+            else:
+                unknown = [t for t in tokens if len(t) > 12]
+        except Exception:
+            pass
+        unknown = list(dict.fromkeys(unknown))[:3]
+
+        reasoning = status.get("reasoning", {})
+        creativity = status.get("creativity", {})
+        metacog = status.get("metacognition", {})
+        activation = status.get("global_activation", 0.5)
+
+        doing = []
+        if reasoning.get("recent_inferences", 0) > 0:
+            doing.append("j’analyse des inférences récentes")
+        if creativity.get("recent_ideas", 0) > 0:
+            doing.append("je génère/évalue de nouvelles idées")
+        if metacog.get("events", 0) > 0:
+            doing.append("je surveille mes performances et erreurs")
+        if not doing:
+            doing.append("je collecte des repères pour mieux te comprendre")
+
+        confusion = []
+        if unknown:
+            confusion.append("je ne suis pas sûr de bien cerner: " + ", ".join(unknown))
+        avg_conf = reasoning.get("avg_confidence", 0.5)
+        if isinstance(avg_conf, (int, float)) and avg_conf < 0.45:
+            confusion.append("ma confiance de raisonnement est un peu basse sur ce sujet")
+
+        next_steps = []
+        if unknown:
+            next_steps.append("tu peux m’expliquer ce que tu entends par " + ", ".join(unknown) + " ?")
+        else:
+            next_steps.append("je peux tenter un exemple concret ou reformuler si tu veux")
+        if isinstance(activation, (int, float)) and activation < 0.4:
+            next_steps.append("je vais réduire la complexité pour m’aligner")
+
+        lines = []
+        lines.append("• Ce que je fais: " + "; ".join(doing))
+        if confusion:
+            lines.append("• Ce que je ne comprends pas: " + "; ".join(confusion))
+        lines.append("• Ce que je propose: " + "; ".join(next_steps))
+
+        try:
+            gist = user_msg.strip()
+            if len(gist) > 120:
+                gist = gist[:117] + "…"
+            lines.append(f"• Ta demande (j’ai bien reçu): « {gist} »")
+        except Exception:
+            pass
+
+        return "\n".join(lines)
 
     # --------- Étapes internes ---------
 

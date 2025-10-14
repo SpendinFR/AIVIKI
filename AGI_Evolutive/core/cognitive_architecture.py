@@ -2,7 +2,7 @@
 import time
 from typing import Optional
 
-# Import subsystems
+# Subsystems
 from memory import MemorySystem
 from perception import PerceptionSystem
 from reasoning import ReasoningSystem
@@ -14,102 +14,156 @@ from creativity import CreativitySystem
 from world_model import PhysicsEngine
 from language import SemanticUnderstanding
 
+# Telemetry
+from core.telemetry import Telemetry
+
 
 class CognitiveArchitecture:
     def __init__(self):
-        # Instantiate core subsystems in dependency-safe order
+        self.telemetry = Telemetry()
+        self.global_activation = 0.5
+        self.start_time = time.time()
+        self.reflective_mode = True
+
+        # Instanciation des sous-systèmes avec télémétrie détaillée
+        self.telemetry.log("init", "core", {"stage": "memory"})
         self.memory = MemorySystem(self)
+
+        self.telemetry.log("init", "core", {"stage": "perception"})
         self.perception = PerceptionSystem(self, self.memory)
+
+        self.telemetry.log("init", "core", {"stage": "reasoning"})
         self.reasoning = ReasoningSystem(self, self.memory, self.perception)
+
+        self.telemetry.log("init", "core", {"stage": "goals"})
         self.goals = GoalSystem(self, self.memory, self.reasoning)
+
+        self.telemetry.log("init", "core", {"stage": "metacognition"})
         self.metacognition = MetacognitiveSystem(self, self.memory, self.reasoning)
+
+        self.telemetry.log("init", "core", {"stage": "emotions"})
         self.emotions = EmotionalSystem(self, self.memory, self.metacognition)
+
+        self.telemetry.log("init", "core", {"stage": "learning"})
         self.learning = ExperientialLearning(self)
+
+        self.telemetry.log("init", "core", {"stage": "creativity"})
         self.creativity = CreativitySystem(
             self, self.memory, self.reasoning, self.emotions, self.metacognition
         )
+
+        self.telemetry.log("init", "core", {"stage": "world_model"})
         self.world_model = PhysicsEngine(self, self.memory)
+
+        self.telemetry.log("init", "core", {"stage": "language"})
         self.language = SemanticUnderstanding(self, self.memory)
-        self.global_activation = 0.5
-        self.start_time = time.time()
 
-    def cycle(self, user_msg: Optional[str] = None, inbox_docs=None):
-        """One simple cognitive cycle: perceive -> reason -> plan -> act -> learn -> reflect."""
-        response = None
-        if user_msg:
-            # Use language understanding to parse, then use generation to reply
-            try:
-                parsed = self.language.parse_utterance(user_msg, context={})
-                response = f"Reçu: {parsed.surface_form if hasattr(parsed, 'surface_form') else user_msg}"
-            except Exception:
-                response = f"Reçu: {user_msg}"
-        return response or "OK"
+        self.telemetry.log("ready", "core", {"status": "initialized"})
 
-    # ----------------------------------------------------------------------
-    # ✅ Méthode demandée par la métacognition : état global du système
-    # ----------------------------------------------------------------------
+    # ===================== OUTILS DIAGNOSTIC =====================
+
     def get_cognitive_status(self) -> dict:
         """
-        Retourne un résumé global de l'état cognitif actuel.
-        Cette méthode est utilisée par la métacognition et la créativité.
+        Statut global lisible (et robuste). Utilisé par méta/ressources/CLI.
         """
-        status = {
-            "global_activation": getattr(self, "global_activation", 0.5),
-            "uptime_sec": round(time.time() - getattr(self, "start_time", time.time()), 2),
-            "subsystems": {}
+
+        def safe_len(x):
+            try:
+                return len(x)
+            except Exception:
+                return 0
+
+        # Reasoning
+        r = getattr(self, "reasoning", None)
+        r_hist = getattr(r, "reasoning_history", {}) if r else {}
+        recent_inf = list(r_hist.get("recent_inferences", []))[-5:] if isinstance(r_hist, dict) else []
+        avg_conf = getattr(r, "get_reasoning_stats", lambda: {"average_confidence": 0.5})()
+        if isinstance(avg_conf, dict):
+            avg_conf = avg_conf.get("average_confidence", 0.5)
+
+        # Creativity
+        c = getattr(self, "creativity", None)
+        ideas = []
+        try:
+            pool = c.idea_generation.get("idea_pool", []) if c else []
+            ideas = list(pool)[-10:] if pool else []
+        except Exception:
+            pass
+
+        # Emotions
+        e = getattr(self, "emotions", None)
+        mood = getattr(e, "current_mood", "neutral")
+
+        # Metacognition
+        m = getattr(self, "metacognition", None)
+        meta_events = 0
+        try:
+            meta_events = len(m.metacognitive_history["events"]) if m else 0
+        except Exception:
+            pass
+
+        # Memory
+        mem = getattr(self, "memory", None)
+        mem_size = 0
+        try:
+            mem_size = getattr(mem, "size", lambda: 0)()
+        except Exception:
+            pass
+
+        # Telemetry snapshot
+        telemetry = self.telemetry.snapshot() if getattr(self, "telemetry", None) else {}
+
+        return {
+            "uptime_sec": int(time.time() - self.start_time),
+            "global_activation": float(getattr(self, "global_activation", 0.5)),
+            "reasoning": {
+                "recent_inferences": safe_len(recent_inf),
+                "avg_confidence": float(avg_conf) if isinstance(avg_conf, (int, float)) else 0.5,
+            },
+            "creativity": {
+                "recent_ideas": safe_len(ideas),
+            },
+            "emotions": {
+                "mood": mood,
+            },
+            "metacognition": {
+                "events": meta_events,
+            },
+            "memory": {
+                "approx_size": mem_size,
+            },
+            "telemetry": telemetry,
         }
 
-        subsystems = [
-            "memory", "reasoning", "goals", "emotions",
-            "metacognition", "creativity", "learning"
-        ]
+    def diagnostic_snapshot(self, tail=30) -> dict:
+        """Renvoie un snapshot: statut + derniers événements télémétrie."""
+        return {
+            "status": self.get_cognitive_status(),
+            "tail": self.telemetry.tail(tail),
+        }
 
-        for name in subsystems:
-            subsystem = getattr(self, name, None)
-            if subsystem is None:
-                continue
+    def toggle_reflective_mode(self, on: bool):
+        self.reflective_mode = bool(on)
+        self.telemetry.log("cfg", "core", {"reflective_mode": self.reflective_mode})
 
-            # Cherche une méthode de statut dans le sous-système
-            possible_getters = [
-                "get_status",
-                "get_state",
-                "get_creative_status",
-                "get_emotional_state",
-                "get_learning_status"
-            ]
+    # ===================== BOUCLE PRINCIPALE =====================
 
-            found = None
-            for g in possible_getters:
-                if hasattr(subsystem, g) and callable(getattr(subsystem, g)):
-                    found = getattr(subsystem, g)
-                    break
-
-            if found:
+    def cycle(self, user_msg: Optional[str] = None, inbox_docs=None):
+        """Cycle cognitif simple."""
+        response = None
+        if user_msg:
+            self.telemetry.log("input", "language", {"text": user_msg})
+            if self.reflective_mode and hasattr(self.language, "generate_reflective_reply"):
                 try:
-                    status["subsystems"][name] = found()
-                except Exception as e:
-                    status["subsystems"][name] = {"error": str(e)}
-            else:
-                # Par défaut, inclut le type du sous-système
-                status["subsystems"][name] = {"type": type(subsystem).__name__}
-
-        return status
-        # --- Robustesse vérité / longueur pendant l'init ---
-    def __bool__(self) -> bool:
-        # Toujours True pour éviter que bool(self) déclenche __len__ pendant l'init
-        return True
-
-    def __len__(self) -> int:
-        # Ne JAMAIS accéder directement à des attributs potentiellement pas encore définis
-        names = [
-            "memory", "perception", "reasoning", "goals",
-            "metacognition", "emotions", "learning",
-            "creativity", "world_model", "language"
-        ]
-        count = 0
-        for n in names:
-            if getattr(self, n, None) is not None:
-                count += 1
-        return count
-
-
+                    response = self.language.generate_reflective_reply(self, user_msg)
+                    self.telemetry.log("output", "language", {"mode": "reflective"})
+                except Exception as exc:
+                    self.telemetry.log("error", "language", {"where": "generate_reflective_reply", "err": str(exc)})
+            if not response:
+                try:
+                    parsed = self.language.parse_utterance(user_msg, context={})
+                    surface = parsed.surface_form if hasattr(parsed, "surface_form") else user_msg
+                    response = f"Reçu: {surface}"
+                except Exception:
+                    response = f"Reçu: {user_msg}"
+        return response or "OK"
