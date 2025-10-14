@@ -1,3 +1,6 @@
+"""Cognition package: reward processing and related utilities."""
+
+__all__ = ["reward_engine"]
 """High-level cognition helpers (homeostasis, planning, metacognition, etc.)."""
 """Cognition subpackage exposing planner, homeostasis and proposer."""
 

@@ -15,6 +15,8 @@ from metacognition import MetacognitiveSystem
 from creativity import CreativitySystem
 from world_model import PhysicsEngine
 from language import SemanticUnderstanding
+from cognition.reward_engine import RewardEngine
+from language.style_profiler import StyleProfiler
 from autonomy import AutonomyManager
 
 from runtime.logger import JSONLLogger
@@ -87,6 +89,18 @@ class CognitiveArchitecture:
 
         self.telemetry.log("init", "core", {"stage": "language"})
         self.language = SemanticUnderstanding(self, self.memory)
+
+        # --- nouveaux sous-systèmes (Gap 1) ---
+        self.style_profiler = StyleProfiler(persist_path="data/style_profiles.json")
+        self.reward_engine = RewardEngine(
+            architecture=self,
+            memory=self.memory,
+            emotions=self.emotions,
+            goals=self.goals,
+            metacognition=self.metacognition,
+            persist_dir="data",
+        )
+
         self.autonomy = AutonomyManager(
             architecture=self,
             goal_system=self.goals,
@@ -99,6 +113,32 @@ class CognitiveArchitecture:
         # Etat global
         self.global_activation = 0.5
         self.start_time = time.time()
+        self.last_output_text = ""
+        self.last_user_id = "default"
+
+    def cycle(self, user_msg: Optional[str] = None, inbox_docs=None, user_id: str = "default"):
+        """
+        Un cycle : perçoit -> (raisonne) -> répond, avec mimétisme stylistique et
+        récompense extrinsèque dérivée du feedback utilisateur.
+        """
+        self.last_user_id = user_id or "default"
+
+        if user_msg:
+            try:
+                self.style_profiler.observe(self.last_user_id, user_msg)
+            except Exception:
+                pass
+
+            try:
+                context = {
+                    "last_assistant_output": self.last_output_text,
+                    "active_goal_id": getattr(self.goals, "active_goal_id", None),
+                }
+                self.reward_engine.ingest_user_message(
+                    self.last_user_id, user_msg, context=context, channel="chat"
+                )
+            except Exception:
+                pass
 
     def cycle(self, user_msg: Optional[str]=None, inbox_docs=None):
         """
@@ -143,6 +183,24 @@ class CognitiveArchitecture:
             except Exception:
                 # fallback minimal
                 response = f"Reçu: {user_msg}"
+
+        try:
+            response = self.style_profiler.rewrite_to_match(response or "OK", self.last_user_id)
+        except Exception:
+            pass
+
+        self.last_output_text = response or "OK"
+
+        try:
+            if self.memory and hasattr(self.memory, "add_memory"):
+                self.memory.add_memory(
+                    "dialog_turn",
+                    {
+                        "t": time.time(),
+                        "user_id": self.last_user_id,
+                        "user_msg": user_msg,
+                        "assistant_msg": self.last_output_text,
+                    },
         try:
             if hasattr(self, "autonomy") and self.autonomy:
                 self.autonomy.tick()
@@ -296,6 +354,7 @@ class CognitiveArchitecture:
         except Exception:
             pass
 
+        return self.last_output_text
         return final
 
     def _generate_base_text(self, surface: str, reason_out: Dict[str, Any]) -> str:
