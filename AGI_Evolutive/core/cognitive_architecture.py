@@ -13,6 +13,8 @@ from metacognition import MetacognitiveSystem
 from creativity import CreativitySystem
 from world_model import PhysicsEngine
 from language import SemanticUnderstanding
+from io.action_interface import ActionInterface
+from io.perception_interface import PerceptionInterface
 
 
 class CognitiveArchitecture:
@@ -30,8 +32,33 @@ class CognitiveArchitecture:
         )
         self.world_model = PhysicsEngine(self, self.memory)
         self.language = SemanticUnderstanding(self, self.memory)
+        self.action_interface = ActionInterface()
+        self.perception_interface = PerceptionInterface()
         self.global_activation = 0.5
         self.start_time = time.time()
+
+        # bind souple
+        policy = getattr(self, "policy", None)
+        self.action_interface.bind(
+            arch=self,
+            goals=getattr(self, "goals", None),
+            policy=policy,
+            memory=getattr(self, "memory", None),
+            metacog=getattr(self, "metacognition", None)
+            or getattr(self, "metacognitive_system", None)
+            or getattr(self, "metacognition", None),
+            emotions=getattr(self, "emotions", None),
+            language=getattr(self, "language", None),
+        )
+        self.perception_interface.bind(
+            arch=self,
+            memory=getattr(self, "memory", None),
+            metacog=getattr(self, "metacognition", None)
+            or getattr(self, "metacognitive_system", None)
+            or getattr(self, "metacognition", None),
+            emotions=getattr(self, "emotions", None),
+            language=getattr(self, "language", None),
+        )
 
     def cycle(self, user_msg: Optional[str] = None, inbox_docs=None):
         """One simple cognitive cycle: perceive -> reason -> plan -> act -> learn -> reflect."""
@@ -43,6 +70,35 @@ class CognitiveArchitecture:
                 response = f"Reçu: {parsed.surface_form if hasattr(parsed, 'surface_form') else user_msg}"
             except Exception:
                 response = f"Reçu: {user_msg}"
+
+        # Ingestion du message utilisateur comme perception (si fourni)
+        if user_msg and hasattr(self, "perception_interface") and self.perception_interface:
+            try:
+                self.perception_interface.ingest_user_message(user_msg, speaker="user", meta={"channel": "cli"})
+            except Exception:
+                pass
+
+        # Step perception (scan inbox, etc.)
+        try:
+            if hasattr(self, "perception_interface") and self.perception_interface:
+                self.perception_interface.step()
+        except Exception:
+            pass
+
+        # Step émotions (mood/mode)
+        try:
+            if hasattr(self, "emotions") and self.emotions and hasattr(self.emotions, "step"):
+                self.emotions.step()
+        except Exception:
+            pass
+
+        # Step actions (exécute 0/1 action)
+        try:
+            if hasattr(self, "action_interface") and self.action_interface:
+                self.action_interface.step()
+        except Exception:
+            pass
+
         return response or "OK"
 
     # ----------------------------------------------------------------------

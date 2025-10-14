@@ -181,9 +181,23 @@ class GoalSystem:
         
         # === BUTS FONDAMENTAUX INNÉS ===
         self._initialize_fundamental_goals()
-        
+
         print("🎯 Système de buts initialisé")
-    
+
+    def get_next_action(self):
+        """
+        Retourne soit None, soit un dict: {"type": str, "payload": {...}, "priority": float}
+        Exemple: {"type": "learn_concept", "payload": {"concept": "émotions humaines"}, "priority": 0.6}
+        """
+        try:
+            if hasattr(self, "planner") and hasattr(self.planner, "pop_next_action"):
+                return self.planner.pop_next_action()
+            if getattr(self, "pending_actions", None):
+                return self.pending_actions.pop(0)
+        except Exception:
+            pass
+        return None
+
     def _initialize_core_values(self) -> Dict[str, float]:
         """Initialise les valeurs fondamentales innées"""
         return {
