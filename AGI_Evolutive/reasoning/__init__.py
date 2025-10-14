@@ -28,7 +28,7 @@ class ReasoningSystem:
         # Historique exploitable par métacognition et autres systèmes
         self.reasoning_history: Dict[str, Any] = {
             "recent_inferences": deque(maxlen=100),
-            "learning_trajectory": deque(maxlen=200),   # [{ts, confidence}]
+            "learning_trajectory": [],   # [{ts, confidence}]
             "last_answer": "",
         }
 
@@ -209,10 +209,13 @@ class ReasoningSystem:
             "strategies": list(strategies),
         }
         self.reasoning_history["recent_inferences"].append(rec)
-        self.reasoning_history["learning_trajectory"].append({
+        trajectory: List[Dict[str, Any]] = self.reasoning_history["learning_trajectory"]
+        trajectory.append({
             "ts": rec["timestamp"],
             "confidence": float(final_confidence),
         })
+        if len(trajectory) > 200:
+            del trajectory[0]
 # reasoning/__init__.py
 from collections import deque
 from typing import Any, Dict, List, Optional
