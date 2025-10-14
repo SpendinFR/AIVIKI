@@ -14,21 +14,28 @@ from .document_ingest import DocumentIngest
 from .question_manager import QuestionManager
 
 class Autopilot:
-    def __init__(self, arch, project_root: Optional[str] = None):
+    def __init__(self, arch, project_root: Optional[str] = None, orchestrator=None):
         self.arch = arch
         self.project_root = project_root or os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
         self.inbox_dir = os.path.join(self.project_root, "inbox")
         self.ingest = DocumentIngest(arch, self.inbox_dir)
         self.persist = PersistenceManager(arch)
         self.questions = QuestionManager(arch)
+        self.orchestrator = orchestrator
         # charger un état si disponible
         self.persist.load()
-    
+
     def step(self, user_msg: Optional[str] = None):
         # 1) intégrer docs nouveaux
         self.ingest.integrate()
         # 2) appel d'un cycle cognitif
         out = self.arch.cycle(user_msg=user_msg, inbox_docs=None)
+        # 2b) orchestrateur global
+        if self.orchestrator is not None:
+            try:
+                self.orchestrator.run_once_cycle(user_msg=user_msg)
+            except Exception:
+                pass
         # 3) générer éventuellement des questions
         self.questions.maybe_generate_questions()
         # 4) autosave
