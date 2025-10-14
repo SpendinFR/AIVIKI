@@ -19,6 +19,8 @@ class CognitiveArchitecture:
     def __init__(self):
         # Instantiate core subsystems in dependency-safe order
         self.memory = MemorySystem(self)
+        from memory.semantic_manager import SemanticMemoryManager  # local import to avoid cycles during init
+        self.memory.semantic = SemanticMemoryManager(self.memory, architecture=self)
         self.perception = PerceptionSystem(self, self.memory)
         self.reasoning = ReasoningSystem(self, self.memory, self.perception)
         self.goals = GoalSystem(self, self.memory, self.reasoning)
@@ -43,6 +45,13 @@ class CognitiveArchitecture:
                 response = f"Reçu: {parsed.surface_form if hasattr(parsed, 'surface_form') else user_msg}"
             except Exception:
                 response = f"Reçu: {user_msg}"
+
+        try:
+            if hasattr(self.memory, "semantic") and self.memory.semantic:
+                self.memory.semantic.step()
+        except Exception:
+            pass
+
         return response or "OK"
 
     # ----------------------------------------------------------------------
