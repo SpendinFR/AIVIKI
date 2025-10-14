@@ -24,8 +24,6 @@ class Autopilot:
         arch,
         project_root: Optional[str] = None,
         orchestrator: Optional[Orchestrator] = None,
-    ):
-        orchestrator: Optional["Orchestrator"] = None,
     ) -> None:
         self.arch = arch
         self.project_root = project_root or os.path.abspath(
@@ -35,16 +33,6 @@ class Autopilot:
         self.ingest = DocumentIngest(arch, self.inbox_dir)
         self.persist = PersistenceManager(arch)
         self.questions = QuestionManager(arch)
-        self.orchestrator = orchestrator or Orchestrator(arch)
-        # charger un état si disponible
-        self.persist.load()
-
-    def step(self, user_msg: Optional[str] = None):
-        # 1) intégrer docs nouveaux
-        self.ingest.integrate()
-        # 2) appel d'un cycle cognitif
-        out = self.arch.cycle(user_msg=user_msg, inbox_docs=None)
-        # 2b) orchestrateur étendu
 
         if orchestrator is not None:
             self.orchestrator = orchestrator
@@ -56,7 +44,6 @@ class Autopilot:
         else:
             self.orchestrator = None
 
-        # Load any previous state so the agent can resume where it left off.
         try:
             self.persist.load()
         except Exception:
