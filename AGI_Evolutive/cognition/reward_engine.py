@@ -298,7 +298,8 @@ class RewardEngine:
     def _count_hits(self, text_lower: str, vocab: set) -> int:
         hits = 0
         for w in vocab:
-            if w in text_lower:
+            pattern = re.escape(w).replace(r"\ ", r"\s+")
+            if re.search(rf"(?<!\w){pattern}(?!\w)", text_lower):
                 hits += 1
         return hits
 
