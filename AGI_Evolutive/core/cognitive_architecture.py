@@ -158,6 +158,9 @@ class CognitiveArchitecture:
 
         if user_msg:
             try:
+                style = getattr(self.language, "style_hints", {})
+                parsed = self.language.parse_utterance(user_msg, context={"style_hints": style})
+                response = f"Reçu: {parsed.surface_form if hasattr(parsed, 'surface_form') else user_msg}"
                 response = self.language.respond(user_msg, context={})
             except Exception:
                 try:
@@ -187,6 +190,12 @@ class CognitiveArchitecture:
                 response = f"Reçu: {user_msg}"
 
         try:
+            if hasattr(self, "emotions") and self.emotions:
+                # met à jour mood + dispatch modulateurs
+                self.emotions.step()
+        except Exception:
+            pass
+
             if hasattr(self.memory, "semantic") and self.memory.semantic:
                 self.memory.semantic.step()
         except Exception:

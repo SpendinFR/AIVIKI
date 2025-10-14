@@ -199,9 +199,21 @@ class GoalSystem:
         
         # === BUTS FONDAMENTAUX INNÉS ===
         self._initialize_fundamental_goals()
-        
+
         print("🎯 Système de buts initialisé")
-    
+
+    def apply_emotional_bias(self, bias_by_domain: dict, curiosity_gain: float = 0.0):
+        """
+        bias_by_domain: ex {"attention": +0.15, "langage": +0.05}
+        → augmente légèrement les priorités correspondantes (clamp 0..1)
+        curiosity_gain → augmente le bonus d'exploration/sous-buts
+        """
+        try:
+            self.priority_bias = bias_by_domain
+            self.curiosity_bonus = float(curiosity_gain)
+        except Exception:
+            pass
+
     def _initialize_core_values(self) -> Dict[str, float]:
         """Initialise les valeurs fondamentales innées"""
         return {
