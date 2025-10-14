@@ -95,10 +95,13 @@ class Orchestrator:
     def action_cycle(self):
         # traiter d’abord un goal d’apprentissage si présent
         picked = None
-        for gid, p in self.planner.state["plans"].items():
+        with self.planner.lock:
+            plan_ids = list(self.planner.state["plans"].keys())
+        for gid in plan_ids:
             # priorité aux goals learn_*
             if gid.startswith("learn_"):
-                picked = gid; break
+                picked = gid
+                break
         if not picked:
             picked = "understand_humans"
 
