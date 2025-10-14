@@ -107,6 +107,13 @@ class CognitiveArchitecture:
 
         if user_msg:
             try:
+                response = self.language.respond(user_msg, context={})
+            except Exception:
+                try:
+                    parsed = self.language.parse_utterance(user_msg, context={})
+                    response = f"Reçu: {parsed.surface_form if hasattr(parsed, 'surface_form') else user_msg}"
+                except Exception:
+                    response = f"Reçu: {user_msg}"
                 # Language v2 -> réponse introspective
                 response = self.language.respond(user_msg, context={
                     "global_activation": getattr(self, "global_activation", 0.5),
