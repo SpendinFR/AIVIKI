@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from collections import deque
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Deque, Dict, Iterable, List, Optional
@@ -179,6 +180,22 @@ class GoalSystem:
         self.pending_actions.extend(self._goal_to_actions(active))
 
     def _goal_to_actions(self, goal: GoalNode) -> Deque[Dict[str, Any]]:
+        # Détection d’un objectif d’apprentissage de concept (générique)
+        try:
+            desc = (goal.description or "").strip()
+            m = re.search(r"Apprendre le concept «\s*(.+?)\s*»", desc)
+            if m:
+                concept = m.group(1)
+                actions = deque()
+                actions.append({
+                    "type": "learn_concept",
+                    "payload": {"concept": concept, "goal_id": goal.id},
+                    "priority": min(1.0, goal.priority + 0.2),
+                })
+                return actions
+        except Exception:
+            pass
+
         meta = self.metadata.get(goal.id)
         payload_base = {
             "goal_id": goal.id,
