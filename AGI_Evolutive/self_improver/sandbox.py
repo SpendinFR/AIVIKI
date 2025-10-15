@@ -11,6 +11,30 @@ from .metrics import aggregate_metrics
 ArchFactory = Callable[[Dict[str, Any]], Any]
 
 
+class DatasetRegistry:
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self._registry = self._load()
+
+    def _load(self) -> Dict[str, Dict[str, List[str]]]:
+        if os.path.exists(self.path):
+            try:
+                with open(self.path, "r", encoding="utf-8") as handle:
+                    data = json.load(handle)
+                    if isinstance(data, dict):
+                        return data
+            except Exception:
+                pass
+        return {}
+
+    def datasets(self, domain: str, level: str) -> List[str]:
+        entries = self._registry.get(domain, {})
+        datasets = entries.get(level)
+        if isinstance(datasets, list):
+            return [str(name) for name in datasets]
+        return []
+
+
 class SandboxRunner:
     """Offline sandbox responsible for running evaluation suites."""
 
@@ -18,6 +42,8 @@ class SandboxRunner:
         self.arch_factory = arch_factory
         self.eval_root = eval_root
         os.makedirs(self.eval_root, exist_ok=True)
+        self.registry = DatasetRegistry(os.path.join(self.eval_root, "registry.json"))
+        self.curriculum_level = "base"
 
     # ------------------------------------------------------------------
     # Evaluation data loading helpers
@@ -34,12 +60,24 @@ class SandboxRunner:
                     continue
         return rows
 
+    def _load_from_registry(self, domain: str) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        datasets = self.registry.datasets(domain, self.curriculum_level)
+        if not datasets:
+            datasets = [domain]
+        for name in datasets:
+            rows.extend(self._load_eval(name))
+        return rows
+
+    def set_curriculum_level(self, level: str) -> None:
+        self.curriculum_level = level
+
     # ------------------------------------------------------------------
     # Individual evaluations
     def _eval_abduction(
         self, arch: Any, tasks: List[Dict[str, Any]] | None = None
     ) -> Tuple[List[Dict[str, float]], List[float]]:
-        tasks = tasks or self._load_eval("abduction")
+        tasks = tasks or self._load_from_registry("abduction")
         if not tasks:
             tasks = [
                 {"obs": "énigme simple: indice A & B", "gold": "hyp_a"},
@@ -64,7 +102,7 @@ class SandboxRunner:
     def _eval_concepts(
         self, arch: Any, tasks: List[Dict[str, Any]] | None = None
     ) -> Tuple[List[Dict[str, float]], List[float]]:
-        tasks = tasks or self._load_eval("concepts")
+        tasks = tasks or self._load_from_registry("concepts")
         if not tasks:
             tasks = [
                 {

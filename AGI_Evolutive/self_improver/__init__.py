@@ -38,6 +38,7 @@ class SelfImprover:
             arch_factory=arch_factory,
         )
         self._apply_overrides = apply_overrides
+        self.curriculum_level = "base"
 
         # Ensure any previously promoted overrides affect the live architecture.
         self._refresh_live_overrides()
@@ -48,11 +49,17 @@ class SelfImprover:
         return self.prom.load_active()
 
     def _refresh_live_overrides(self) -> None:
-        if not self._apply_overrides:
-            return
         try:
             overrides = self.prom.load_active()
         except Exception:
+            overrides = {}
+        level = str(overrides.get("curriculum_level", self.curriculum_level))
+        self.curriculum_level = level
+        try:
+            self.sandbox.set_curriculum_level(level)
+        except Exception:
+            pass
+        if not self._apply_overrides:
             return
         try:
             self._apply_overrides(overrides)
@@ -67,6 +74,87 @@ class SelfImprover:
 
     # ------------------------------------------------------------------
     # Public API
+    def set_curriculum_level(self, level: str) -> None:
+        self.curriculum_level = str(level)
+        try:
+            self.sandbox.set_curriculum_level(self.curriculum_level)
+        except Exception:
+            pass
+
+    def rotate_curriculum(self, level: str) -> Optional[str]:
+        self.set_curriculum_level(level)
+        overrides = dict(self._active_overrides())
+        overrides["curriculum_level"] = self.curriculum_level
+        cid = self.prom.stage_candidate(overrides, {"acc": 0.0}, metadata={"kind": "curriculum"})
+        self._log_experiment({"kind": "curriculum_rotate", "level": self.curriculum_level, "cid": cid})
+        try:
+            if hasattr(self.memory, "add_memory"):
+                self.memory.add_memory(
+                    kind="curriculum_rotated",
+                    content=self.curriculum_level,
+                    metadata={"candidate_id": cid},
+                )
+        except Exception:
+            pass
+        return cid
+
+    def run_code_cycle(self, n_candidates: int = 2) -> Optional[str]:
+        if not self.code_evolver:
+            return None
+        base = self._active_overrides()
+        champion_eval = self.sandbox.run_all(base)
+        champion_metrics = aggregate_metrics(champion_eval.get("samples", []))
+        best_cid: Optional[str] = None
+        for patch in self.code_evolver.generate_candidates(max(1, n_candidates)):
+            serialised = self.code_evolver.serialise_patch(patch)
+            report = self.code_evolver.evaluate_patch(patch, champion_metrics)
+            payload = {
+                "kind": "code_cycle",
+                "summary": report.get("summary"),
+                "passed": report.get("passed", False),
+                "file": report.get("file"),
+            }
+            self._log_experiment(payload)
+            if not report.get("passed", False):
+                try:
+                    if hasattr(self.memory, "add_memory"):
+                        self.memory.add_memory(
+                            kind="code_tests_failed",
+                            content=str(report.get("summary", ""))[:160],
+                            metadata={"lint": report.get("lint"), "static": report.get("static")},
+                        )
+                except Exception:
+                    pass
+                continue
+            evaluation = report.get("evaluation", {})
+            aggregated = aggregate_metrics(evaluation.get("samples", []))
+            metadata = {
+                "kind": "code_patch",
+                "file": report.get("file"),
+                "diff": report.get("diff"),
+                "summary": report.get("summary"),
+                "quality": report.get("quality"),
+                "canary": report.get("canary"),
+                "patch": serialised,
+            }
+            cid = self.prom.stage_candidate(base, aggregated, metadata=metadata)
+            best_cid = cid
+            try:
+                if hasattr(self.memory, "add_memory"):
+                    self.memory.add_memory(
+                        kind="code_candidate",
+                        content=str(report.get("summary", ""))[:160],
+                        metadata={"candidate_id": cid, "file": report.get("file")},
+                    )
+                    self.memory.add_memory(
+                        kind="code_tests_passed",
+                        content=str(report.get("summary", ""))[:160],
+                        metadata={"candidate_id": cid, "evaluation": aggregated},
+                    )
+            except Exception:
+                pass
+        return best_cid
+
     def run_cycle(self, n_candidates: int = 4) -> Optional[str]:
         base = self._active_overrides()
         champion_eval = self.sandbox.run_all(base)
