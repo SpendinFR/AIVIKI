@@ -89,10 +89,11 @@ class Planner:
 
     def pending_goals(self) -> List[Dict[str, Any]]:
         with self._lock:
+            pending_statuses = {"todo", "doing", "blocked"}
             return [
                 p
                 for p in self.state.get("plans", {}).values()
-                if any(s.get("status") == "pending" for s in p.get("steps", []))
+                if any(s.get("status") in pending_statuses for s in p.get("steps", []))
             ]
     def simulate_action(self, step_desc: str) -> Dict[str, Any]:
         length = len(step_desc)
