@@ -57,7 +57,7 @@ class MemoryStore:
     def flush(self):
         if self._dirty:
             self._save()
-from core.config import cfg
+from AGI_Evolutive.core.config import cfg
 
 _DIR = cfg()["MEM_DIR"]
 

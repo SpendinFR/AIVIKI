@@ -51,8 +51,8 @@ import os
 import time
 from typing import Any, Dict, List
 
-from core.config import cfg
-from utils import now_iso, safe_write_json
+from AGI_Evolutive.core.config import cfg
+from AGI_Evolutive.utils import now_iso, safe_write_json
 
 _DEFAULT_SELF: Dict[str, Any] = {
     "identity": {

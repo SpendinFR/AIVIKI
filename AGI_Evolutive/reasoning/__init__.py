@@ -221,7 +221,12 @@ from collections import deque
 from typing import Any, Dict, List, Optional
 import time
 
-from reasoning.structures import Hypothesis, Test, Evidence, episode_record
+from AGI_Evolutive.reasoning.structures import (
+    Evidence,
+    Hypothesis,
+    Test,
+    episode_record,
+)
 
 
 class ReasoningSystem:
