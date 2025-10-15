@@ -276,16 +276,48 @@ class LocalRule:
 
 class BeliefGraph:
     """Stockage JSONL (append-only) + index mémoire, gestion contradictions et mise à jour 'AGM-lite'."""
-    def __init__(self, path: str = "data/beliefs.jsonl") -> None:
+
+    def __init__(
+        self,
+        path: str = "data/beliefs.jsonl",
+        *,
+        ontology: Optional[Ontology] = None,
+        entity_linker: Optional[EntityLinker] = None,
+    ) -> None:
         self.path = path
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-        self.ontology = Ontology.default()
-        self.entity_linker = EntityLinker()
+        self.ontology = ontology or Ontology.default()
+        self.entity_linker = entity_linker or EntityLinker()
         self._cache: Dict[str, Belief] = {}
         self._events: Dict[str, Event] = {}
         self._rules: List[LocalRule] = self._default_rules()
         self.decay_rates = {"anchor": 0.0001, "episode": 0.001}
         self._load()
+
+    def set_entity_linker(self, linker: EntityLinker) -> None:
+        self.entity_linker = linker
+        linker.beliefs = self
+
+    def flush(self) -> None:
+        self._flush()
+
+    def iter_beliefs(self) -> Iterable[Belief]:
+        return list(self._cache.values())
+
+    def find_contradictions(self, min_conf: float = 0.6) -> List[Tuple[Belief, Belief]]:
+        contradictions: List[Tuple[Belief, Belief]] = []
+        index: Dict[Tuple[str, str], Belief] = {}
+        for belief in self._cache.values():
+            if belief.confidence < min_conf:
+                continue
+            key = (belief.subject, belief.relation)
+            if belief.polarity < 0:
+                positive = index.get(key)
+                if positive and positive.value == belief.value:
+                    contradictions.append((positive, belief))
+            else:
+                index[key] = belief
+        return contradictions
 
     def _load(self) -> None:
         self._cache.clear()

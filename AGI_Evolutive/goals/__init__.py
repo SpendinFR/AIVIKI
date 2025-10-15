@@ -196,6 +196,36 @@ class GoalSystem:
         except Exception:
             pass
 
+        try:
+            desc = (goal.description or "").strip()
+            m = re.match(r"Résoudre contradiction «\s*(.+?)\s*,\s*(.+?)\s*»", desc)
+            if m:
+                subject, relation = m.groups()
+                base_priority = getattr(goal, "priority", 0.6)
+                actions = deque()
+                actions.append(
+                    {
+                        "type": "abduce",
+                        "payload": {"observation": f"contradiction:{subject}:{relation}"},
+                        "priority": min(1.0, base_priority + 0.1),
+                    }
+                )
+                actions.append(
+                    {
+                        "type": "assert_fact",
+                        "payload": {
+                            "subject": subject.strip(),
+                            "relation": relation.strip(),
+                            "value": "(à confirmer)",
+                            "confidence": 0.6,
+                        },
+                        "priority": base_priority,
+                    }
+                )
+                return actions
+        except Exception:
+            pass
+
         meta = self.metadata.get(goal.id)
         payload_base = {
             "goal_id": goal.id,

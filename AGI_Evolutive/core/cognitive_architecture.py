@@ -1,8 +1,10 @@
+import re
 import time
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Tuple
 
 from AGI_Evolutive.autonomy import AutonomyManager
 from AGI_Evolutive.beliefs.graph import BeliefGraph, Evidence
+from AGI_Evolutive.knowledge.ontology import EntityLinker, Ontology
 from AGI_Evolutive.cognition.evolution_manager import EvolutionManager
 from AGI_Evolutive.cognition.reward_engine import RewardEngine
 from AGI_Evolutive.core.telemetry import Telemetry
@@ -27,12 +29,16 @@ from AGI_Evolutive.models import IntentModel, UserModel
 from AGI_Evolutive.perception import PerceptionSystem
 from AGI_Evolutive.reasoning import ReasoningSystem
 from AGI_Evolutive.reasoning.abduction import AbductiveReasoner, Hypothesis
+from AGI_Evolutive.reasoning.causal import CounterfactualSimulator, SCMStore
+from AGI_Evolutive.reasoning.question_engine import QuestionEngine
 from AGI_Evolutive.runtime.logger import JSONLLogger
 from AGI_Evolutive.runtime.response import ensure_contract, format_agent_reply
 from AGI_Evolutive.runtime.scheduler import Scheduler
 from AGI_Evolutive.world_model import PhysicsEngine
 from AGI_Evolutive.self_improver import SelfImprover
+from AGI_Evolutive.self_improver.code_evolver import CodeEvolver
 from AGI_Evolutive.self_improver.promote import PromotionManager
+from AGI_Evolutive.planning.htn import HTNPlanner
 
 
 class CognitiveArchitecture:
@@ -102,7 +108,13 @@ class CognitiveArchitecture:
 
         # Advanced subsystems
         self.style_profiler = StyleProfiler(persist_path="data/style_profiles.json")
-        self.beliefs = BeliefGraph()
+        self.ontology = Ontology()
+        self.beliefs = BeliefGraph(ontology=self.ontology)
+        self.entity_linker = EntityLinker(self.ontology, self.beliefs)
+        self.beliefs.set_entity_linker(self.entity_linker)
+        self.scm = SCMStore(self.beliefs, self.ontology)
+        self.simulator = CounterfactualSimulator(self.scm)
+        self.planner = HTNPlanner(self.beliefs, self.ontology)
         self.user_model = UserModel()
         try:
             persona_tone = (self.user_model.describe().get("persona", {}) or {}).get("tone")
@@ -111,8 +123,13 @@ class CognitiveArchitecture:
         except Exception:
             pass
         self.calibration = CalibrationMeter()
+        self.calibration_abduction = CalibrationMeter(path="data/calibration_abduction.jsonl")
+        self.calibration_concepts = CalibrationMeter(path="data/calibration_concepts.jsonl")
+        self.calibration_causal = CalibrationMeter(path="data/calibration_causal.jsonl")
+        self.calibration_plan = CalibrationMeter(path="data/calibration_plan.jsonl")
         self.novelty_detector = NoveltyDetector()
         self.abduction = AbductiveReasoner(self.beliefs, self.user_model)
+        self.abduction.qengine = QuestionEngine(self.beliefs, self.user_model)
         self.reward_engine = RewardEngine(
             architecture=self,
             memory=self.memory,
@@ -180,9 +197,11 @@ class CognitiveArchitecture:
                 apply_overrides=lambda overrides: _apply_overrides(self, overrides),
             )
             self.promotions = self.self_improver.prom
+            self.code_evolver: Optional[CodeEvolver] = getattr(self.self_improver, "code_evolver", None)
         else:
             self.self_improver = None
             self.promotions = None
+            self.code_evolver = None
 
         # Bind helper components
         self._bind_interfaces()
@@ -207,6 +226,8 @@ class CognitiveArchitecture:
             self.scheduler.start()
 
         self.telemetry.log("ready", "core", {"status": "initialized"})
+        self._cycle_counter = 0
+        self._decay_period = 8
 
     # ------------------------------------------------------------------
     # Helpers
@@ -297,6 +318,10 @@ class CognitiveArchitecture:
         if not user_msg:
             self._tick_background_systems()
             return self.last_output_text
+
+        self._cycle_counter += 1
+        if self._cycle_counter % self._decay_period == 0:
+            self._apply_belief_decay()
 
         try:
             if self.self_improver and self.self_improver.try_promote_from_reply(user_msg):
@@ -400,6 +425,17 @@ class CognitiveArchitecture:
         abduction_result: Optional[Dict[str, Any]] = None
         if _looks_like_abduction(user_msg):
             abduction_result = self._handle_abduction_request(user_msg)
+        else:
+            if self._looks_like_causal(trimmed_lower):
+                causal_reply = self._handle_causal(user_msg)
+                if causal_reply:
+                    self.last_output_text = causal_reply
+                    return causal_reply
+            if self._looks_like_plan(trimmed_lower):
+                plan_reply = self._handle_plan(user_msg)
+                if plan_reply:
+                    self.last_output_text = plan_reply
+                    return plan_reply
 
         surface = user_msg
         hints = {}
@@ -426,7 +462,7 @@ class CognitiveArchitecture:
             novelty_score, novelty_flag = self.novelty_detector.assess(surface, update=True)
             if novelty_flag and hasattr(self.memory, "add_memory"):
                 self.memory.add_memory(
-                    kind="novelty_alert",
+                    kind="novel_case",
                     content=surface[:160],
                     metadata={"score": float(novelty_score), "user_id": self.last_user_id},
                 )
@@ -442,6 +478,8 @@ class CognitiveArchitecture:
         except Exception:
             novelty_score = 0.0
             novelty_flag = False
+
+        self._emit_structured_memories(surface)
 
         # Capture d'une confirmation utilisateur pour valider un apprentissage récent
         try:
@@ -535,6 +573,15 @@ class CognitiveArchitecture:
                     reason_out.get("summary", "")
                     + " | ⚠️ abstention calibrée (demander précisions)."
                 )
+                try:
+                    if hasattr(self.memory, "add_memory"):
+                        self.memory.add_memory(
+                            kind="abstain",
+                            content=surface[:160],
+                            metadata={"domain": calibration_domain, "confidence": adjusted_confidence},
+                        )
+                except Exception:
+                    pass
         try:
             if not abduction_result and hasattr(self, "question_manager") and self.question_manager:
                 severity = max(0.0, 1.0 - adjusted_confidence)
@@ -696,7 +743,7 @@ class CognitiveArchitecture:
 
         ev_id = None
         try:
-            ev_id = self.calibration.log_prediction(
+            ev_id = self.calibration_abduction.log_prediction(
                 domain="abduction", p=float(top.score), meta={"label": top.label}
             )
             if hasattr(self.memory, "add_memory"):
@@ -771,6 +818,201 @@ class CognitiveArchitecture:
                         kind="calibration_feedback",
                         content=t,
                         metadata={"event_id": ev_id, "delta_hedging": delta, "domain": domain},
+                    )
+        except Exception:
+            pass
+
+    def _emit_structured_memories(self, text: str) -> None:
+        if not text or not hasattr(self.memory, "add_memory"):
+            return
+        try:
+            entities = re.findall(r"\b[A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜÇ][\w'’\-]{2,}\b", text)
+            seen = set()
+            for ent in entities[:6]:
+                key = ent.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                linked = self.entity_linker.link(ent)
+                self.memory.add_memory(
+                    kind="entity_detected",
+                    content=ent,
+                    metadata={"type": linked["type"], "canonical": linked["canonical"]},
+                )
+        except Exception:
+            pass
+
+        try:
+            for match in re.finditer(
+                r"([A-Za-zÀ-ÖØ-öø-ÿ'’\-]{2,})\s+(est|sont|sera|éta(?:is|it|ient))\s+([^\.;]+)",
+                text,
+            ):
+                subject = match.group(1).strip()
+                relation = match.group(2).strip().lower()
+                value = match.group(3).strip()
+                if not subject or not value:
+                    continue
+                subj_link = self.entity_linker.link(subject)
+                val_link = self.entity_linker.link(value)
+                self.memory.add_memory(
+                    kind="fact_extracted",
+                    content=f"{subject} {relation} {value}",
+                    metadata={
+                        "subject": subj_link["canonical"],
+                        "relation": relation,
+                        "value": val_link["canonical"],
+                        "polarity": +1,
+                    },
+                )
+        except Exception:
+            pass
+
+    def _looks_like_causal(self, text: str) -> bool:
+        if not text:
+            return False
+        cues = [
+            "pourquoi",
+            "cause",
+            "causal",
+            "que se passerait-il",
+            "que se passerait il",
+        ]
+        if any(cue in text for cue in cues):
+            return True
+        return " si " in text and "alors" in text
+
+    def _looks_like_plan(self, text: str) -> bool:
+        if not text:
+            return False
+        cues = ["planifie", "planifier", "plan", "comment atteindre", "objectif"]
+        return any(cue in text for cue in cues)
+
+    def _parse_cause_effect(self, text: str) -> Tuple[Optional[str], Optional[str]]:
+        match = re.search(r"si\s+(.+?)\s+alors\s+(.+)", text, re.IGNORECASE)
+        if match:
+            return match.group(1).strip(), match.group(2).strip()
+        return None, None
+
+    def _handle_causal(self, user_msg: str) -> Optional[str]:
+        if not getattr(self, "simulator", None):
+            return None
+        cause, effect = self._parse_cause_effect(user_msg)
+        query = {
+            "cause": cause,
+            "effect": effect,
+            "scenario": {"utterance": user_msg},
+        }
+        try:
+            report = self.simulator.run(query)
+        except Exception as exc:
+            return f"Je n'ai pas pu exécuter la simulation causale ({exc})."
+
+        try:
+            if hasattr(self.memory, "add_memory"):
+                self.memory.add_memory(
+                    kind="causal_query",
+                    content=user_msg[:160],
+                    metadata={"cause": cause, "effect": effect},
+                )
+        except Exception:
+            pass
+
+        probability = 0.7 if report.supported else 0.35
+        event_id = None
+        try:
+            event_id = self.calibration_causal.log_prediction(
+                "causal", probability, meta={"cause": cause, "effect": effect}
+            )
+            if hasattr(self.memory, "add_memory"):
+                self.memory.add_memory(
+                    kind="calibration_observation",
+                    content="causal_pred",
+                    metadata={"event_id": event_id, "p": probability, "domain": "causal"},
+                )
+        except Exception:
+            event_id = None
+
+        try:
+            if hasattr(self.memory, "add_memory"):
+                self.memory.add_memory(
+                    kind="counterfactual_result",
+                    content=f"{cause or 'cause?'} → {effect or 'effet?'}",
+                    metadata={
+                        "supported": report.supported,
+                        "evidence": report.evidence,
+                        "intervention": report.intervention,
+                    },
+                )
+        except Exception:
+            pass
+
+        evidence_text = (
+            "J'observe un lien causal existant dans ma base." if report.supported else "Je ne possède pas de lien causal établi pour cette relation."
+        )
+        sim_texts = [sim.get("outcome", "") for sim in report.simulations if sim]
+        if sim_texts:
+            evidence_text += " " + sim_texts[0][:160]
+        return evidence_text
+
+    def _handle_plan(self, user_msg: str) -> Optional[str]:
+        if not getattr(self, "planner", None):
+            return None
+        goal = user_msg
+        match = re.search(r"(?:planifie|planifier|plan pour|comment atteindre)\s+(.+)", user_msg, re.IGNORECASE)
+        if match:
+            goal = match.group(1).strip()
+        steps = self.planner.plan("diagnostic_general", context={"goal": goal}) or [
+            f"Clarifier le résultat attendu pour « {goal} ».",
+            "Identifier ressources et contraintes majeures.",
+            "Découper en trois actions concrètes et dater la première.",
+        ]
+
+        probability = min(0.95, 0.55 + 0.05 * len(steps))
+        event_id = None
+        try:
+            event_id = self.calibration_plan.log_prediction(
+                "plan", probability, meta={"goal": goal}
+            )
+            if hasattr(self.memory, "add_memory"):
+                self.memory.add_memory(
+                    kind="calibration_observation",
+                    content="plan_pred",
+                    metadata={"event_id": event_id, "p": probability, "domain": "plan"},
+                )
+        except Exception:
+            event_id = None
+
+        try:
+            if hasattr(self.memory, "add_memory"):
+                self.memory.add_memory(
+                    kind="plan_created",
+                    content=goal[:160],
+                    metadata={"steps": steps},
+                )
+        except Exception:
+            pass
+
+        numbered = "\n".join(f"{idx+1}. {step}" for idx, step in enumerate(steps))
+        return f"Plan proposé pour « {goal} » :\n{numbered}"
+
+    def _apply_belief_decay(self) -> None:
+        try:
+            now = time.time()
+            decayed = 0
+            for belief in self.beliefs.iter_beliefs():
+                age = now - belief.updated_at
+                if age < 180 or belief.confidence <= 0.2:
+                    continue
+                belief.confidence = max(0.0, belief.confidence - 0.02)
+                belief.updated_at = now
+                decayed += 1
+            if decayed:
+                self.beliefs.flush()
+                if hasattr(self.memory, "add_memory"):
+                    self.memory.add_memory(
+                        kind="belief_decay",
+                        content=f"{decayed} croyances ajustées",
+                        metadata={"timestamp": now},
                     )
         except Exception:
             pass

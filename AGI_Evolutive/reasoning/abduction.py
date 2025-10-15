@@ -5,6 +5,7 @@ import datetime as dt
 import re
 
 from .structures import CausalStore, DomainSimulator, HTNPlanner, SimulationResult, TaskNode
+from .question_engine import QuestionEngine
 
 @dataclass
 class Hypothesis:
@@ -39,6 +40,7 @@ class AbductiveReasoner:
         simulator: Optional[DomainSimulator] = None,
         planner: Optional[HTNPlanner] = None,
         question_policy: Optional["EntropyQuestionPolicy"] = None,
+        question_engine: Optional[QuestionEngine] = None,
     ):
         self.beliefs = beliefs
         self.user = user_model
@@ -47,6 +49,7 @@ class AbductiveReasoner:
         self.simulator = simulator or DomainSimulator()
         self.planner = planner or HTNPlanner()
         self.question_policy = question_policy or EntropyQuestionPolicy()
+        self.qengine = question_engine or QuestionEngine(beliefs, user_model)
 
         if not self.planner.has_template("diagnostic_general"):
             self._register_default_plan()
@@ -117,11 +120,18 @@ class AbductiveReasoner:
                 )
             )
         hyps.sort(key=lambda h: h.score, reverse=True)
-        # active question si nécessaire
-        if self.question_policy:
+        if self.qengine:
+            try:
+                self.qengine.set_hypotheses(hyps)
+                question = self.qengine.best_question(hyps, observation_text)
+            except Exception:
+                question = None
+        else:
+            question = None
+        if not question and self.question_policy:
             question = self.question_policy.suggest(hyps, observation_text)
-            if question and hyps:
-                hyps[0].ask_next = question
+        if question and hyps:
+            hyps[0].ask_next = question
         return hyps[:5]
 
     def _craft_question(self, a: str, b: str) -> str:

@@ -89,7 +89,29 @@ class CuriosityEngine:
         except Exception:
             pass
 
-        return {"metacog": status, "reasoning": reasoning_stats, "novel_concepts": novel_concepts}
+        contradictions: List[Dict[str, Any]] = []
+        beliefs = getattr(self.architecture, "beliefs", None)
+        if beliefs:
+            try:
+                for positive, negative in beliefs.find_contradictions(min_conf=0.7):
+                    contradictions.append(
+                        {
+                            "subject": positive.subject,
+                            "relation": positive.relation,
+                            "value": positive.value,
+                            "positive": positive.id,
+                            "negative": negative.id,
+                        }
+                    )
+            except Exception:
+                contradictions = []
+
+        return {
+            "metacog": status,
+            "reasoning": reasoning_stats,
+            "novel_concepts": novel_concepts,
+            "contradictions": contradictions,
+        }
 
     def _identify_gaps(self, context: Dict[str, Any]) -> List[Dict[str, Any]]:
         performance = context.get("metacog", {}).get("performance_metrics", {})
@@ -112,6 +134,18 @@ class CuriosityEngine:
         # NOUVEAU : apprendre des concepts nouveaux (générique)
         for c in context.get("novel_concepts", [])[:3]:
             gaps.append({"domain": "novel_concept", "concept": c, "score": 0.4, "severity": 0.6})
+
+        for contradiction in context.get("contradictions", [])[:1]:
+            gaps.append(
+                {
+                    "domain": "belief_contradiction",
+                    "subject": contradiction.get("subject"),
+                    "relation": contradiction.get("relation"),
+                    "positive": contradiction.get("positive"),
+                    "negative": contradiction.get("negative"),
+                    "severity": 0.85,
+                }
+            )
 
         if not gaps:
             gaps.append({"domain": "exploration", "score": 0.5, "severity": 0.4})
@@ -137,6 +171,15 @@ class CuriosityEngine:
                 "Donner 2 exemples et 1 contre-exemple pertinents.",
                 "Énoncer 1 règle de décision utilisant ce concept.",
             ]
+        if gap.get("domain") == "belief_contradiction":
+            subj = str(gap.get("subject", "?")).strip()
+            rel = str(gap.get("relation", "?")).strip()
+            description = f"Résoudre contradiction « {subj}, {rel} » dans le graphe de croyances."
+            criteria = [
+                "Lister les preuves soutenant chaque version.",
+                "Identifier une observation décisive à collecter.",
+                "Mettre à jour la croyance avec justification." ,
+            ]
 
         return {
             "description": description,
@@ -157,6 +200,10 @@ class CuriosityEngine:
             return "Explorer un nouveau sujet pour enrichir la base de connaissances."
         if domain == "novel_concept":
             return "Apprendre un concept récemment rencontré."
+        if domain == "belief_contradiction":
+            subj = gap.get("subject", "?")
+            rel = gap.get("relation", "?")
+            return f"Résoudre contradiction « {subj}, {rel} » identifiée dans le graphe."
         return f"Améliorer la métrique {domain} par une expérimentation ciblée."
 
     def _default_criteria(self, gap: Dict[str, Any]) -> List[str]:
@@ -165,4 +212,6 @@ class CuriosityEngine:
             return ["Documenter 3 contre-exemples et une stratégie de prévention."]
         if domain == "exploration":
             return ["Produire une carte mentale du sujet exploré."]
+        if domain == "belief_contradiction":
+            return ["Comparer les justifications et collecter une preuve supplémentaire."]
         return ["Mesurer une amélioration significative après 3 essais contrôlés."]

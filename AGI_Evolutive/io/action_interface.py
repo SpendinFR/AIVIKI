@@ -217,11 +217,20 @@ class ActionInterface:
                 "learn_concept": self._h_learn_concept,
                 "search_memory": self._h_search_memory,
                 "update_belief": lambda act: self._h_update_belief(act.payload, act.context),
+                "assert_fact": lambda act: self._h_assert_fact(act.payload, act.context),
+                "link_entity": lambda act: self._h_link_entity(act.payload, act.context),
                 "abduce": lambda act: self._h_abduce(act.payload, act.context),
                 "set_user_pref": lambda act: self._h_set_user_pref(act.payload, act.context),
                 "self_improve": lambda act: self._h_self_improve(act.payload, act.context),
                 "promote": lambda act: self._h_promote(act.payload, act.context),
                 "rollback": lambda act: self._h_rollback(act.payload, act.context),
+                "simulate": self._h_simulate,
+                "plan": self._h_plan,
+                "ask_clarifying": lambda act: self._h_ask(act.payload, act.context),
+                "code_evolve": lambda act: self._h_code_evolve(act.payload, act.context),
+                "promote_code": lambda act: self._h_promote_code(act.payload, act.context),
+                "rollback_code": lambda act: self._h_rollback_code(act.payload, act.context),
+                "rotate_curriculum": lambda act: self._h_rotate_curriculum(act.payload, act.context),
             }
             handler = handlers.get(act.type, self._h_simulate)
 
@@ -417,6 +426,87 @@ class ActionInterface:
             pass
         return {"ok": True, "belief": {"id": b.id, "conf": b.confidence}}
 
+    def _h_assert_fact(self, payload: Dict[str, Any], context: Dict[str, Any]):
+        arch = self.bound.get("arch") if hasattr(self, "bound") else None
+        if not arch or not hasattr(arch, "beliefs"):
+            return {"ok": False, "error": "beliefs_unavailable"}
+        payload = payload or {}
+        subject = payload.get("subject")
+        relation = payload.get("relation")
+        value = payload.get("value")
+        if not all([subject, relation, value]):
+            return {"ok": False, "error": "missing_fact_fields"}
+        confidence = float(payload.get("confidence", 0.6))
+        polarity = int(payload.get("polarity", 1))
+        evidence_text = payload.get("evidence") or (context or {}).get("evidence") or f"{subject} {relation} {value}"
+        ev = Evidence.new("action", "assert_fact", evidence_text, weight=min(1.0, max(0.0, confidence)))
+        belief = arch.beliefs.upsert(
+            subject,
+            relation,
+            value,
+            confidence=confidence,
+            polarity=polarity,
+            evidence=ev,
+            created_by="action_interface",
+        )
+        try:
+            scm = getattr(arch, "scm", None)
+            if scm and hasattr(scm, "refresh_from_belief"):
+                scm.refresh_from_belief(belief)
+        except Exception:
+            pass
+        try:
+            memory = self.bound.get("memory") if hasattr(self, "bound") else None
+            if memory and hasattr(memory, "add_memory"):
+                memory.add_memory(
+                    kind="belief_update",
+                    content=f"{belief.subject} {belief.relation} {belief.value}",
+                    metadata={"conf": belief.confidence, "pol": belief.polarity},
+                )
+        except Exception:
+            pass
+        contradictions: List[Dict[str, Any]] = []
+        try:
+            for positive, negative in arch.beliefs.find_contradictions(min_conf=0.6):
+                if (
+                    positive.subject == belief.subject
+                    and positive.relation == belief.relation
+                    and positive.value == belief.value
+                ):
+                    contradictions.append({"positive": positive.id, "negative": negative.id})
+                    memory = self.bound.get("memory") if hasattr(self, "bound") else None
+                    if memory and hasattr(memory, "add_memory"):
+                        memory.add_memory(
+                            kind="contradiction_detected",
+                            content=f"{positive.subject} {positive.relation}",
+                            metadata={"positive": positive.id, "negative": negative.id},
+                        )
+        except Exception:
+            pass
+        return {"ok": True, "belief_id": belief.id, "contradictions": contradictions}
+
+    def _h_link_entity(self, payload: Dict[str, Any], context: Dict[str, Any]):
+        payload = payload or {}
+        text = payload.get("text")
+        if not text:
+            return {"ok": False, "error": "missing_text"}
+        arch = self.bound.get("arch") if hasattr(self, "bound") else None
+        linker = getattr(arch, "entity_linker", None) if arch else None
+        if not linker:
+            return {"ok": False, "error": "linker_unavailable"}
+        result = linker.link(text, hint_type=payload.get("type"))
+        try:
+            memory = self.bound.get("memory") if hasattr(self, "bound") else None
+            if memory and hasattr(memory, "add_memory"):
+                memory.add_memory(
+                    kind="entity_resolved",
+                    content=text,
+                    metadata=result,
+                )
+        except Exception:
+            pass
+        return {"ok": True, "entity": result}
+
     def _h_abduce(self, payload: Dict[str, Any], context: Dict[str, Any]):
         arch = self.bound.get("arch") if hasattr(self, "bound") else None
         if not arch or not hasattr(arch, "abduction"):
@@ -503,8 +593,144 @@ class ActionInterface:
             return {"ok": False, "error": str(e)}
 
     def _h_simulate(self, act: Action) -> Dict[str, Any]:
-        ok = (time.time() * 1000) % 10 != 0
-        return {"ok": bool(ok), "simulated": True, "type": act.type}
+        arch = self.bound.get("arch")
+        if not arch or not hasattr(arch, "simulator"):
+            return {"ok": False, "error": "simulator_unavailable"}
+        query = dict(act.payload or {})
+        try:
+            report = arch.simulator.run(query)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        try:
+            memory = self.bound.get("memory") if hasattr(self, "bound") else None
+            if memory and hasattr(memory, "add_memory"):
+                memory.add_memory(
+                    kind="counterfactual_result",
+                    content=str(query)[:160],
+                    metadata={"supported": report.supported},
+                )
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "supported": report.supported,
+            "evidence": report.evidence,
+            "intervention": report.intervention,
+            "simulations": report.simulations,
+        }
+
+    def _h_plan(self, act: Action) -> Dict[str, Any]:
+        arch = self.bound.get("arch")
+        if not arch or not hasattr(arch, "planner"):
+            return {"ok": False, "error": "planner_unavailable"}
+        goal = act.payload.get("goal") or act.payload.get("text") or "objectif"
+        steps = arch.planner.plan("diagnostic_general", context={"goal": goal})
+        if not steps:
+            steps = [
+                f"Clarifier le résultat pour « {goal} ».",
+                "Lister les ressources nécessaires.",
+                "Programmer une première action concrète.",
+            ]
+        try:
+            memory = self.bound.get("memory") if hasattr(self, "bound") else None
+            if memory and hasattr(memory, "add_memory"):
+                memory.add_memory(
+                    kind="plan_created",
+                    content=goal[:160],
+                    metadata={"steps": steps},
+                )
+        except Exception:
+            pass
+        return {"ok": True, "goal": goal, "steps": steps}
+
+    def _h_ask(self, payload: Dict[str, Any], context: Dict[str, Any]):
+        payload = payload or {}
+        question = payload.get("question") or payload.get("text")
+        if not question:
+            return {"ok": False, "error": "missing_question"}
+        arch = self.bound.get("arch")
+        qm = getattr(arch, "question_manager", None) if arch else None
+        if qm and hasattr(qm, "add_question"):
+            qm.add_question(question, qtype=payload.get("type", "clarifying"))
+        try:
+            memory = self.bound.get("memory") if hasattr(self, "bound") else None
+            if memory and hasattr(memory, "add_memory"):
+                memory.add_memory(
+                    kind="question_active",
+                    content=question,
+                    metadata={"source": payload.get("source", "action")},
+                )
+        except Exception:
+            pass
+        return {"ok": True, "question": question}
+
+    def _h_code_evolve(self, payload: Dict[str, Any], context: Dict[str, Any]):
+        arch = self.bound.get("arch")
+        improver = getattr(arch, "self_improver", None)
+        if not improver or not hasattr(improver, "run_code_cycle"):
+            return {"ok": False, "error": "code_evolver_unavailable"}
+        payload = payload or {}
+        cid = improver.run_code_cycle(n_candidates=int(payload.get("n", 2)))
+        return {"ok": True, "candidate_id": cid}
+
+    def _h_promote_code(self, payload: Dict[str, Any], context: Dict[str, Any]):
+        arch = self.bound.get("arch")
+        prom = getattr(arch, "promotions", None)
+        if not prom:
+            return {"ok": False, "error": "promotions_unavailable"}
+        cid = (payload or {}).get("cid")
+        if not cid:
+            return {"ok": False, "error": "missing cid"}
+        metadata: Dict[str, Any] = {}
+        try:
+            candidate = prom.read_candidate(cid)
+            metadata = candidate.get("metadata", {}) or {}
+            patch_payload = metadata.get("patch")
+            code_evolver = getattr(arch, "code_evolver", None)
+            if patch_payload and code_evolver:
+                code_evolver.promote_patch(patch_payload)
+        except Exception:
+            metadata = metadata or {}
+        prom.promote(cid)
+        try:
+            memory = self.bound.get("memory") if hasattr(self, "bound") else None
+            if memory and hasattr(memory, "add_memory"):
+                memory.add_memory(
+                    kind="promotion_code",
+                    content=str(cid),
+                    metadata=metadata,
+                )
+        except Exception:
+            pass
+        return {"ok": True}
+
+    def _h_rollback_code(self, payload: Dict[str, Any], context: Dict[str, Any]):
+        arch = self.bound.get("arch")
+        prom = getattr(arch, "promotions", None)
+        if not prom:
+            return {"ok": False, "error": "promotions_unavailable"}
+        steps = int((payload or {}).get("steps", 1))
+        prom.rollback(steps=steps)
+        try:
+            memory = self.bound.get("memory") if hasattr(self, "bound") else None
+            if memory and hasattr(memory, "add_memory"):
+                memory.add_memory(
+                    kind="rollback_code",
+                    content=f"rollback {steps}",
+                    metadata={},
+                )
+        except Exception:
+            pass
+        return {"ok": True}
+
+    def _h_rotate_curriculum(self, payload: Dict[str, Any], context: Dict[str, Any]):
+        arch = self.bound.get("arch")
+        improver = getattr(arch, "self_improver", None)
+        if not improver or not hasattr(improver, "rotate_curriculum"):
+            return {"ok": False, "error": "self_improver_unavailable"}
+        level = str((payload or {}).get("level", "base"))
+        cid = improver.rotate_curriculum(level)
+        return {"ok": True, "candidate_id": cid, "level": level}
 
     # ------------------------------------------------------------------
     # Logging & memory
