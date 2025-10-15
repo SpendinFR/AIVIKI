@@ -256,6 +256,17 @@ class PolicyEngine:
         scored.sort(key=lambda t: t[0], reverse=True)
         best_score, best_p, best_gate, meta = scored[0]
 
+        if best_gate.get("decision") == "needs_human":
+            self.last_decision = {
+                "decision": "needs_human",
+                "reason": best_gate.get("reason", "human validation required"),
+                "confidence": best_score,
+                "proposal": best_p,
+                "policy_reason": best_gate.get("reason", ""),
+                "meta": meta,
+            }
+            return self.last_decision
+
         # seuil d’abstention (risk-coverage simple)
         ABSTAIN = 0.58
         if best_score < ABSTAIN:
