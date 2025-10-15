@@ -9,6 +9,8 @@ from .metrics import aggregate_metrics, bootstrap_superiority, dominates
 from .mutations import generate_overrides
 from .promote import PromotionManager
 from .sandbox import SandboxRunner, ArchFactory
+from .quality import QualityGateRunner
+from .code_evolver import CodeEvolver
 
 
 class SelfImprover:
@@ -28,6 +30,13 @@ class SelfImprover:
         self.questions = question_manager
         self.prom = PromotionManager(config_root)
         self.sandbox = SandboxRunner(arch_factory, eval_root=eval_root)
+        self.quality = QualityGateRunner(arch_factory)
+        self.code_evolver = CodeEvolver(
+            repo_root=os.getcwd(),
+            sandbox=self.sandbox,
+            quality=self.quality,
+            arch_factory=arch_factory,
+        )
         self._apply_overrides = apply_overrides
 
         # Ensure any previously promoted overrides affect the live architecture.
@@ -68,24 +77,111 @@ class SelfImprover:
         candidates = generate_overrides(base, n=n_candidates)
         best_cid: Optional[str] = None
         best_metrics: Optional[Dict[str, float]] = None
+        best_metadata: Optional[Dict[str, Any]] = None
 
         for cand in candidates:
             evaluation = self.sandbox.run_all(cand)
             aggregated = aggregate_metrics(evaluation.get("samples", []))
             scores = evaluation.get("scores", [])
             p_value = bootstrap_superiority(champ_scores, scores)
+            quality = self.quality.run(cand)
+            safety = evaluation.get("security", {"passed": True})
+            curriculum = evaluation.get("curriculum", [])
+            mutation = evaluation.get("mutation_testing")
+            if not quality.get("passed", False) or not safety.get("passed", False):
+                self._log_experiment(
+                    {
+                        "kind": "gate_reject",
+                        "reason": "quality" if not quality.get("passed", False) else "security",
+                        "overrides": cand,
+                        "metrics": aggregated,
+                    }
+                )
+                continue
             self._log_experiment(
                 {
                     "kind": "challenger_eval",
                     "overrides": cand,
                     "metrics": aggregated,
                     "p": p_value,
+                    "quality": quality,
+                    "security": safety,
+                    "curriculum": curriculum,
+                    "mutation": mutation,
                 }
             )
-            if dominates(champ_aggr, aggregated) and p_value < 0.2:
-                cid = self.prom.stage_candidate(cand, aggregated)
-                best_cid = cid
-                best_metrics = aggregated
+            if not (dominates(champ_aggr, aggregated) and p_value < 0.2):
+                continue
+            canary = self.sandbox.run_canary(cand, champ_aggr)
+            if not canary.get("passed", False):
+                self._log_experiment(
+                    {
+                        "kind": "gate_reject",
+                        "reason": "canary",
+                        "overrides": cand,
+                        "metrics": aggregated,
+                        "canary": canary,
+                    }
+                )
+                continue
+            metadata = {
+                "kind": "override",
+                "quality": quality,
+                "safety": safety,
+                "curriculum": curriculum,
+                "mutation": mutation,
+                "canary": canary,
+            }
+            cid = self.prom.stage_candidate(cand, aggregated, metadata=metadata)
+            best_cid = cid
+            best_metrics = aggregated
+            best_metadata = metadata
+
+        # Evaluate code-level challengers via the CodeEvolver
+        code_patches = self.code_evolver.generate_candidates(max(1, n_candidates // 2))
+        for patch in code_patches:
+            report = self.code_evolver.evaluate_patch(patch, champ_aggr)
+            evaluation = report.get("evaluation", {})
+            aggregated = aggregate_metrics(evaluation.get("samples", []))
+            scores = evaluation.get("scores", [])
+            p_value = bootstrap_superiority(champ_scores, scores)
+            self._log_experiment(
+                {
+                    "kind": "code_challenger_eval",
+                    "patch": report.get("diff"),
+                    "metrics": aggregated,
+                    "p": p_value,
+                    "quality": report.get("quality"),
+                    "lint": report.get("lint"),
+                    "static": report.get("static"),
+                    "canary": report.get("canary"),
+                }
+            )
+            if not report.get("passed", False):
+                continue
+            safety = evaluation.get("security", {"passed": True})
+            if not safety.get("passed", False):
+                continue
+            if not (dominates(champ_aggr, aggregated) and p_value < 0.2):
+                continue
+            canary = report.get("canary", {})
+            if not canary.get("passed", False):
+                continue
+            metadata = {
+                "kind": "code_patch",
+                "quality": report.get("quality"),
+                "safety": safety,
+                "canary": canary,
+                "lint": report.get("lint"),
+                "static": report.get("static"),
+                "curriculum": evaluation.get("curriculum"),
+                "mutation": evaluation.get("mutation_testing"),
+                "patch": self.code_evolver.serialise_patch(patch),
+            }
+            cid = self.prom.stage_candidate(base, aggregated, metadata=metadata)
+            best_cid = cid
+            best_metrics = aggregated
+            best_metadata = metadata
 
         if not best_cid or not best_metrics:
             try:
@@ -110,7 +206,7 @@ class SelfImprover:
                 self.memory.add_memory(
                     kind="promotion_request",
                     content=question,
-                    metadata={"cid": best_cid, "metrics": best_metrics},
+                    metadata={"cid": best_cid, "metrics": best_metrics, "details": best_metadata},
                 )
             if self.questions and hasattr(self.questions, "add_question"):
                 self.questions.add_question(question)
@@ -142,6 +238,23 @@ class SelfImprover:
         return True
 
     def promote(self, cid: str) -> None:
+        candidate = self.prom.read_candidate(cid)
+        metadata = candidate.get("metadata", {})
+        quality = metadata.get("quality", {"passed": True})
+        safety = metadata.get("safety", {"passed": True})
+        canary = metadata.get("canary", {"passed": True})
+        if not quality.get("passed", False):
+            raise RuntimeError("Quality gates failed, promotion aborted")
+        if not safety.get("passed", False):
+            raise RuntimeError("Security gate failed, promotion aborted")
+        if not canary.get("passed", False):
+            raise RuntimeError("Canary run failed, promotion aborted")
+
+        if metadata.get("kind") == "code_patch":
+            patch_payload = metadata.get("patch") or {}
+            patch_payload.setdefault("metadata", metadata)
+            self.code_evolver.promote_patch(patch_payload)
+
         self.prom.promote(cid)
         self._refresh_live_overrides()
         try:
