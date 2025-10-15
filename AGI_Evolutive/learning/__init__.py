@@ -253,6 +253,45 @@ class ExperientialLearning:
     def summarize(self) -> str:
         return f"{self.metrics.get('episodes_completed',0)} épisodes, {self.metrics.get('concepts_formed',0)} concepts."
 
+    def self_assess_concept(self, concept: str) -> Dict[str, Any]:
+        """
+        Auto-évaluation heuristique de la compréhension d'un concept via la mémoire.
+        Retourne: { 'confidence': 0..1, 'coverage': {definition, examples, counterexample}, 'evidence': [...] }
+        Critères: 1 définition, >=2 exemples, >=1 contre-exemple.
+        """
+        concept = (concept or '').strip()
+        coverage = {'definition': 0.0, 'examples': 0.0, 'counterexample': 0.0}
+        evidence: List[str] = []
+        try:
+            mem = getattr(self.cognitive_architecture, 'memory', None)
+            if not mem or not hasattr(mem, 'get_recent_memories'):
+                return {'confidence': 0.0, 'coverage': coverage, 'evidence': evidence}
+            recent = mem.get_recent_memories(150)
+            defin_re = ('définition', 'def:', 'definition')
+            ex_re = ('ex:', 'exemple', 'exemple ', 'exemples', 'ex ')
+            contra_re = ('contre-ex', 'contreex', 'contre exemple', 'contre-exemple', 'counterexample')
+            def_hits = ex_hits = contra_hits = 0
+            for item in recent:
+                text = str(item.get('content') or item.get('text') or '').lower()
+                meta = item.get('metadata') or {}
+                if concept.lower() in text:
+                    snippet = text[:180]
+                    if any(k in text for k in defin_re) or meta.get('definition'):
+                        def_hits += 1; evidence.append('def:' + snippet)
+                    if any(k in text for k in ex_re) or meta.get('example') or meta.get('examples'):
+                        ex_hits += 1; evidence.append('ex:' + snippet)
+                    if any(k in text for k in contra_re) or meta.get('counterexample'):
+                        contra_hits += 1; evidence.append('cx:' + snippet)
+            coverage['definition'] = 1.0 if def_hits >= 1 else 0.0
+            coverage['examples'] = min(1.0, ex_hits / 2.0)
+            coverage['counterexample'] = 1.0 if contra_hits >= 1 else 0.0
+            confidence = 0.5*coverage['definition'] + 0.3*coverage['examples'] + 0.2*coverage['counterexample']
+            if (def_hits + ex_hits + contra_hits) >= 4:
+                confidence = min(1.0, confidence + 0.05)
+            return {'confidence': float(confidence), 'coverage': coverage, 'evidence': evidence[:10]}
+        except Exception:
+            return {'confidence': 0.0, 'coverage': coverage, 'evidence': evidence}
+
 
 # ============================================================
 # 🧠 2) MÉTA-APPRENTISSAGE

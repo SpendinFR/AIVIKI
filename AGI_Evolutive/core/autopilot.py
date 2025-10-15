@@ -77,12 +77,29 @@ class Autopilot:
         return out
 
     def pending_questions(self):
-        """Return pending auto-generated questions."""
-
+        """Retourne les questions auto-générées, + celles de validation d'apprentissage."""
+        # Celles déjà générées par policies/métacog
         try:
-            return self.questions.pop_questions()
+            qs = self.questions.pop_questions()
         except Exception:
-            return []
+            qs = []
+
+        # Merge avec les demandes de validation stockées en mémoire
+        try:
+            mem = getattr(self.arch, 'memory', None)
+            seen = set(q.get('text','') for q in qs)
+            if mem and hasattr(mem, 'get_recent_memories'):
+                for item in mem.get_recent_memories(50):
+                    if item.get('kind') == 'validation_request':
+                        text = item.get('content') or item.get('text') or 'Valider un apprentissage'
+                        if text not in seen:
+                            qs.append({"type": "validation", "text": text})
+                            seen.add(text)
+                        if len(qs) >= 5:
+                            break
+        except Exception:
+            pass
+        return qs
 
     def save_now(self):
         """Force a persistence checkpoint."""
