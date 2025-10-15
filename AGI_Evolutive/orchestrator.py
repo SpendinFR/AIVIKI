@@ -16,15 +16,11 @@ from AGI_Evolutive.memory.concept_extractor import ConceptExtractor
 from AGI_Evolutive.memory.consolidator import Consolidator
 from AGI_Evolutive.memory.episodic_linker import EpisodicLinker
 from AGI_Evolutive.memory.memory_store import MemoryStore
-from AGI_Evolutive.runtime.scheduler import Scheduler
+from AGI_Evolutive.scheduler import Scheduler
 
 class Orchestrator:
-    """
-    Cycle de vie:
-    perceive -> memorize -> consolidate -> concept/episodic -> emotion -> homeostasis
-    -> meta-cognition (incertitude->learning goals) -> planning -> action -> proposals
-    -> evolution manager (macro)
-    """
+    """Coordonne un cycle cognitif enrichi autour de l'architecture de base."""
+
     def __init__(self, arch):
         load_config()
         self.arch = arch
@@ -52,7 +48,7 @@ class Orchestrator:
         self._register_jobs()
 
         # Boot log
-        self.memory.add_memory({"kind":"system","text":"Orchestrator initialized","ts":time.time()})
+        self.memory.add_memory({"kind": "system", "text": "Orchestrator initialized", "ts": time.time()})
 
     def _register_jobs(self):
         self.scheduler.register_job("scan_inbox", 30, lambda: self.perception.scan_inbox())
@@ -159,85 +155,4 @@ class Orchestrator:
         if self.evolution.state["cycle_count"] % 20 == 0:
             notes = self.evolution.propose_macro_adjustments()
             if notes:
-                self.memory.add_memory({"kind":"strategy","text":" | ".join(notes),"ts":time.time()})
-from typing import Optional
-
-from AGI_Evolutive.cognition.homeostasis import Homeostasis
-from AGI_Evolutive.cognition.planner import Planner
-from AGI_Evolutive.cognition.proposer import Proposer
-from AGI_Evolutive.core.config import load_config
-from AGI_Evolutive.core.policy import PolicyEngine
-from AGI_Evolutive.core.self_model import SelfModel
-from AGI_Evolutive.memory.consolidator import Consolidator
-from AGI_Evolutive.memory.memory_store import MemoryStore
-
-
-class Orchestrator:
-    """Coordinate high-level cycles across cognitive subsystems."""
-
-    def __init__(self, arch) -> None:
-        load_config()
-        self.arch = arch
-        self.self_model = SelfModel()
-        self.policy = PolicyEngine()
-        self.memory = MemoryStore()
-        self.homeo = Homeostasis()
-        self.planner = Planner()
-        self.consolidator = Consolidator(self.memory)
-        self.proposer = Proposer(self.memory, self.planner, self.homeo)
-
-    def observe_and_memorize(self, user_msg: Optional[str] = None) -> None:
-        payload = {
-            "kind": "interaction" if user_msg else "tick",
-            "text": user_msg or "(idle)",
-            "ts": time.time(),
-        }
-        self.memory.add_memory(payload)
-
-    def consolidate(self) -> None:
-        result = self.consolidator.run_once_now()
-        if result["lessons"]:
-            self.memory.add_memory({"kind": "lesson", "text": " | ".join(result["lessons"]), "ts": time.time()})
-        for proposal in result["proposals"]:
-            try:
-                self.self_model.apply_proposal(proposal, self.policy)
-            except Exception:
-                pass
-
-    def homeostasis_cycle(self) -> None:
-        info_gain = 0.5
-        progress = 0.5
-        intrinsic = self.homeo.compute_intrinsic_reward(info_gain, progress)
-        extrinsic = self.homeo.compute_extrinsic_reward_from_memories("")
-        self.homeo.update_from_rewards(intrinsic, extrinsic)
-
-    def planning_cycle(self) -> None:
-        self.planner.plan_for_goal("understand_humans", "Comprendre les humains")
-        plan = self.planner.state["plans"]["understand_humans"]
-        if not plan["steps"]:
-            self.planner.add_step("understand_humans", "Observer un échange et extraire intentions")
-            self.planner.add_step("understand_humans", "Tester une hypothèse d'intention par question ciblée")
-
-    def act_or_simulate(self) -> None:
-        step = self.planner.pop_next_action("understand_humans")
-        if not step:
-            return
-        sim = self.planner.simulate_action(step["desc"])
-        self.memory.add_memory({"kind": "action_sim", "text": step["desc"], "sim": sim, "ts": time.time()})
-        self.planner.mark_action_done("understand_humans", step["id"], success=True)
-
-    def propose_and_apply(self) -> None:
-        proposals = self.proposer.run_once_now()
-        for proposal in proposals:
-            try:
-                self.self_model.apply_proposal(proposal, self.policy)
-            except Exception:
-                pass
-
-    def run_once_cycle(self, user_msg: Optional[str] = None) -> None:
-        self.observe_and_memorize(user_msg)
-        self.consolidate()
-        self.homeostasis_cycle()
-        self.planning_cycle()
-        self.act_or_simulate()
-        self.propose_and_apply()
+                self.memory.add_memory({"kind": "strategy", "text": " | ".join(notes), "ts": time.time()})
