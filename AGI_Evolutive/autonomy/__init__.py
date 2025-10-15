@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Optional
 from collections import deque
 import os, time, uuid, json, threading
 
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+
 # --------- Structures ---------
 
 @dataclass
@@ -437,7 +439,7 @@ class AutonomyManager:
     def _write_json(self, path: str, data: Dict[str, Any]) -> None:
         try:
             with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+                json.dump(json_sanitize(data), f, ensure_ascii=False, indent=2)
         except Exception as e:
             self._log(f"⚠️ Échec d'écriture JSON {path}: {e}")
 

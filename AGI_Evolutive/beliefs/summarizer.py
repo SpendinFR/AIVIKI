@@ -7,6 +7,8 @@ import time
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional
 
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+
 from .graph import Belief, BeliefGraph
 
 
@@ -76,7 +78,7 @@ class BeliefSummarizer:
         os.makedirs(os.path.dirname(cfg.output_path) or ".", exist_ok=True)
         with open(cfg.output_path, "a", encoding="utf-8") as fh:
             row = {"time": now or time.time(), "summary": summary}
-            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+            fh.write(json.dumps(json_sanitize(row), ensure_ascii=False) + "\n")
         return summary
 
 

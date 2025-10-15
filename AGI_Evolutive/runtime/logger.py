@@ -6,6 +6,8 @@ import threading
 import time
 from typing import Any, Dict
 
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+
 
 class JSONLLogger:
     """
@@ -24,7 +26,7 @@ class JSONLLogger:
             "type": event_type,
             **fields,
         }
-        line = json.dumps(rec, ensure_ascii=False)
+        line = json.dumps(json_sanitize(rec), ensure_ascii=False)
         with self._lock:
             with open(self.path, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
@@ -36,7 +38,7 @@ class JSONLLogger:
         out = os.path.join(snap_dir, f"{ts}_{name}.json")
         with self._lock:
             with open(out, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
+                json.dump(json_sanitize(payload), f, ensure_ascii=False, indent=2)
         return out
 
     def rotate(self, keep_last: int = 5) -> None:

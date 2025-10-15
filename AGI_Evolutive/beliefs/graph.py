@@ -3,6 +3,8 @@ from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Any, Optional, Iterable, Tuple
 import os, json, time, uuid, math
 
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+
 from .ontology import Ontology
 from .entity_linker import EntityLinker
 
@@ -347,9 +349,9 @@ class BeliefGraph:
     def _flush(self) -> None:
         with open(self.path, "w", encoding="utf-8") as f:
             for b in self._cache.values():
-                f.write(json.dumps(b.to_dict(), ensure_ascii=False) + "\n")
+                f.write(json.dumps(json_sanitize(b.to_dict()), ensure_ascii=False) + "\n")
             for ev in self._events.values():
-                f.write(json.dumps(ev.to_dict(), ensure_ascii=False) + "\n")
+                f.write(json.dumps(json_sanitize(ev.to_dict()), ensure_ascii=False) + "\n")
 
     # ------------------------------------------------------------------
     def _default_rules(self) -> List[LocalRule]:

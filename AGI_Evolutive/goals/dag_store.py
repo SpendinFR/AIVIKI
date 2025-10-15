@@ -9,6 +9,8 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+
 
 def _now() -> float:
     return time.time()
@@ -175,7 +177,7 @@ class DagStore:
         }
         try:
             with open(self.persist_path, "w", encoding="utf-8") as fh:
-                json.dump(payload, fh, ensure_ascii=False, indent=2)
+                json.dump(json_sanitize(payload), fh, ensure_ascii=False, indent=2)
         finally:
             self._export_dashboard()
 
@@ -210,7 +212,7 @@ class DagStore:
         }
         try:
             with open(self.dashboard_path, "w", encoding="utf-8") as fh:
-                json.dump(snapshot, fh, ensure_ascii=False, indent=2)
+                json.dump(json_sanitize(snapshot), fh, ensure_ascii=False, indent=2)
         except Exception:
             pass
 
@@ -242,6 +244,6 @@ class GoalDAG:
         self._state.update({"id": goal_id, "evi": float(evi), "progress": float(progress)})
         try:
             with open(self.path, "w", encoding="utf-8") as fh:
-                json.dump(self._state, fh, ensure_ascii=False, indent=2)
+                json.dump(json_sanitize(self._state), fh, ensure_ascii=False, indent=2)
         except Exception:
             pass

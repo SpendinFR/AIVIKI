@@ -3,6 +3,8 @@ import math
 import os
 from typing import Dict, List, Tuple
 
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+
 from AGI_Evolutive.core.config import cfg
 
 _DIR = cfg()["VECTOR_DIR"]
@@ -45,7 +47,7 @@ class VectorStore:
 
     def _save(self) -> None:
         with open(self.idx_path, "w", encoding="utf-8") as handle:
-            json.dump(self.index, handle, ensure_ascii=False, indent=2)
+            json.dump(json_sanitize(self.index), handle, ensure_ascii=False, indent=2)
 
     def upsert(self, doc_id: str, text: str) -> None:
         self.index[doc_id] = _tokenize(text)

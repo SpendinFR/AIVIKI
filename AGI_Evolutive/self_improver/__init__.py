@@ -5,6 +5,8 @@ import os
 import time
 from typing import Any, Callable, Dict, Optional
 
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+
 from .metrics import aggregate_metrics, bootstrap_superiority, dominates
 from .mutations import generate_overrides
 from .promote import PromotionManager
@@ -70,7 +72,7 @@ class SelfImprover:
         os.makedirs("data/self_improve", exist_ok=True)
         record = {"t": time.time(), **payload}
         with open("data/self_improve/experiments.jsonl", "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record) + "\n")
+            handle.write(json.dumps(json_sanitize(record)) + "\n")
 
     # ------------------------------------------------------------------
     # Public API

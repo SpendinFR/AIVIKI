@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 from AGI_Evolutive.beliefs.graph import Evidence
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
 
 
 def _now() -> float:
@@ -739,7 +740,7 @@ class ActionInterface:
         rec["reward"] = reward
         rec["logged_at"] = _now()
         with open(self.path_log, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            f.write(json.dumps(json_sanitize(rec), ensure_ascii=False) + "\n")
 
     def _memorize_action(self, act: Action, reward: float = 0.0) -> None:
         memory = self.bound.get("memory")

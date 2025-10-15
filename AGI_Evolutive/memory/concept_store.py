@@ -6,6 +6,8 @@ import time
 import math
 import uuid
 
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+
 
 @dataclass
 class Concept:
@@ -123,14 +125,14 @@ class ConceptStore:
             "saved_at": time.time(),
         }
         with open(self.path_concepts, "w", encoding="utf-8") as handle:
-            json.dump(data, handle, ensure_ascii=False, indent=2)
+            json.dump(json_sanitize(data), handle, ensure_ascii=False, indent=2)
         dashboard = {
             "t": time.time(),
             "top_concepts": [asdict(concept) for concept in self.get_top_concepts(25)],
             "counts": {"concepts": len(self.concepts), "relations": len(self.relations)},
         }
         with open(self.path_dashboard, "w", encoding="utf-8") as handle:
-            json.dump(dashboard, handle, ensure_ascii=False, indent=2)
+            json.dump(json_sanitize(dashboard), handle, ensure_ascii=False, indent=2)
 
     def _load(self) -> None:
         if not os.path.exists(self.path_concepts):

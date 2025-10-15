@@ -2,6 +2,8 @@ from __future__ import annotations
 from typing import Dict, Any, Optional, List
 import os, json, datetime as dt, time
 
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+
 class UserModel:
     """
     - valeurs & persona (déclaratif)
@@ -26,7 +28,7 @@ class UserModel:
             except Exception: pass
 
     def save(self) -> None:
-        json.dump(self.state, open(self.path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+        json.dump(json_sanitize(self.state), open(self.path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 
     # ---------- Persona / valeurs ----------
     def set_value(self, key: str, level: float) -> None:

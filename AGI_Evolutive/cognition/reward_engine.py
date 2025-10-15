@@ -2,6 +2,8 @@ from dataclasses import dataclass, asdict
 from typing import Optional, Dict, Any
 import re, time, json, os
 
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+
 
 @dataclass
 class RewardEvent:
@@ -291,7 +293,7 @@ class RewardEngine:
         try:
             path = os.path.join(self.persist_dir, "logs", "social_feedback.jsonl")
             with open(path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(asdict(ev), ensure_ascii=False) + "\n")
+                f.write(json.dumps(json_sanitize(asdict(ev)), ensure_ascii=False) + "\n")
         except Exception:
             pass
 

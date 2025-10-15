@@ -1,5 +1,8 @@
 import json
 from typing import List, Dict, Any, Optional, Tuple
+
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+
 from .encoders import TinyEncoder, cosine
 
 
@@ -56,7 +59,7 @@ class InMemoryIndex:
             "docs": [{"id": d["id"], "text": d["text"], "meta": d["meta"], "vec": d["vec"]} for d in self._docs],
         }
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False)
+            json.dump(json_sanitize(payload), f, ensure_ascii=False)
 
     def load(self, path: str):
         try:

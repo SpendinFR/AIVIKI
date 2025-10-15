@@ -9,6 +9,8 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+
 
 def _now() -> float:
     return time.time()
@@ -225,7 +227,7 @@ class PerceptionInterface:
     def _log(self, rec: Dict[str, Any]) -> None:
         rec["logged_at"] = _now()
         with open(self.path_log, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            f.write(json.dumps(json_sanitize(rec), ensure_ascii=False) + "\n")
 
     def _load_index(self) -> Dict[str, Any]:
         if not os.path.exists(self.index_path):
@@ -238,4 +240,4 @@ class PerceptionInterface:
 
     def _save_index(self) -> None:
         with open(self.index_path, "w", encoding="utf-8") as f:
-            json.dump(self._index, f, ensure_ascii=False, indent=2)
+            json.dump(json_sanitize(self._index), f, ensure_ascii=False, indent=2)

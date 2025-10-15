@@ -9,6 +9,8 @@ import time
 from collections import Counter
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+
 from .concept_store import ConceptStore
 
 BASIC_STOP = set(
@@ -43,7 +45,7 @@ def _safe_json_load(path: str, default: Any) -> Any:
 def _safe_jsonl_append(path: str, obj: Dict[str, Any]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        handle.write(json.dumps(json_sanitize(obj), ensure_ascii=False) + "\n")
 
 
 class ConceptExtractor:
@@ -230,7 +232,7 @@ class ConceptExtractor:
             self.concept_index[concept] = entry
 
         with open(self.paths["concept_index"], "w", encoding="utf-8") as handle:
-            json.dump(self.concept_index, handle, ensure_ascii=False, indent=2)
+            json.dump(json_sanitize(self.concept_index), handle, ensure_ascii=False, indent=2)
 
     def _update_graph(self, top: List[Tuple[str, float]]) -> None:
         if not top:
@@ -249,7 +251,7 @@ class ConceptExtractor:
                 self.graph["edges"][key] = edge
 
         with open(self.paths["concept_graph"], "w", encoding="utf-8") as handle:
-            json.dump(self.graph, handle, ensure_ascii=False)
+            json.dump(json_sanitize(self.graph), handle, ensure_ascii=False)
 
     def _log_event(self, mem_id: Optional[str], meta: Dict[str, Any], top: List[Tuple[str, float]]) -> None:
         _safe_jsonl_append(
@@ -308,7 +310,7 @@ class ConceptExtractor:
     def _save_state(self) -> None:
         self.state["last_run"] = _now()
         with open(self.paths["state"], "w", encoding="utf-8") as handle:
-            json.dump(self.state, handle, ensure_ascii=False, indent=2)
+            json.dump(json_sanitize(self.state), handle, ensure_ascii=False, indent=2)
 
     # ---------- memory access ----------
     def _collect_memories(self, memory_system: Any, limit: int) -> List[Dict[str, Any]]:

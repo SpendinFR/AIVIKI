@@ -3,6 +3,8 @@ import os
 import time
 from typing import Any, Dict
 
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+
 from AGI_Evolutive.core.config import cfg
 
 _PATH = cfg()["HOMEOSTASIS_PATH"]
@@ -37,7 +39,7 @@ class Homeostasis:
     def _save(self) -> None:
         os.makedirs(os.path.dirname(_PATH), exist_ok=True)
         with open(_PATH, "w", encoding="utf-8") as f:
-            json.dump(self.state, f, ensure_ascii=False, indent=2)
+            json.dump(json_sanitize(self.state), f, ensure_ascii=False, indent=2)
 
     def decay(self) -> None:
         for key, value in self.state["drives"].items():

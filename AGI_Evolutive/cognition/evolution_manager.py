@@ -5,6 +5,8 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+
 
 def _now() -> float:
     return time.time()
@@ -13,7 +15,7 @@ def _now() -> float:
 def _safe_write_json(path: str, obj: Any):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
+        json.dump(json_sanitize(obj), f, ensure_ascii=False, indent=2)
 
 
 def _safe_read_json(path: str, default: Any):
@@ -29,7 +31,7 @@ def _safe_read_json(path: str, default: Any):
 def _append_jsonl(path: str, obj: Dict[str, Any]):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        f.write(json.dumps(json_sanitize(obj), ensure_ascii=False) + "\n")
 
 
 def _mean(xs: List[float], default: float = 0.0) -> float:

@@ -4,6 +4,8 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+
 from AGI_Evolutive.core.config import cfg
 
 _PLANS = cfg()["PLANS_PATH"]
@@ -32,7 +34,7 @@ class Planner:
             self.state["updated_at"] = time.time()
             os.makedirs(os.path.dirname(_PLANS), exist_ok=True)
             with open(_PLANS, "w", encoding="utf-8") as f:
-                json.dump(self.state, f, ensure_ascii=False, indent=2)
+                json.dump(json_sanitize(self.state), f, ensure_ascii=False, indent=2)
 
     def plan_for_goal(
         self, goal_id: str, description: str, steps: Optional[List[Dict[str, Any]]] = None

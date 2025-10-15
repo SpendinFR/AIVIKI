@@ -3,6 +3,8 @@ import json
 import time
 from typing import Dict, Any
 
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+
 class PolicyEngine:
     """Stores lightweight policy directives and strategy hints."""
 
@@ -25,7 +27,7 @@ class PolicyEngine:
     def _save(self):
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         with open(self.path, "w", encoding="utf-8") as fh:
-            json.dump(self.state, fh, ensure_ascii=False, indent=2)
+            json.dump(json_sanitize(self.state), fh, ensure_ascii=False, indent=2)
 
     def adjust_drive_target(self, drive: str, target: float):
         self.state.setdefault("drive_targets", {})[drive] = float(max(0.0, min(1.0, target)))
