@@ -219,18 +219,17 @@ class PerceptionInterface:
             except Exception:
                 pass
 
-        arch = self.arch or self.bound.get("arch")
-        if arch and hasattr(arch, "style_observer"):
-            try:
-                arch.style_observer.observe_text(text, source="chat:user", channel="user")
-            except Exception:
-                pass
-
     # Backwards compatible alias (anciens modules)
     def ingest_user_utterance(
         self, text: str, author: str = "user", meta: Optional[Dict[str, Any]] = None
     ) -> None:
         self.ingest_user_message(text, speaker=author, meta=meta)
+        try:
+            arch = self.arch or self.bound.get("arch")
+            if arch and hasattr(arch, "style_observer"):
+                arch.style_observer.observe_text(text, source="chat:user", channel="user")
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Persistence helpers
