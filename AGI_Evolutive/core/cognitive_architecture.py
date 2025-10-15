@@ -6,6 +6,7 @@ from AGI_Evolutive.beliefs.graph import BeliefGraph, Evidence
 from AGI_Evolutive.cognition.evolution_manager import EvolutionManager
 from AGI_Evolutive.cognition.reward_engine import RewardEngine
 from AGI_Evolutive.core.telemetry import Telemetry
+from AGI_Evolutive.core.question_manager import QuestionManager
 from AGI_Evolutive.creativity import CreativitySystem
 from AGI_Evolutive.emotions import EmotionalSystem
 from AGI_Evolutive.goals import GoalSystem
@@ -22,7 +23,7 @@ from AGI_Evolutive.memory.concept_extractor import ConceptExtractor
 from AGI_Evolutive.memory.episodic_linker import EpisodicLinker
 from AGI_Evolutive.metacog.calibration import CalibrationMeter, NoveltyDetector
 from AGI_Evolutive.metacognition import MetacognitiveSystem
-from AGI_Evolutive.models.user import UserModel
+from AGI_Evolutive.models import IntentModel, UserModel
 from AGI_Evolutive.perception import PerceptionSystem
 from AGI_Evolutive.reasoning import ReasoningSystem
 from AGI_Evolutive.reasoning.abduction import AbductiveReasoner, Hypothesis
@@ -43,6 +44,9 @@ class CognitiveArchitecture:
         self.logger = JSONLLogger("runtime/agent_events.jsonl")
         self.telemetry = Telemetry()
         self.style_policy = StylePolicy()
+        self.intent_model = IntentModel()
+        self.question_manager = QuestionManager(self)
+        self._last_intent_decay = time.time()
         self.goal_dag = GoalDAG("runtime/goal_dag.json")
 
         # Global state
@@ -100,6 +104,12 @@ class CognitiveArchitecture:
         self.style_profiler = StyleProfiler(persist_path="data/style_profiles.json")
         self.beliefs = BeliefGraph()
         self.user_model = UserModel()
+        try:
+            persona_tone = (self.user_model.describe().get("persona", {}) or {}).get("tone")
+            if persona_tone:
+                self.style_policy.update_persona_tone(persona_tone)
+        except Exception:
+            pass
         self.calibration = CalibrationMeter()
         self.novelty_detector = NoveltyDetector()
         self.abduction = AbductiveReasoner(self.beliefs, self.user_model)
@@ -311,6 +321,50 @@ class CognitiveArchitecture:
                     )
                 return "Aucun challenger n’a surclassé le champion sur les métriques définies."
 
+        trimmed = (user_msg or "").strip()
+        trimmed_lower = trimmed.lower()
+        explicit_mode_cmd = trimmed_lower.startswith("/mode")
+        detected_mode = None
+        try:
+            detected_mode = self.style_policy.detect_mode_command(trimmed_lower)
+        except Exception:
+            detected_mode = None
+        if detected_mode:
+            phrase_command = trimmed_lower in {
+                f"mode {detected_mode}",
+                f"mode {detected_mode}.",
+                f"mode {detected_mode}!",
+                f"mode {detected_mode}?",
+            }
+            if phrase_command:
+                explicit_mode_cmd = True
+            self.style_policy.set_mode(detected_mode, persona_tone=self.style_policy.persona_tone)
+            if explicit_mode_cmd and len(trimmed.split()) <= 2:
+                ack = f"✅ Mode de communication réglé sur « {detected_mode} »."
+                try:
+                    if hasattr(self.memory, "add_memory"):
+                        self.memory.add_memory(
+                            kind="mode_switch",
+                            content=detected_mode,
+                            metadata={"source": "user"},
+                        )
+                except Exception:
+                    pass
+                self.last_output_text = ack
+                return ack
+
+        try:
+            persona_tone = (self.user_model.describe().get("persona", {}) or {}).get("tone")
+            if persona_tone:
+                self.style_policy.update_persona_tone(persona_tone)
+        except Exception:
+            pass
+
+        try:
+            self.intent_model.observe_user_message(user_msg)
+        except Exception:
+            pass
+
         self._maybe_update_calibration(user_msg)
 
         self.telemetry.log("input", "language", {"text": user_msg})
@@ -354,7 +408,14 @@ class CognitiveArchitecture:
         except Exception:
             hints = {}
         try:
-            parsed = self.language.parse_utterance(user_msg, context={"style_hints": hints})
+            parsed = self.language.parse_utterance(
+                user_msg,
+                context={
+                    "style_hints": hints,
+                    "style_mode": self.style_policy.current_mode,
+                    "user_intents": self.intent_model.as_constraints(),
+                },
+            )
             surface = getattr(parsed, "surface_form", user_msg)
         except Exception:
             pass
@@ -403,7 +464,12 @@ class CognitiveArchitecture:
             reason_out = dict(abduction_result.get("reason_out") or {})
         else:
             try:
-                reason_out = self.reasoning.reason_about(surface, context={"inbox_docs": inbox_docs})
+                reasoning_context = {
+                    "inbox_docs": inbox_docs,
+                    "user_intents": self.intent_model.as_constraints(),
+                    "style_mode": self.style_policy.current_mode,
+                }
+                reason_out = self.reasoning.reason_about(surface, context=reasoning_context)
             except Exception as exc:
                 self.logger.write("reasoning.error", error=str(exc), user_msg=surface)
                 reason_out = {
@@ -469,6 +535,19 @@ class CognitiveArchitecture:
                     reason_out.get("summary", "")
                     + " | ⚠️ abstention calibrée (demander précisions)."
                 )
+        try:
+            if not abduction_result and hasattr(self, "question_manager") and self.question_manager:
+                severity = max(0.0, 1.0 - adjusted_confidence)
+                if severity > 0.45:
+                    explicit_q = ask_prompts[0] if ask_prompts else None
+                    self.question_manager.record_information_need(
+                        "goal_focus",
+                        severity,
+                        metadata={"source": "confidence", "user_msg": surface[:160]},
+                        explicit_question=explicit_q,
+                    )
+        except Exception:
+            pass
         if novelty_flag:
             if abduction_result:
                 adjusted_confidence = max(
@@ -483,6 +562,15 @@ class CognitiveArchitecture:
                 ask_prompts.append(
                     "Cas inhabituel détecté → partage un exemple ou le contexte exact."
                 )
+            try:
+                if hasattr(self, "question_manager") and self.question_manager:
+                    self.question_manager.record_information_need(
+                        "evidence",
+                        max(0.4, min(1.0, float(novelty_score) or 0.5)),
+                        metadata={"source": "novelty", "user_msg": surface[:160]},
+                    )
+            except Exception:
+                pass
 
         apprentissages = [
             "associer récompense sociale ↔ style",
@@ -718,6 +806,13 @@ class CognitiveArchitecture:
 
         try:
             self.autonomy.tick()
+        except Exception:
+            pass
+
+        try:
+            if time.time() - self._last_intent_decay > 600:
+                self.intent_model.decay()
+                self._last_intent_decay = time.time()
         except Exception:
             pass
 

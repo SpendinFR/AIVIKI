@@ -27,7 +27,12 @@ class Autopilot:
         self.inbox_dir = os.path.join(self.project_root, "inbox")
         self.ingest = DocumentIngest(arch, self.inbox_dir)
         self.persist = PersistenceManager(arch)
-        self.questions = QuestionManager(arch)
+        existing_qm = getattr(arch, "question_manager", None)
+        if existing_qm is not None:
+            self.questions = existing_qm
+        else:
+            self.questions = QuestionManager(arch)
+            setattr(arch, "question_manager", self.questions)
 
         self.orchestrator = orchestrator
 
