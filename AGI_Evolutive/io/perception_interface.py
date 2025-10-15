@@ -1,70 +1,135 @@
-import os, json, time, uuid, glob
+"""Interfaces d'entrée sensorielle pour l'architecture."""
+
+from __future__ import annotations
+
+import glob
+import json
+import os
+import time
+import uuid
 from typing import Any, Dict, List, Optional
 
 
-def _now():
+def _now() -> float:
     return time.time()
 
 
 class PerceptionInterface:
-    """
-    - Scrute ./inbox pour importer des fichiers comme perceptions
-    - Enregistre les tours de dialogue en mémoire (ingest_user_message)
-    - Écrit un journal JSONL data/perception_log.jsonl
-    - Fait remonter des 'percepts' simples à Metacog/Émotions (optionnel)
+    """Gestion centralisée des perceptions utilisateurs et fichiers inbox.
+
+    L'implémentation fusionne deux versions historiques du module :
+    - la version avancée qui journalise les événements, supporte le binding
+      vers la mémoire, les émotions et la métacognition ;
+    - la version minimaliste utilisée par certains modules externes qui
+      attendent un constructeur recevant directement le *memory store* et des
+      helpers simples comme :meth:`scan_inbox` ou
+      :meth:`ingest_user_utterance`.
+
+    Pour rester compatible avec les deux approches, le constructeur accepte
+    un *memory store* optionnel en premier argument et expose à la fois les
+    méthodes détaillées et leurs alias simplifiés.
     """
 
-    def __init__(self,
-                 inbox_dir: str = "inbox",
-                 path_log: str = "data/perception_log.jsonl",
-                 index_path: str = "data/perception_index.json"):
+    def __init__(
+        self,
+        memory_store: Optional[Any] = None,
+        inbox_dir: str = "inbox",
+        path_log: str = "data/perception_log.jsonl",
+        index_path: str = "data/perception_index.json",
+    ) -> None:
         os.makedirs(os.path.dirname(path_log), exist_ok=True)
         os.makedirs(inbox_dir, exist_ok=True)
+
         self.inbox_dir = inbox_dir
         self.path_log = path_log
         self.index_path = index_path
-        self.bound = {
-            "arch": None, "memory": None, "metacog": None, "emotions": None, "language": None
+        self.memory = memory_store
+
+        self.bound: Dict[str, Any] = {
+            "arch": None,
+            "memory": memory_store,
+            "metacog": None,
+            "emotions": None,
+            "language": None,
         }
+
         self._index = self._load_index()
         self.scan_interval = 3.0
         self._last_scan = 0.0
 
-    def bind(self, arch=None, memory=None, metacog=None, emotions=None, language=None):
-        self.bound.update({"arch": arch, "memory": memory, "metacog": metacog, "emotions": emotions, "language": language})
+    # ------------------------------------------------------------------
+    # Binding helpers
+    def bind(
+        self,
+        arch: Any = None,
+        memory: Any = None,
+        metacog: Any = None,
+        emotions: Any = None,
+        language: Any = None,
+    ) -> None:
+        """Associe les différents sous-systèmes nécessaires."""
 
-    def step(self, force: bool=False):
+        if memory is not None:
+            self.memory = memory
+        self.bound.update(
+            {
+                "arch": arch,
+                "memory": self.memory,
+                "metacog": metacog,
+                "emotions": emotions,
+                "language": language,
+            }
+        )
+
+    # ------------------------------------------------------------------
+    # Inbox handling
+    def step(self, force: bool = False) -> List[str]:
+        """Appelé périodiquement par la boucle principale."""
+
+        return self.scan_inbox(force=force)
+
+    def scan_inbox(self, force: bool = False) -> List[str]:
+        """Parcourt le dossier ``inbox`` et ingère les nouveaux fichiers."""
+
         now = time.time()
         if not force and (now - self._last_scan < self.scan_interval):
-            return
+            return []
         self._last_scan = now
-        self._scan_inbox()
+        return self._scan_inbox()
 
-    # ---------- Inbox ----------
-    def _scan_inbox(self):
+    def _scan_inbox(self) -> List[str]:
         files = glob.glob(os.path.join(self.inbox_dir, "*"))
-        new_files = [f for f in files if f not in self._index.get("seen_files", [])]
-        if not new_files:
-            return
-        for path in new_files:
-            self._ingest_file(path)
-            self._index["seen_files"].append(path)
-        self._save_index()
+        seen = set(self._index.get("seen_files", []))
+        added: List[str] = []
 
-    def _ingest_file(self, path: str):
+        for path in files:
+            if path in seen:
+                continue
+            if self._ingest_file(path):
+                added.append(os.path.basename(path))
+            seen.add(path)
+
+        if added:
+            self._index["seen_files"] = sorted(seen)
+            self._save_index()
+
+        return added
+
+    def _ingest_file(self, path: str) -> bool:
         memory = self.bound.get("memory")
         emotions = self.bound.get("emotions")
 
         meta = {
             "source": "inbox",
             "filename": os.path.basename(path),
-            "size": os.path.getsize(path),
+            "size": os.path.getsize(path) if os.path.exists(path) else 0,
             "mtype": self._guess_mtype(path),
-            "ingested_at": _now()
+            "ingested_at": _now(),
+            "id": str(uuid.uuid4()),
         }
+
         content_text = ""
         try:
-            # only text-ish for simplicity
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
                 content_text = f.read()[:100000]
         except Exception:
@@ -74,17 +139,26 @@ class PerceptionInterface:
 
         if memory and hasattr(memory, "add_memory"):
             try:
-                memory.add_memory(kind="perception_inbox",
-                                  content=content_text,
-                                  metadata=meta)
+                memory.add_memory(
+                    kind="perception_inbox",
+                    content=content_text,
+                    metadata=meta,
+                )
             except Exception:
                 pass
 
         if emotions and hasattr(emotions, "register_emotion_event"):
             try:
-                emotions.register_emotion_event(kind="perceived_input", intensity=0.2, arousal_hint=0.1)
+                emotions.register_emotion_event(
+                    kind="perceived_input",
+                    intensity=0.2,
+                    arousal_hint=0.1,
+                    meta=meta,
+                )
             except Exception:
                 pass
+
+        return True
 
     def _guess_mtype(self, path: str) -> str:
         name = path.lower()
@@ -96,28 +170,55 @@ class PerceptionInterface:
             return "pdf"
         return "blob"
 
-    # ---------- Dialogue ----------
-    def ingest_user_message(self, text: str, speaker: str = "user", meta: Optional[Dict[str, Any]] = None):
-        record = {"kind": "dialogue_turn", "speaker": speaker, "text": text, "t": _now(), "meta": meta or {}}
+    # ------------------------------------------------------------------
+    # Dialogue ingestion
+    def ingest_user_message(
+        self,
+        text: str,
+        speaker: str = "user",
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        record = {
+            "kind": "dialogue_turn",
+            "speaker": speaker,
+            "text": text,
+            "t": _now(),
+            "meta": meta or {},
+        }
         self._log(record)
 
         memory = self.bound.get("memory")
         if memory and hasattr(memory, "add_memory"):
             try:
-                memory.add_memory(kind="dialogue_turn", content=text, metadata={"speaker": speaker, **(meta or {})})
+                memory.add_memory(
+                    kind="dialogue_turn",
+                    content=text,
+                    metadata={"speaker": speaker, **(meta or {})},
+                )
             except Exception:
                 pass
 
-        # petit signal émotionnel (arousal léger)
         emotions = self.bound.get("emotions")
         if emotions and hasattr(emotions, "register_emotion_event"):
             try:
-                emotions.register_emotion_event(kind="dialogue_input", intensity=0.25, arousal_hint=0.15)
+                emotions.register_emotion_event(
+                    kind="dialogue_input",
+                    intensity=0.25,
+                    arousal_hint=0.15,
+                    meta={"speaker": speaker},
+                )
             except Exception:
                 pass
 
-    # ---------- utils ----------
-    def _log(self, rec: Dict[str, Any]):
+    # Backwards compatible alias (anciens modules)
+    def ingest_user_utterance(
+        self, text: str, author: str = "user", meta: Optional[Dict[str, Any]] = None
+    ) -> None:
+        self.ingest_user_message(text, speaker=author, meta=meta)
+
+    # ------------------------------------------------------------------
+    # Persistence helpers
+    def _log(self, rec: Dict[str, Any]) -> None:
         rec["logged_at"] = _now()
         with open(self.path_log, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -131,37 +232,6 @@ class PerceptionInterface:
         except Exception:
             return {"seen_files": []}
 
-    def _save_index(self):
+    def _save_index(self) -> None:
         with open(self.index_path, "w", encoding="utf-8") as f:
             json.dump(self._index, f, ensure_ascii=False, indent=2)
-import os, time
-from typing import Dict, Any, List
-
-class PerceptionInterface:
-    """
-    Ingestion d'inputs (messages, fichiers inbox/, signaux système).
-    """
-    def __init__(self, memory_store, inbox_dir: str = "inbox"):
-        self.memory = memory_store
-        self.inbox_dir = inbox_dir
-        os.makedirs(self.inbox_dir, exist_ok=True)
-        self._seen_files: set = set(os.listdir(self.inbox_dir))
-
-    def ingest_user_utterance(self, text: str, author: str = "user"):
-        self.memory.add_memory({"kind":"interaction","author":author,"text":text,"ts":time.time()})
-
-    def scan_inbox(self) -> List[str]:
-        added = []
-        for fn in os.listdir(self.inbox_dir):
-            if fn in self._seen_files: continue
-            path = os.path.join(self.inbox_dir, fn)
-            try:
-                size = os.path.getsize(path)
-                self.memory.add_memory({
-                    "kind":"document_ingested","text":f"Fichier {fn} ({size} bytes)","path":path,"ts":time.time()
-                })
-                self._seen_files.add(fn)
-                added.append(fn)
-            except Exception:
-                pass
-        return added
