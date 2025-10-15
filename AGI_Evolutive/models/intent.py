@@ -171,7 +171,7 @@ class IntentModel:
     # Predictions & heuristics
     @classmethod
     def rule_predict(cls, text: str) -> Tuple[str, float]:
-        low = (text or "").lower()
+        low = (text or "").strip().lower()
         for intent, patterns, base_conf in cls.BASIC_RULES:
             hits = 0
             for pattern in patterns:
