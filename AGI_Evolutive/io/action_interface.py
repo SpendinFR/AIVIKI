@@ -219,7 +219,10 @@ class ActionInterface:
 
             act.status = "running"
             try:
-                result = handler(act)
+                if act.type == "learn_concept":
+                    result = self._h_learn_concept(act.payload, act.context)
+                else:
+                    result = handler(act)
                 success = not isinstance(result, dict) or result.get("ok", True)
                 act.status = "done" if success else "failed"
                 act.result = result if isinstance(result, dict) else {"ok": True, "data": result}
@@ -306,25 +309,54 @@ class ActionInterface:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    def _h_learn_concept(self, act: Action) -> Dict[str, Any]:
-        goals = self.bound.get("goals")
-        memory = self.bound.get("memory")
-        concept = act.payload.get("concept", "concept_inconnu")
-        why = act.payload.get("why", "lacune détectée")
+    def _h_learn_concept(self, payload: Dict[str, Any], context: Dict[str, Any]):
+        concept = (payload or {}).get("concept")
+        why = (payload or {}).get("why") or (payload or {}).get("reason") or "learning_goal"
+        if not concept:
+            return {"ok": False, "error": "no concept"}
+
+        memory = self.bound.get("memory") if hasattr(self, "bound") else None
+        # trace d'intention
         try:
-            if goals and hasattr(goals, "add_learning_goal"):
-                goals.add_learning_goal(concept, motive=why, expected_gain=0.4)
             if memory and hasattr(memory, "add_memory"):
                 memory.add_memory(
-                    {
-                        "kind": "learning_intent",
-                        "content": f"Apprendre le concept: {concept}",
-                        "metadata": {"reason": why, "source": "action_interface"},
-                    }
+                    kind="learning_intent",
+                    content=f"Apprendre le concept: {concept}",
+                    metadata={"reason": why, "source": "action_interface"},
                 )
-            return {"ok": True, "concept": concept}
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
+        except Exception:
+            pass
+
+        # auto-évaluation
+        arch = self.bound.get("arch") if hasattr(self, "bound") else None
+        learn = getattr(arch, "learning", None) if arch else None
+        try:
+            result = learn.self_assess_concept(concept) if learn and hasattr(learn, "self_assess_concept") else {"confidence": 0.0}
+        except Exception:
+            result = {"confidence": 0.0}
+        conf = float(result.get("confidence", 0.0))
+
+        # intégration auto si confiance élevée
+        if conf >= 0.90 and arch and hasattr(arch, "_record_skill"):
+            try:
+                arch._record_skill(concept)
+                if memory and hasattr(memory, "add_memory"):
+                    memory.add_memory(kind="learning_validated", content=concept, metadata={"source": "self_assess", "confidence": conf})
+                return {"ok": True, "concept": concept, "integrated": True, "confidence": conf}
+            except Exception:
+                pass
+
+        # sinon, demande de validation à l'utilisateur
+        try:
+            if memory and hasattr(memory, "add_memory"):
+                memory.add_memory(
+                    kind="validation_request",
+                    content=f"Valider mon apprentissage du concept: {concept}",
+                    metadata={"concept": concept, "need": "confirm_understanding", "confidence": conf},
+                )
+        except Exception:
+            pass
+        return {"ok": True, "concept": concept, "integrated": False, "confidence": conf}
 
     def _h_search_memory(self, act: Action) -> Dict[str, Any]:
         memory = self.bound.get("memory")

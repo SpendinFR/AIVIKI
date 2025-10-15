@@ -245,9 +245,30 @@ class CognitiveArchitecture:
             pass
 
         surface = user_msg
+        hints = {}
         try:
-            parsed = self.language.parse_utterance(user_msg, context={"style_hints": {}})
+            hints = self.style_policy.adapt_from_instruction(user_msg)
+        except Exception:
+            hints = {}
+        try:
+            parsed = self.language.parse_utterance(user_msg, context={"style_hints": hints})
             surface = getattr(parsed, "surface_form", user_msg)
+        except Exception:
+            pass
+
+        # Capture d'une confirmation utilisateur pour valider un apprentissage récent
+        try:
+            low = (user_msg or "").lower()
+            if any(k in low for k in ["oui", "c'est correct", "exact"]) and hasattr(self, "memory"):
+                recents = self.memory.get_recent_memories(50)
+                concept = None
+                for item in reversed(recents):
+                    if item.get("kind") == "validation_request":
+                        concept = (item.get("metadata") or {}).get("concept")
+                        if concept:
+                            break
+                if concept:
+                    self._record_skill(concept)
         except Exception:
             pass
 
@@ -366,6 +387,38 @@ class CognitiveArchitecture:
                         "assistant_msg": self.last_output_text,
                     },
                 )
+        except Exception:
+            pass
+
+    def _record_skill(self, concept: str) -> None:
+        """Persiste un concept appris comme 'skill' + trace mémoire."""
+        # trace mémoire
+        try:
+            self.memory.add_memory(kind='concept_learned', content=concept, metadata={'source':'user_confirm'})
+        except Exception:
+            pass
+        # persistance sur disque
+        import os, json, time
+        skills_path = os.path.join('data', 'skills.json')
+        try:
+            os.makedirs('data', exist_ok=True)
+            skills = {}
+            if os.path.exists(skills_path):
+                with open(skills_path, 'r', encoding='utf-8') as f:
+                    skills = json.load(f)
+            skills[str(concept)] = {
+                'learned_at': time.time(),
+                'source': 'user_confirm',
+            }
+            with open(skills_path, 'w', encoding='utf-8') as f:
+                json.dump(skills, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        # petit nudge côté Learning (si présent)
+        try:
+            if hasattr(self, 'learning') and hasattr(self.learning, 'learning_competencies'):
+                v = self.learning.learning_competencies.get('skills_compiled', 0.0)
+                self.learning.learning_competencies['skills_compiled'] = min(1.0, v + 0.01)
         except Exception:
             pass
 
