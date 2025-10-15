@@ -11,9 +11,54 @@ from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
 import math
-from scipy import ndimage
-import cv2
 import hashlib
+
+
+def _label_components(edge_data: np.ndarray) -> Tuple[np.ndarray, int]:
+    """Label connected components in a binary array without heavy dependencies."""
+    if edge_data.size == 0:
+        return np.zeros_like(edge_data, dtype=int), 0
+
+    mask = edge_data.astype(bool)
+    labeled = np.zeros(mask.shape, dtype=int)
+    visited = np.zeros(mask.shape, dtype=bool)
+    current_label = 0
+
+    if mask.ndim != 2:
+        # Fallback for non 2D data: treat everything as one component if any true values exist
+        if mask.any():
+            labeled = mask.astype(int)
+            labeled[labeled > 0] = 1
+            return labeled, 1
+        return labeled, 0
+
+    neighbours = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+
+    for coord in np.argwhere(mask):
+        r, c = int(coord[0]), int(coord[1])
+        if visited[r, c] or not mask[r, c]:
+            continue
+
+        current_label += 1
+        stack = [(r, c)]
+
+        while stack:
+            sr, sc = stack.pop()
+            if visited[sr, sc]:
+                continue
+            visited[sr, sc] = True
+            if not mask[sr, sc]:
+                continue
+
+            labeled[sr, sc] = current_label
+
+            for dr, dc in neighbours:
+                nr, nc = sr + dr, sc + dc
+                if 0 <= nr < mask.shape[0] and 0 <= nc < mask.shape[1]:
+                    if not visited[nr, nc] and mask[nr, nc]:
+                        stack.append((nr, nc))
+
+    return labeled, current_label
 
 class Modality(Enum):
     """Modalités sensorielles"""
@@ -384,7 +429,7 @@ class PerceptionSystem:
             edge_data = visual_features[FeatureType.EDGE]
             if isinstance(edge_data, np.ndarray):
                 # Regroupement basé sur la connectivité des contours
-                labeled_array, num_features = ndimage.label(edge_data)
+                labeled_array, num_features = _label_components(edge_data)
                 
                 for i in range(1, num_features + 1):
                     group_features = {
@@ -441,7 +486,7 @@ class PerceptionSystem:
             edge_data = group[FeatureType.EDGE]
             if isinstance(edge_data, np.ndarray):
                 # Vérifier la connectivité
-                labeled, num_components = ndimage.label(edge_data)
+                labeled, num_components = _label_components(edge_data)
                 return num_components == 1
         
         return True  # Par défaut, supposer la continuité
@@ -453,7 +498,7 @@ class PerceptionSystem:
         if FeatureType.EDGE in group:
             edge_data = group[FeatureType.EDGE]
             if isinstance(edge_data, np.ndarray):
-                labeled, num_components = ndimage.label(edge_data)
+                labeled, num_components = _label_components(edge_data)
                 
                 for i in range(1, num_components + 1):
                     component_mask = (labeled == i)
