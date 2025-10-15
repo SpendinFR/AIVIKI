@@ -82,6 +82,7 @@ class EvolutionManager:
         self.state = _safe_read_json(self.paths["state"], {
             "created_at": _now(),
             "last_cycle_id": 0,
+            "cycle_count": 0,
             "history": {
                 # séries brutes
                 "reasoning_speed": [],
@@ -96,6 +97,9 @@ class EvolutionManager:
             },
             "milestones": [],  # liste d'événements marquants
             "risk_flags": [],  # ex: "regression_learning", "high_fatigue"
+            "history_extra": {},
+            "legacy_metrics_history": [],
+            "strategies": [],
         })
         self.horizon = horizon_cycles
         self._state_lock = threading.RLock()
@@ -112,40 +116,48 @@ class EvolutionManager:
         self.language = language
 
     # ---------- cycle ingestion ----------
-    def record_cycle(self, extra_tags: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def record_cycle(
+        self,
+        extra_tags: Optional[Dict[str, Any]] = None,
+        manual_metrics: Optional[Dict[str, float]] = None,
+    ) -> Dict[str, Any]:
         """
         Capture l'état courant des métriques utiles, loggue en JSONL, met à jour l'état.
         Appelle ensuite evaluate_cycle() pour calculer tendances + risques.
         """
         with self._state_lock:
             cycle_id = self.state["last_cycle_id"] + 1
+            metrics = manual_metrics or self._collect_metrics_snapshot()
             snap = {
                 "t": _now(),
                 "cycle_id": cycle_id,
-                "metrics": self._collect_metrics_snapshot(),
+                "metrics": metrics,
                 "tags": extra_tags or {}
             }
             _append_jsonl(self.paths["cycles"], snap)
 
             # pousser les séries
             hist = self.state["history"]
-            m = snap["metrics"]
-            hist["reasoning_speed"].append(m.get("reasoning_speed", 0.0))
-            hist["reasoning_confidence"].append(m.get("reasoning_confidence", 0.0))
-            hist["learning_rate"].append(m.get("learning_rate", 0.0))
-            hist["recall_accuracy"].append(m.get("recall_accuracy", 0.0))
-            hist["cognitive_load"].append(m.get("cognitive_load", 0.0))
-            hist["fatigue"].append(m.get("fatigue", 0.0))
-            hist["error_rate"].append(m.get("error_rate", 0.0))
-            hist["goals_progress"].append(m.get("goals_progress", 0.0))
-            hist["affect_valence"].append(m.get("affect_valence", 0.0))
+            for key in hist.keys():
+                hist[key].append(float(metrics.get(key, 0.0)))
+
+            extra_hist = self.state.setdefault("history_extra", {})
+            if manual_metrics:
+                for key, value in manual_metrics.items():
+                    if key not in hist:
+                        arr = extra_hist.setdefault(key, [])
+                        arr.append(float(value))
 
             # limiter l'horizon
             for k in hist.keys():
                 if len(hist[k]) > self.horizon:
                     hist[k] = hist[k][-self.horizon:]
+            for k in list(extra_hist.keys()):
+                if len(extra_hist[k]) > self.horizon:
+                    extra_hist[k] = extra_hist[k][-self.horizon:]
 
             self.state["last_cycle_id"] = cycle_id
+            self.state["cycle_count"] = self.state.get("cycle_count", 0) + 1
 
             # évaluation et recommandations
             eval_out = self.evaluate_cycle()
@@ -441,53 +453,51 @@ class EvolutionManager:
         dash = self._make_dashboard_snapshot()
         _safe_write_json(self.paths["dashboard"], dash)
         return dash
-from typing import Dict, Any, List
 
-class EvolutionManager:
-    """
-    Suit les performances de cycle en cycle et propose des ajustements macro.
-    Persiste dans data/evolution.json
-    """
-    def __init__(self, data_path: str = "data/evolution.json"):
-        self.path = data_path
-        self.state = {
-            "cycle_count": 0,
-            "metrics_history": [],   # [{"ts": <timestamp>, "intr": <float>, "extr": <float>, "learn": <float>, "uncert": <float>}]
-            "strategies": []         # notes d'ajustement
+    # ---------- legacy compatibility helpers ----------
+    def log_cycle(
+        self,
+        intrinsic: float,
+        extrinsic: float,
+        learning_rate: float,
+        uncertainty: float,
+    ) -> Dict[str, Any]:
+        metrics = {
+            "learning_rate": float(learning_rate),
+            "uncertainty": float(uncertainty),
+            "intrinsic_reward": float(intrinsic),
+            "extrinsic_reward": float(extrinsic),
         }
-        self._load()
+        result = self.record_cycle(
+            extra_tags={"legacy": metrics},
+            manual_metrics=metrics,
+        )
 
-    def _load(self):
-        if os.path.exists(self.path):
-            try:
-                with open(self.path, "r", encoding="utf-8") as f:
-                    self.state = json.load(f)
-            except Exception:
-                pass
-
-    def _save(self):
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        with open(self.path, "w", encoding="utf-8") as f:
-            json.dump(self.state, f, ensure_ascii=False, indent=2)
-
-    def log_cycle(self, intrinsic: float, extrinsic: float, learning_rate: float, uncertainty: float):
-        self.state["cycle_count"] += 1
-        self.state["metrics_history"].append({
-            "ts": time.time(),
-            "intr": float(intrinsic),
-            "extr": float(extrinsic),
-            "learn": float(learning_rate),
-            "uncert": float(uncertainty)
-        })
-        self.state["metrics_history"] = self.state["metrics_history"][-500:]
-        self._save()
+        entry = {
+            "ts": result["snapshot"]["t"],
+            "intr": metrics["intrinsic_reward"],
+            "extr": metrics["extrinsic_reward"],
+            "learn": metrics["learning_rate"],
+            "uncert": metrics["uncertainty"],
+        }
+        with self._state_lock:
+            legacy = self.state.setdefault("legacy_metrics_history", [])
+            legacy.append(entry)
+            self.state["legacy_metrics_history"] = legacy[-500:]
+            _safe_write_json(self.paths["state"], self.state)
+        return result
 
     def propose_macro_adjustments(self) -> List[str]:
-        mh = self.state["metrics_history"]
-        if len(mh) < 10: return []
-        last = mh[-10:]
-        avg_unc = statistics.fmean(x["uncert"] for x in last)
-        avg_learn = statistics.fmean(x["learn"] for x in last)
+        with self._state_lock:
+            history = list(self.state.get("legacy_metrics_history", []))
+
+        if len(history) < 10:
+            return []
+
+        last = history[-10:]
+        avg_unc = statistics.fmean(item["uncert"] for item in last)
+        avg_learn = statistics.fmean(item["learn"] for item in last)
+
         notes: List[str] = []
         if avg_unc > 0.65:
             notes.append("Augmenter exploration (curiosity), planifier plus de questions ciblées.")
@@ -495,6 +505,11 @@ class EvolutionManager:
             notes.append("Changer stratégie d'étude: plus d'exemples concrets et feedback.")
         if not notes:
             notes.append("Maintenir les stratégies actuelles, progression stable.")
-        self.state["strategies"].append({"ts": time.time(), "notes": notes})
-        self._save()
+
+        with self._state_lock:
+            strategies = self.state.setdefault("strategies", [])
+            strategies.append({"ts": _now(), "notes": notes})
+            self.state["strategies"] = strategies[-200:]
+            _safe_write_json(self.paths["state"], self.state)
+
         return notes

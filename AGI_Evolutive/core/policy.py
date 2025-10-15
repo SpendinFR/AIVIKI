@@ -44,12 +44,6 @@ class PolicyEngine:
         self.state.setdefault("hints", []).append(entry)
         self.state["hints"] = self.state["hints"][-100:]
         self._save()
-from typing import Any, Dict
-
-
-class PolicyEngine:
-    """Simple policy guard for self-model proposals."""
-
     def validate_proposal(self, proposal: Dict[str, Any], self_state: Dict[str, Any]) -> Dict[str, Any]:
         path = proposal.get("path", [])
         if not path:
