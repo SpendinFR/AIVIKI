@@ -4,6 +4,8 @@ import time
 from collections import Counter
 from typing import Any, Dict, List
 
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+
 class Consolidator:
     """Very small heuristic consolidator that extracts lessons from fresh memories."""
 
@@ -24,7 +26,7 @@ class Consolidator:
     def _save(self):
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         with open(self.path, "w", encoding="utf-8") as fh:
-            json.dump(self.state, fh, ensure_ascii=False, indent=2)
+            json.dump(json_sanitize(self.state), fh, ensure_ascii=False, indent=2)
 
     def run_once_now(self) -> Dict[str, Any]:
         recents = [

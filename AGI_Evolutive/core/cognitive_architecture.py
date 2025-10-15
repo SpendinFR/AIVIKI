@@ -2,6 +2,8 @@ import re
 import time
 from typing import Any, Dict, Optional, List, Tuple
 
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+
 from AGI_Evolutive.autonomy import AutonomyManager
 from AGI_Evolutive.beliefs.graph import BeliefGraph, Evidence
 from AGI_Evolutive.knowledge.ontology import EntityLinker, Ontology
@@ -1092,7 +1094,7 @@ class CognitiveArchitecture:
                 'source': 'user_confirm',
             }
             with open(skills_path, 'w', encoding='utf-8') as f:
-                json.dump(skills, f, ensure_ascii=False, indent=2)
+                json.dump(json_sanitize(skills), f, ensure_ascii=False, indent=2)
         except Exception:
             pass
         # petit nudge côté Learning (si présent)

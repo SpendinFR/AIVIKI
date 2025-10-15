@@ -6,6 +6,8 @@ import time
 import uuid
 from typing import Any, Dict
 
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+
 
 class PromotionManager:
     """Manage candidate overrides and promotion history."""
@@ -27,7 +29,7 @@ class PromotionManager:
 
     def save_active(self, overrides: Dict[str, Any]) -> None:
         with open(self.active_path, "w", encoding="utf-8") as handle:
-            json.dump(overrides, handle, ensure_ascii=False, indent=2)
+            json.dump(json_sanitize(overrides), handle, ensure_ascii=False, indent=2)
 
     # ------------------------------------------------------------------
     # Candidate lifecycle
@@ -46,7 +48,7 @@ class PromotionManager:
             "t": time.time(),
         }
         with open(path, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            json.dump(json_sanitize(payload), handle, ensure_ascii=False, indent=2)
         return cid
 
     def read_candidate(self, cid: str) -> Dict[str, Any]:
@@ -66,7 +68,7 @@ class PromotionManager:
             "metadata": data.get("metadata"),
         }
         with open(self.hist_path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record) + "\n")
+            handle.write(json.dumps(json_sanitize(record)) + "\n")
 
     def rollback(self, steps: int = 1) -> None:
         if not os.path.exists(self.hist_path):
@@ -84,4 +86,9 @@ class PromotionManager:
             return
         self.save_active(prev.get("overrides", {}))
         with open(self.hist_path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"t": time.time(), "event": "rollback", "to": prev}) + "\n")
+            handle.write(
+                json.dumps(
+                    json_sanitize({"t": time.time(), "event": "rollback", "to": prev})
+                )
+                + "\n"
+            )

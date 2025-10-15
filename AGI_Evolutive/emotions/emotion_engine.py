@@ -7,6 +7,8 @@ from dataclasses import dataclass, asdict, field
 from typing import Dict, Any, List, Optional
 import numpy as np
 
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+
 NEUTRAL = {"valence": 0.0, "arousal": 0.2, "dominance": 0.5}
 
 
@@ -386,7 +388,7 @@ class EmotionEngine:
     def _save(self):
         payload = {"t": time.time(), "state": self.get_state(), "modulators": self.last_modulators}
         with open(self.path_state, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
+            json.dump(json_sanitize(payload), f, ensure_ascii=False, indent=2)
         dash = {
             "t": time.time(),
             "label": self._label(),
@@ -396,7 +398,7 @@ class EmotionEngine:
             "mods": self.last_modulators
         }
         with open(self.path_dashboard, "w", encoding="utf-8") as f:
-            json.dump(dash, f, ensure_ascii=False, indent=2)
+            json.dump(json_sanitize(dash), f, ensure_ascii=False, indent=2)
         self.last_save = time.time()
 
     def _load(self):

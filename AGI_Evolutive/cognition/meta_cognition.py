@@ -2,6 +2,8 @@ import os, json, time
 from typing import List, Dict, Any, Optional
 from collections import Counter
 
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+
 class MetaCognition:
     """
     Évalue l'incertitude, repère des lacunes, génère des learning-goals,
@@ -33,7 +35,7 @@ class MetaCognition:
     def _save(self):
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         with open(self.path, "w", encoding="utf-8") as f:
-            json.dump(self.state, f, ensure_ascii=False, indent=2)
+            json.dump(json_sanitize(self.state), f, ensure_ascii=False, indent=2)
 
     # --------- Analyse & incertitude ---------
     def assess_understanding(self, horizon: int = 150) -> Dict[str, Any]:

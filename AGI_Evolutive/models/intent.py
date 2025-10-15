@@ -7,6 +7,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+
 
 @dataclass
 class Intent:
@@ -85,7 +87,7 @@ class IntentModel:
             "history": self._history[-200:],
         }
         with open(self.path, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            json.dump(json_sanitize(payload), handle, ensure_ascii=False, indent=2)
 
     # ------------------------------------------------------------------
     # Update cycle

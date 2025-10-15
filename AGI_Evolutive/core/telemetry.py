@@ -1,6 +1,8 @@
 import time, json, os
 from collections import deque
 
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+
 
 class Telemetry:
     def __init__(self, maxlen=2000):
@@ -28,7 +30,7 @@ class Telemetry:
         if self._jsonl_path:
             try:
                 with open(self._jsonl_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(e, ensure_ascii=False) + "\n")
+                    f.write(json.dumps(json_sanitize(e), ensure_ascii=False) + "\n")
             except Exception:
                 pass
         # console légère

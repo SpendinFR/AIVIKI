@@ -4,6 +4,8 @@ import time
 import glob
 from typing import Any, Dict, List, Optional
 
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+
 
 def _now():
     return time.time()
@@ -303,7 +305,7 @@ class EpisodicLinker:
     def _append_jsonl(self, path: str, obj: Dict[str, Any]):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            f.write(json.dumps(json_sanitize(obj), ensure_ascii=False) + "\n")
 
     def _load(self, path: str, default):
         if not os.path.exists(path):
@@ -316,7 +318,7 @@ class EpisodicLinker:
 
     def _save(self, path: str, obj):
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(obj, f, ensure_ascii=False, indent=2)
+            json.dump(json_sanitize(obj), f, ensure_ascii=False, indent=2)
 
     # ---------- memory fetch ----------
     def _fetch_recent_memories(self, limit: int = 400) -> List[Dict[str, Any]]:

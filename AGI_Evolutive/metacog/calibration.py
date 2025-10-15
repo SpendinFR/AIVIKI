@@ -4,6 +4,8 @@ import os, json, time, uuid, math, re
 from collections import deque
 from statistics import mean
 
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+
 class CalibrationMeter:
     def __init__(self, path: str = "data/calibration.jsonl") -> None:
         self.path = path
@@ -13,7 +15,7 @@ class CalibrationMeter:
         eid = str(uuid.uuid4())
         row = {"id": eid, "t": time.time(), "domain": domain, "p": float(p), "meta": meta or {}}
         with open(self.path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            f.write(json.dumps(json_sanitize(row), ensure_ascii=False) + "\n")
         return eid
 
     def log_outcome(self, event_id: str, success: bool) -> None:
@@ -25,7 +27,7 @@ class CalibrationMeter:
                 it["success"] = bool(success); break
         with open(self.path, "w", encoding="utf-8") as f:
             for it in items:
-                f.write(json.dumps(it, ensure_ascii=False) + "\n")
+                f.write(json.dumps(json_sanitize(it), ensure_ascii=False) + "\n")
 
     def _iter(self) -> List[Dict[str, Any]]:
         if not os.path.exists(self.path): return []

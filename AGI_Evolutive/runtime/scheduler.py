@@ -24,6 +24,8 @@ import time
 import traceback
 from typing import Any, Callable, Dict
 
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+
 
 def _now() -> float:
     return time.time()
@@ -42,13 +44,13 @@ def _safe_json(path: str, default: Any):
 def _write_json(path: str, obj: Any):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
+        json.dump(json_sanitize(obj), f, ensure_ascii=False, indent=2)
 
 
 def _append_jsonl(path: str, obj: Dict[str, Any]):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        f.write(json.dumps(json_sanitize(obj), ensure_ascii=False) + "\n")
 
 
 class Scheduler:

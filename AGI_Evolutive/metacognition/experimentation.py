@@ -7,6 +7,8 @@ import os
 import time
 import uuid
 
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+
 
 def _now():
     return time.time()
@@ -35,7 +37,7 @@ class Experiment:
 
     def to_jsonl(self) -> str:
         d = asdict(self)
-        return json.dumps(d, ensure_ascii=False)
+        return json.dumps(json_sanitize(d), ensure_ascii=False)
 
 
 class MetacogExperimenter:
@@ -123,7 +125,7 @@ class MetacogExperimenter:
             return
 
         goal = exp.baseline * (1.0 + exp.target_change)
-        success = new_value >= goal
+        success = bool(new_value >= goal)
 
         outcome = {
             "exp_id": exp.exp_id,
@@ -135,7 +137,8 @@ class MetacogExperimenter:
             "measured_at": _now(),
         }
         self._append_jsonl(
-            EXPERIMENTS_LOG, json.dumps({"outcome": outcome}, ensure_ascii=False)
+            EXPERIMENTS_LOG,
+            json.dumps(json_sanitize({"outcome": outcome}), ensure_ascii=False),
         )
         exp.status = "done" if success else "failed"
 

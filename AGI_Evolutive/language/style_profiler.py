@@ -2,6 +2,8 @@ from dataclasses import dataclass, asdict
 from typing import Dict, Any
 import os, json, re
 
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+
 
 @dataclass
 class UserStyleProfile:
@@ -101,7 +103,7 @@ class StyleProfiler:
         try:
             with open(self.persist_path, "w", encoding="utf-8") as f:
                 data = {uid: asdict(p) for uid, p in self.profiles.items()}
-                json.dump(data, f, ensure_ascii=False, indent=2)
+                json.dump(json_sanitize(data), f, ensure_ascii=False, indent=2)
         except Exception:
             pass
 
