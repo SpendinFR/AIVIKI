@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import ClassVar, Dict, Optional, Tuple
 
 
 @dataclass
@@ -24,7 +24,7 @@ class StylePolicy:
     current_mode: str = "pedagogique"
     persona_tone: str = "neutre"
 
-    MODE_PRESETS: Dict[str, Dict[str, float]] = {
+    MODE_PRESETS: ClassVar[Dict[str, Dict[str, float]]] = {
         "brief": {
             "directness": 0.8,
             "verbosity": 0.3,
@@ -47,14 +47,14 @@ class StylePolicy:
         },
     }
 
-    PERSONA_TONE_BIASES: Dict[str, Dict[str, float]] = {
+    PERSONA_TONE_BIASES: ClassVar[Dict[str, Dict[str, float]]] = {
         "neutre": {},
         "chaleureux": {"warmth": 0.75, "politeness": 0.7},
         "professionnel": {"structure": 0.8, "directness": 0.6},
         "coach": {"warmth": 0.65, "asking_rate": 0.55},
     }
 
-    MODE_KEYWORDS: Dict[str, tuple] = {
+    MODE_KEYWORDS: ClassVar[Dict[str, Tuple[str, ...]]] = {
         "brief": ("mode bref", "mode synthétique", "sois bref", "fais court", "résume"),
         "pedagogique": ("mode pédagogique", "explique", "détaillé", "prends le temps"),
         "audit": ("mode audit", "challenge-moi", "questionne", "fais un audit"),
