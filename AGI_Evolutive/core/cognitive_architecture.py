@@ -30,12 +30,15 @@ from AGI_Evolutive.runtime.logger import JSONLLogger
 from AGI_Evolutive.runtime.response import ensure_contract, format_agent_reply
 from AGI_Evolutive.runtime.scheduler import Scheduler
 from AGI_Evolutive.world_model import PhysicsEngine
+from AGI_Evolutive.self_improver import SelfImprover
+from AGI_Evolutive.self_improver.promote import PromotionManager
 
 
 class CognitiveArchitecture:
     """Central coordinator for the agent's cognitive subsystems."""
 
-    def __init__(self):
+    def __init__(self, boot_minimal: bool = False):
+        self.boot_minimal = boot_minimal
         # Observability
         self.logger = JSONLLogger("runtime/agent_events.jsonl")
         self.telemetry = Telemetry()
@@ -117,6 +120,58 @@ class CognitiveArchitecture:
             language=self.language,
         )
 
+        def _apply_overrides(arch: "CognitiveArchitecture", ov: Dict[str, Any]) -> None:
+            if not ov:
+                return
+            style_policy = getattr(arch, "style_policy", None)
+            if style_policy and hasattr(style_policy, "params"):
+                if "style.hedging" in ov:
+                    style_policy.params["hedging"] = max(0.0, min(1.0, float(ov["style.hedging"])))
+
+            if "learning.self_assess.threshold" in ov and hasattr(arch, "learning"):
+                try:
+                    threshold = float(ov["learning.self_assess.threshold"])
+                    setattr(arch.learning, "self_assess_threshold", threshold)
+                except Exception:
+                    pass
+
+            abduction = getattr(arch, "abduction", None)
+            if not abduction:
+                return
+            if "abduction.tie_gap" in ov:
+                setattr(abduction, "tie_gap", float(ov["abduction.tie_gap"]))
+            if "abduction.weights.prior" in ov:
+                setattr(abduction, "w_prior", float(ov["abduction.weights.prior"]))
+            if "abduction.weights.boost" in ov:
+                setattr(abduction, "w_boost", float(ov["abduction.weights.boost"]))
+            if "abduction.weights.match" in ov:
+                setattr(abduction, "w_match", float(ov["abduction.weights.match"]))
+
+        def _arch_factory(overrides: Dict[str, Any]) -> "CognitiveArchitecture":
+            fresh: "CognitiveArchitecture"
+            try:
+                fresh = self.__class__(boot_minimal=True)
+            except Exception:
+                fresh = self
+            try:
+                _apply_overrides(fresh, overrides or {})
+            except Exception:
+                pass
+            return fresh
+
+        self._arch_factory = _arch_factory
+        self.promotions: Optional[PromotionManager]
+        if not boot_minimal:
+            self.self_improver = SelfImprover(
+                arch_factory=self._arch_factory,
+                memory=self.memory,
+                question_manager=getattr(self, "question_manager", None),
+            )
+            self.promotions = self.self_improver.prom
+        else:
+            self.self_improver = None
+            self.promotions = None
+
         # Bind helper components
         self._bind_interfaces()
         self._bind_extractors()
@@ -134,8 +189,10 @@ class CognitiveArchitecture:
         )
 
         # Scheduler runs background maintenance work (daemon thread)
-        self.scheduler = Scheduler(self, data_dir="data")
-        self.scheduler.start()
+        self.scheduler = None
+        if not boot_minimal:
+            self.scheduler = Scheduler(self, data_dir="data")
+            self.scheduler.start()
 
         self.telemetry.log("ready", "core", {"status": "initialized"})
 
@@ -228,6 +285,29 @@ class CognitiveArchitecture:
         if not user_msg:
             self._tick_background_systems()
             return self.last_output_text
+
+        try:
+            if self.self_improver and self.self_improver.try_promote_from_reply(user_msg):
+                return "✅ Challenger promu. Les nouveaux paramètres sont actifs."
+        except Exception:
+            pass
+
+        if isinstance(user_msg, str):
+            normalized = user_msg.strip().lower()
+            if normalized in {"améliore-toi", "self-improve", "optimize"}:
+                cid = None
+                try:
+                    if self.self_improver:
+                        cid = self.self_improver.run_cycle(n_candidates=4)
+                except Exception:
+                    cid = None
+                if cid:
+                    return (
+                        "J’ai un challenger candidat ({cid}). Je te demande validation avant promotion.".format(
+                            cid=cid
+                        )
+                    )
+                return "Aucun challenger n’a surclassé le champion sur les métriques définies."
 
         self._maybe_update_calibration(user_msg)
 
