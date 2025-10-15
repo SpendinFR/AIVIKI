@@ -438,6 +438,8 @@ class BeliefGraph:
         for rule in self._rules:
             if not rule.applies(seed):
                 continue
+            if seed.polarity <= 0:
+                continue
             derived_conf = min(rule.confidence_cap, seed.confidence * rule.strength)
             if derived_conf <= 0.0:
                 continue
