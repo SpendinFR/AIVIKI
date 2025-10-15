@@ -280,7 +280,8 @@ class ActionInterface:
         content = act.payload.get("content", "")
         meta = act.payload.get("meta", {})
         try:
-            mem_id = memory.add_memory(kind=kind, content=content, metadata=meta)
+            payload = {"kind": kind, "content": content, "metadata": meta}
+            mem_id = memory.add_memory(payload)
             return {"ok": True, "memory_id": mem_id}
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -315,9 +316,11 @@ class ActionInterface:
                 goals.add_learning_goal(concept, motive=why, expected_gain=0.4)
             if memory and hasattr(memory, "add_memory"):
                 memory.add_memory(
-                    kind="learning_intent",
-                    content=f"Apprendre le concept: {concept}",
-                    metadata={"reason": why, "source": "action_interface"},
+                    {
+                        "kind": "learning_intent",
+                        "content": f"Apprendre le concept: {concept}",
+                        "metadata": {"reason": why, "source": "action_interface"},
+                    }
                 )
             return {"ok": True, "concept": concept}
         except Exception as e:
@@ -357,16 +360,18 @@ class ActionInterface:
             return
         try:
             memory.add_memory(
-                kind="action_experience",
-                content=f"[{act.type}] -> {act.status}",
-                metadata={
-                    "action_id": act.id,
-                    "payload": act.payload,
-                    "result": act.result,
-                    "reward": reward,
-                    "priority": act.priority,
-                    "created_at": act.created_at,
-                },
+                {
+                    "kind": "action_experience",
+                    "content": f"[{act.type}] -> {act.status}",
+                    "metadata": {
+                        "action_id": act.id,
+                        "payload": act.payload,
+                        "result": act.result,
+                        "reward": reward,
+                        "priority": act.priority,
+                        "created_at": act.created_at,
+                    },
+                }
             )
         except Exception:
             pass

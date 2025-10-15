@@ -1,4 +1,5 @@
 import time
+from contextlib import nullcontext
 
 from AGI_Evolutive.cognition.evolution_manager import EvolutionManager
 from AGI_Evolutive.cognition.homeostasis import Homeostasis
@@ -92,7 +93,11 @@ class Orchestrator:
     def action_cycle(self):
         # traiter d'abord un goal d'apprentissage si présent
         picked = None
-        with self.planner.lock:
+        lock = getattr(self.planner, "lock", None)
+        if lock is None:
+            lock = getattr(self.planner, "_lock", None)
+        context = lock if lock is not None else nullcontext()
+        with context:
             plan_ids = list(self.planner.state["plans"].keys())
         for gid in plan_ids:
             # priorité aux goals learn_*
