@@ -102,3 +102,10 @@ class VoiceProfile:
     # getter rapide (pour le renderer)
     def style(self) -> Dict[str, float]:
         return dict(self.state.get("style", {}))
+
+    def bump(self, knob: str, delta: float):
+        d = self.state["style"]
+        if knob in d:
+            d[knob] = max(0.0, min(1.0, d[knob] + float(delta)))
+            self.state["last_update"] = time.time()
+            self.save()
