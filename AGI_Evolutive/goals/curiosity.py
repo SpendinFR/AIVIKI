@@ -44,6 +44,7 @@ class CuriosityEngine:
     def _collect_context(self) -> Dict[str, Any]:
         metacog = getattr(self.architecture, "metacognition", None)
         reasoning = getattr(self.architecture, "reasoning", None)
+        memory = getattr(self.architecture, "memory", None)
 
         status: Dict[str, Any] = {}
         if metacog and hasattr(metacog, "get_metacognitive_status"):
@@ -59,7 +60,36 @@ class CuriosityEngine:
             except Exception:
                 reasoning_stats = {}
 
-        return {"metacog": status, "reasoning": reasoning_stats}
+        # Concepts récemment extraits mais pas encore “appris”
+        novel_concepts: List[str] = []
+        known_concepts: set = set()
+        try:
+            if memory and hasattr(memory, "get_recent_memories"):
+                recents = memory.get_recent_memories(200)
+                # connus (notes / appris)
+                for item in recents:
+                    kind = (item.get("kind") or item.get("type") or "").lower()
+                    if kind in {"concept_note", "concept_learned"}:
+                        c = item.get("concept") or (item.get("metadata", {}) or {}).get("concept")
+                        if c:
+                            known_concepts.add(str(c).strip())
+                        for c, _score in (item.get("metadata", {}) or {}).get("concepts", []):
+                            known_concepts.add(str(c).strip())
+                # nouveaux (extrait mais pas appris)
+                for item in recents:
+                    kind = (item.get("kind") or item.get("type") or "").lower()
+                    if kind == "concept_extracted":
+                        meta = (item.get("metadata") or {})
+                        concepts = meta.get("concepts") or []
+                        for entry in concepts:
+                            c = entry[0] if isinstance(entry, (list, tuple)) and entry else entry
+                            c = str(c).strip()
+                            if c and c not in known_concepts and c not in novel_concepts:
+                                novel_concepts.append(c)
+        except Exception:
+            pass
+
+        return {"metacog": status, "reasoning": reasoning_stats, "novel_concepts": novel_concepts}
 
     def _identify_gaps(self, context: Dict[str, Any]) -> List[Dict[str, Any]]:
         performance = context.get("metacog", {}).get("performance_metrics", {})
@@ -68,7 +98,7 @@ class CuriosityEngine:
             key=lambda item: item[1],
         )
 
-        gaps = [
+        gaps: List[Dict[str, Any]] = [
             {"domain": name, "score": value, "severity": float(1.0 - value)}
             for name, value in low_metrics[:3]
         ]
@@ -78,6 +108,10 @@ class CuriosityEngine:
             {"domain": "reasoning_error", "score": 0.3, "hint": err, "severity": 0.6}
             for err in reasoning_errors[:2]
         )
+
+        # NOUVEAU : apprendre des concepts nouveaux (générique)
+        for c in context.get("novel_concepts", [])[:3]:
+            gaps.append({"domain": "novel_concept", "concept": c, "score": 0.4, "severity": 0.6})
 
         if not gaps:
             gaps.append({"domain": "exploration", "score": 0.5, "severity": 0.4})
@@ -93,6 +127,16 @@ class CuriosityEngine:
         competence = max(0.3, min(0.7, 0.45 + (random.random() - 0.5) * 0.3))
         curiosity = min(1.0, 0.6 + 0.3 * random.random())
         urgency = 0.3 + 0.2 * random.random()
+
+        # Cas générique : concept nouveau → objectif d’apprentissage “naturel”
+        if gap.get("domain") == "novel_concept" and gap.get("concept"):
+            c = str(gap["concept"]).strip()
+            description = f"Apprendre le concept « {c} » et produire une synthèse exploitable."
+            criteria = [
+                f"Définir « {c} » en 3 phrases maximum.",
+                "Donner 2 exemples et 1 contre-exemple pertinents.",
+                "Énoncer 1 règle de décision utilisant ce concept.",
+            ]
 
         return {
             "description": description,
@@ -111,6 +155,8 @@ class CuriosityEngine:
             return f"Analyser et corriger une erreur de raisonnement: {gap.get('hint', 'non spécifié')}"
         if domain == "exploration":
             return "Explorer un nouveau sujet pour enrichir la base de connaissances."
+        if domain == "novel_concept":
+            return "Apprendre un concept récemment rencontré."
         return f"Améliorer la métrique {domain} par une expérimentation ciblée."
 
     def _default_criteria(self, gap: Dict[str, Any]) -> List[str]:
