@@ -31,10 +31,20 @@ class PromotionManager:
 
     # ------------------------------------------------------------------
     # Candidate lifecycle
-    def stage_candidate(self, overrides: Dict[str, Any], metrics: Dict[str, float]) -> str:
+    def stage_candidate(
+        self,
+        overrides: Dict[str, Any],
+        metrics: Dict[str, float],
+        metadata: Dict[str, Any] | None = None,
+    ) -> str:
         cid = str(uuid.uuid4())
         path = os.path.join(self.root, "candidates", f"{cid}.json")
-        payload = {"overrides": overrides, "metrics": metrics, "t": time.time()}
+        payload = {
+            "overrides": overrides,
+            "metrics": metrics,
+            "metadata": metadata or {},
+            "t": time.time(),
+        }
         with open(path, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=False, indent=2)
         return cid
@@ -53,6 +63,7 @@ class PromotionManager:
             "cid": cid,
             "overrides": data.get("overrides"),
             "metrics": data.get("metrics"),
+            "metadata": data.get("metadata"),
         }
         with open(self.hist_path, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(record) + "\n")
