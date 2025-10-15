@@ -41,9 +41,47 @@ def _safe_json_load(path: str, default: Any) -> Any:
 
 
 def _safe_jsonl_append(path: str, obj: Dict[str, Any]) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
     with open(path, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+
+def _normalize_text(value: Any) -> Optional[str]:
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+    if isinstance(value, dict):
+        for key in ("content", "text", "summary", "description", "message", "label", "concept", "value"):
+            candidate = value.get(key)
+            normalized = _normalize_text(candidate)
+            if normalized:
+                return normalized
+        return None
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            normalized = _normalize_text(item)
+            if normalized:
+                return normalized
+        return None
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _memory_to_text(memory: Dict[str, Any]) -> Optional[str]:
+    for key in ("content", "text", "summary", "message", "body"):
+        if key in memory:
+            normalized = _normalize_text(memory.get(key))
+            if normalized:
+                return normalized
+    metadata = memory.get("metadata")
+    if isinstance(metadata, dict):
+        normalized = _normalize_text(metadata)
+        if normalized:
+            return normalized
+    return None
 
 
 class ConceptExtractor:
@@ -54,13 +92,21 @@ class ConceptExtractor:
         memory_store: Optional[Any],
         data_path: str = "data/concepts.json",
     ) -> None:
-        if data_path and not data_path.endswith(".json") and not data_path.endswith(".jsonl"):
-            self.data_dir = data_path
-            concept_events_path = os.path.join(self.data_dir, "concepts.jsonl")
-        else:
-            concept_events_path = data_path
+        concept_events_path: Optional[str]
+        if not data_path:
+            self.data_dir = "."
+            concept_events_path = os.path.join(self.data_dir, "concept_events.jsonl")
+        elif data_path.endswith(".jsonl"):
             base_dir = os.path.dirname(data_path)
             self.data_dir = base_dir if base_dir else "."
+            concept_events_path = data_path
+        elif data_path.endswith(".json"):
+            base_dir = os.path.dirname(data_path)
+            self.data_dir = base_dir if base_dir else "."
+            concept_events_path = os.path.join(self.data_dir, "concept_events.jsonl")
+        else:
+            self.data_dir = data_path
+            concept_events_path = os.path.join(self.data_dir, "concept_events.jsonl")
 
         os.makedirs(self.data_dir, exist_ok=True)
         self.paths = {
@@ -353,7 +399,7 @@ class ConceptExtractor:
             mem_id = memory.get("id") or memory.get("_id") or memory.get("memory_id")
             if mem_id and mem_id in self.state["processed_ids"]:
                 continue
-            text = (memory.get("content") or memory.get("text") or "").strip()
+            text = _memory_to_text(memory)
             if not text:
                 continue
             yield mem_id, text, memory
