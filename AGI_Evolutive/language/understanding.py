@@ -7,6 +7,8 @@ Language v2: NLU à cadres + état de dialogue + self-ask
 import re
 import unicodedata
 from typing import Dict, Any, List, Tuple, Optional
+
+from AGI_Evolutive.models.intent import IntentModel
 from .frames import UtteranceFrame, DialogueAct
 from .dialogue_state import DialogueState
 
@@ -18,10 +20,13 @@ def _normalize(text: str) -> str:
 
 
 class SemanticUnderstanding:
-    def __init__(self, architecture=None, memory=None):
+    def __init__(self, architecture=None, memory=None, intent_model=None, **_ignored):
         self.arch = architecture
         self.memory = memory
         self.state = DialogueState()
+        if intent_model is None and architecture is not None:
+            intent_model = getattr(architecture, "intent_model", None)
+        self.intent_model = intent_model
         # Mini-lexique interne pour "mémoriser" des termes
         self.lexicon: Dict[str, Dict[str, Any]] = {}
         # Seuils
@@ -34,7 +39,7 @@ class SemanticUnderstanding:
         raw = text or ""
         norm = _normalize(raw)
 
-        intent, conf = self._classify_intent(norm)
+        intent, conf = self._classify_intent(raw, norm)
         acts = self._guess_dialogue_acts(intent, norm)
         slots, unknowns = self._extract_slots(intent, norm)
 
@@ -92,41 +97,26 @@ class SemanticUnderstanding:
         return "\n".join(parts)
 
     # ---------- INTENT & ACTS ----------
-    def _classify_intent(self, norm: str) -> Tuple[str, float]:
-        txt = norm.lower()
+    def _classify_intent(self, text: str, norm: Optional[str] = None) -> Tuple[str, float]:
+        norm_text = norm if norm is not None else _normalize(text or "")
 
-        rules = [
-            ("greet",       [r"\b(bonjour|salut|coucou|hello|hi)\b"]),
-            ("thanks",      [r"\b(merci|thanks)\b"]),
-            ("bye",         [r"\b(au revoir|a\+|ciao|bye)\b"]),
-            ("meta_help",   [r"^/help\b", r"\b(aide|help)\b"]),
-            ("set_goal",    [r"\b(mon|ma|mes)?\s*(objectif|goal|but)\b", r"\bpriorit[ée]|\bplanifier\b"]),
-            ("request",     [r"\b(peux[- ]tu|peux tu|pourrais[- ]tu|fais|fait|crée|gen[eé]re|envoie|montre)\b"]),
-            ("ask",         [r"\?$", r"^(pourquoi|comment|quand|quoi|combien|où)\b"]),
-            ("feedback",    [r"\b(bien|parfait|ok|super|mauvais|nul|bug)\b"]),
-            ("reflect",     [r"\b(r[eé]fl[eé]chis|je pense|hypoth[eè]se|intuition)\b"]),
-            ("inform",      [r".*"]),  # fallback
-        ]
+        if self.intent_model and hasattr(self.intent_model, "predict"):
+            try:
+                intent, conf = self.intent_model.predict(text)
+                return intent, float(conf)
+            except Exception:
+                pass
 
-        for intent, patterns in rules:
-            score = 0.0
-            hits = 0
-            for p in patterns:
-                if re.search(p, txt):
-                    hits += 1
-            if hits:
-                score = min(0.6 + 0.15 * (hits - 1), 0.95)  # petite montée si plusieurs matches
-                return intent, score
-
-        return "inform", 0.4
+        return IntentModel.rule_predict(norm_text)
 
     def _guess_dialogue_acts(self, intent: str, norm: str) -> List[DialogueAct]:
         acts = []
         if intent == "greet": acts.append(DialogueAct.GREET)
         if intent == "thanks": acts.append(DialogueAct.THANKS)
         if intent == "bye": acts.append(DialogueAct.BYE)
-        if intent == "request": acts.append(DialogueAct.REQUEST)
-        if intent == "ask": acts.append(DialogueAct.ASK)
+        if intent in {"request", "create", "send", "plan", "summarize", "classify"}:
+            acts.append(DialogueAct.REQUEST)
+        if intent in {"ask", "ask_info"}: acts.append(DialogueAct.ASK)
         if intent == "meta_help": acts.append(DialogueAct.META_HELP)
         if intent == "set_goal": acts.append(DialogueAct.INFORM)
         if intent == "reflect": acts.append(DialogueAct.REFLECT)
@@ -245,6 +235,6 @@ class SemanticUnderstanding:
             return "créer/mettre à jour un objectif dans mon système si tu confirmes la formulation."
         if frame.intent == "request":
             return "décomposer la demande en étapes et vérifier que j'ai toutes les contraintes nécessaires."
-        if frame.intent == "ask":
+        if frame.intent in {"ask", "ask_info"}:
             return "proposer une hypothèse courte puis demander validation."
         return None

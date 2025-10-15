@@ -22,6 +22,8 @@ import re, time, math, random, json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from AGI_Evolutive.models.intent import IntentModel
+
 
 # ============================================================
 # Utilitaires
@@ -95,13 +97,22 @@ class SemanticUnderstanding:
         ("classify", re.compile(r"\b(classe|catégorise|tague|étiquette)\b", re.I)),
     ]
 
-    def __init__(self, cognitive_architecture: Any = None, memory_system: Any = None):
+    def __init__(
+        self,
+        cognitive_architecture: Any = None,
+        memory_system: Any = None,
+        intent_model: Optional[IntentModel] = None,
+    ):
         self.cognitive_arch = cognitive_architecture
         self.arch = cognitive_architecture
         self.memory_system = memory_system
         self.memory = memory_system  # alias pour compatibilité/reflexive replies
         self.history: List[Utterance] = []
         self.lang = "fr"
+
+        if intent_model is None and cognitive_architecture is not None:
+            intent_model = getattr(cognitive_architecture, "intent_model", None)
+        self.intent_model: IntentModel = intent_model or IntentModel()
 
         # auto-wiring : accès doux aux autres modules si dispos
         ca = self.cognitive_arch
@@ -367,10 +378,25 @@ class SemanticUnderstanding:
     def _frame(self, text: str, toks: List[str], ents: List[Entity]) -> Frame:
         intent = "inform"
         conf = 0.55
-        for it, pat in self.INTENT_PATTERNS:
-            if pat.search(text):
-                intent, conf = it, 0.75
-                break
+        if self.intent_model and hasattr(self.intent_model, "predict"):
+            try:
+                intent, conf = self.intent_model.predict(text)
+            except Exception:
+                intent, conf = IntentModel.rule_predict(text)
+        else:
+            intent, conf = IntentModel.rule_predict(text)
+
+        if intent == "inform":
+            for it, pat in self.INTENT_PATTERNS:
+                if pat.search(text):
+                    intent, conf = it, max(conf, 0.75)
+                    break
+
+        try:
+            conf = float(conf)
+        except Exception:
+            conf = 0.55
+        conf = max(0.0, min(1.0, conf))
         slots: Dict[str, Any] = {}
         # Remonter quelques entités utiles en slots
         for e in ents:

@@ -37,6 +37,84 @@ class IntentModel:
         (r"sur le long terme,? je (?:veux|voudrais) (.+)", 0.75),
     )
 
+    BASIC_RULES: Tuple[Tuple[str, Tuple[str, ...], float], ...] = (
+        (
+            "greet",
+            (r"\b(bonjour|salut|coucou|hello|hi)\b",),
+            0.85,
+        ),
+        (
+            "thanks",
+            (r"\b(merci|thanks)\b",),
+            0.8,
+        ),
+        (
+            "bye",
+            (r"\b(au revoir|a\+|ciao|bye)\b",),
+            0.8,
+        ),
+        (
+            "meta_help",
+            (r"^/help\b", r"\b(aide|help)\b"),
+            0.75,
+        ),
+        (
+            "ask_info",
+            (r"\?$", r"^(pourquoi|comment|quand|quoi|combien|où)\b"),
+            0.7,
+        ),
+        (
+            "plan",
+            (r"\b(planifie|planifier|prévois|organise|agenda)\b",),
+            0.72,
+        ),
+        (
+            "create",
+            (r"\b(crée|creer|ajoute|ajouter|produis|fabrique)\b",),
+            0.7,
+        ),
+        (
+            "send",
+            (r"\b(envoie|envoyer|partage|transmets?)\b",),
+            0.7,
+        ),
+        (
+            "summarize",
+            (r"\b(résume|resume|synthétise|synthese|summary)\b",),
+            0.7,
+        ),
+        (
+            "classify",
+            (r"\b(classe|catégorise|tague|étiquette)\b",),
+            0.68,
+        ),
+        (
+            "request",
+            (r"\b(peux[- ]tu|peux tu|pourrais[- ]tu|fais|fait|gen[eé]re|montre)\b",),
+            0.7,
+        ),
+        (
+            "set_goal",
+            (r"\b(mon|ma|mes)?\s*(objectif|goal|but)\b",),
+            0.75,
+        ),
+        (
+            "feedback",
+            (r"\b(bien|parfait|ok|super|mauvais|nul|bug)\b",),
+            0.65,
+        ),
+        (
+            "reflect",
+            (r"\b(r[eé]fl[eé]chis|je pense|hypoth[eè]se|intuition)\b",),
+            0.65,
+        ),
+        (
+            "inform",
+            (r".*",),
+            0.55,
+        ),
+    )
+
     def __init__(self, path: str = "data/intent_model.json") -> None:
         self.path = path
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
@@ -88,6 +166,41 @@ class IntentModel:
         }
         with open(self.path, "w", encoding="utf-8") as handle:
             json.dump(json_sanitize(payload), handle, ensure_ascii=False, indent=2)
+
+    # ------------------------------------------------------------------
+    # Predictions & heuristics
+    @classmethod
+    def rule_predict(cls, text: str) -> Tuple[str, float]:
+        low = (text or "").lower()
+        for intent, patterns, base_conf in cls.BASIC_RULES:
+            hits = 0
+            for pattern in patterns:
+                if re.search(pattern, low):
+                    hits += 1
+            if hits:
+                conf = min(0.95, base_conf + 0.05 * (hits - 1))
+                return intent, conf
+        return "inform", 0.4
+
+    def predict(self, text: str) -> Tuple[str, float]:
+        """Retourne l'intention la plus probable pour un message utilisateur."""
+
+        if not text:
+            return "inform", 0.0
+
+        base_intent, base_conf = self.rule_predict(text)
+
+        try:
+            findings = self.observe_user_message(text, source="nlu_predict")
+        except Exception:
+            findings = []
+
+        if findings:
+            top = max(findings, key=lambda it: it.confidence)
+            goal_conf = max(base_conf, min(0.99, float(top.confidence)))
+            return "set_goal", goal_conf
+
+        return base_intent, base_conf
 
     # ------------------------------------------------------------------
     # Update cycle
