@@ -37,28 +37,33 @@ class EpisodicLinker:
     - Pousse des mémoires 'episode_summary' si possible
     """
 
-    def __init__(self, memory_or_data_dir: Optional[Any] = None, data_dir: str = "data"):
-        memory = None
-        if isinstance(memory_or_data_dir, str):
-            data_dir = memory_or_data_dir
-        elif memory_or_data_dir is not None:
-            memory = memory_or_data_dir
+    def __init__(self, memory_store: Optional[Any], graph_path: str = "data/episodic_graph.json"):
+        if graph_path and not graph_path.endswith(".json"):
+            self.data_dir = graph_path
+            self.graph_path = os.path.join(self.data_dir, "episodic_graph.json")
+        else:
+            self.graph_path = graph_path
+            base_dir = os.path.dirname(graph_path)
+            self.data_dir = base_dir if base_dir else "."
 
-        self.data_dir = data_dir
         os.makedirs(self.data_dir, exist_ok=True)
         self.paths = {
             "episodes": os.path.join(self.data_dir, "episodes.jsonl"),
             "backlinks": os.path.join(self.data_dir, "memory_backlinks.json"),
             "state": os.path.join(self.data_dir, "episodic_state.json"),
         }
-        self.bound = {"memory": memory, "language": None, "metacog": None, "emotions": None}
+        self.bound = {
+            "memory": memory_store,
+            "language": None,
+            "metacog": None,
+            "emotions": None,
+        }
 
         self.state = self._load(
             self.paths["state"],
             {"last_run": 0.0, "processed_ids": [], "last_episode_id": 0},
         )
         self.backlinks = self._load(self.paths["backlinks"], {})  # mem_id -> [{to, rel}]
-        self.graph_path = os.path.join(self.data_dir, "episodic_graph.json")
         self.graph = self._load(self.graph_path, {"nodes": [], "edges": []})
 
         self.period_s = 20.0
@@ -76,13 +81,13 @@ class EpisodicLinker:
         )
 
     # ---------- stepping ----------
-    def step(self, memory_system: Any = None, *, force: bool = False, max_batch: int = 400) -> None:
-        if memory_system is not None:
-            self.bound["memory"] = memory_system
+    def step(self, memory: Any = None, max_batch: int = 200) -> None:
+        if memory is not None:
+            self.bound["memory"] = memory
         if self.bound.get("memory") is None:
             return
         now = time.time()
-        if not force and now - self._last_step < self.period_s:
+        if now - self._last_step < self.period_s:
             return
         self._last_step = now
         self.run_once(max_batch=max_batch)

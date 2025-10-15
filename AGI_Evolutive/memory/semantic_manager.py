@@ -12,8 +12,9 @@ class SemanticMemoryManager:
         self.memory = memory_system
         self.architecture = architecture
         self.store = ConceptStore()
-        self.extractor = ConceptExtractor(self.store)
-        self.linker = EpisodicLinker()
+        self.extractor = ConceptExtractor(self.memory)
+        self.extractor.store = self.store
+        self.linker = EpisodicLinker(self.memory)
         self.last_concept_step = 0.0
         self.last_link_step = 0.0
         self.concept_period = 5.0

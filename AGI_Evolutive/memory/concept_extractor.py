@@ -51,29 +51,27 @@ class ConceptExtractor:
 
     def __init__(
         self,
-        memory_or_store: Optional[Any] = None,
-        data_dir: str = "data",
+        memory_store: Optional[Any],
+        data_path: str = "data/concepts.json",
     ) -> None:
-        store: Optional[ConceptStore] = None
-        memory = None
-        if isinstance(memory_or_store, ConceptStore):
-            store = memory_or_store
-        elif isinstance(memory_or_store, str):
-            data_dir = memory_or_store
-        elif memory_or_store is not None:
-            memory = memory_or_store
+        if data_path and not data_path.endswith(".json") and not data_path.endswith(".jsonl"):
+            self.data_dir = data_path
+            concept_events_path = os.path.join(self.data_dir, "concepts.jsonl")
+        else:
+            concept_events_path = data_path
+            base_dir = os.path.dirname(data_path)
+            self.data_dir = base_dir if base_dir else "."
 
-        self.data_dir = data_dir
         os.makedirs(self.data_dir, exist_ok=True)
         self.paths = {
             "concept_index": os.path.join(self.data_dir, "concept_index.json"),
             "concept_graph": os.path.join(self.data_dir, "concept_graph.json"),
-            "concept_events": os.path.join(self.data_dir, "concepts.jsonl"),
+            "concept_events": concept_events_path,
             "state": os.path.join(self.data_dir, "concept_state.json"),
         }
-        self.store = store
+        self.store: Optional[ConceptStore] = None
         self.bound: Dict[str, Optional[Any]] = {
-            "memory": memory,
+            "memory": memory_store,
             "emotions": None,
             "metacog": None,
             "language": None,
@@ -107,17 +105,17 @@ class ConceptExtractor:
         self.bound.update({"emotions": emotions, "metacog": metacog, "language": language})
 
     # ---------- scheduling helpers ----------
-    def step(self, memory_system: Any = None, max_batch: int = 300) -> None:
-        if memory_system is not None:
-            self.bound["memory"] = memory_system
-        memory = memory_system if memory_system is not None else self.bound.get("memory")
-        if memory is None:
+    def step(self, memory: Any = None, max_batch: int = 300) -> None:
+        if memory is not None:
+            self.bound["memory"] = memory
+        memory_system = memory if memory is not None else self.bound.get("memory")
+        if memory_system is None:
             return
         now = time.time()
         if now - self._last_step < self.period_s:
             return
         self._last_step = now
-        self._run_batch(self._collect_memories(memory, limit=max_batch))
+        self._run_batch(self._collect_memories(memory_system, limit=max_batch))
 
     def run_once(self, max_batch: int = 400) -> None:
         mems = self._collect_memories(self.bound.get("memory"), limit=max_batch)

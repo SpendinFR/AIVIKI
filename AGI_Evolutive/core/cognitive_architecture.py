@@ -100,8 +100,8 @@ class CognitiveArchitecture:
         self.telemetry.log("init", "core", {"stage": "language"})
         self.language = SemanticUnderstanding(self, self.memory)
 
-        self.concept_extractor = ConceptExtractor(data_dir="data")
-        self.episodic_linker = EpisodicLinker(data_dir="data")
+        self.concept_extractor = ConceptExtractor(self.memory)
+        self.episodic_linker = EpisodicLinker(self.memory)
 
         self.action_interface = ActionInterface()
         self.perception_interface = PerceptionInterface()
@@ -1037,12 +1037,12 @@ class CognitiveArchitecture:
             pass
 
         try:
-            self.concept_extractor.step()
+            self.concept_extractor.step(self.memory)
         except Exception:
             pass
 
         try:
-            self.episodic_linker.step()
+            self.episodic_linker.step(self.memory)
         except Exception:
             pass
 
