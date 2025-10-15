@@ -2,6 +2,7 @@ import time
 from typing import Any, Dict, Optional
 
 from AGI_Evolutive.autonomy import AutonomyManager
+from AGI_Evolutive.beliefs.graph import BeliefGraph, Evidence
 from AGI_Evolutive.cognition.evolution_manager import EvolutionManager
 from AGI_Evolutive.cognition.reward_engine import RewardEngine
 from AGI_Evolutive.core.telemetry import Telemetry
@@ -19,9 +20,12 @@ from AGI_Evolutive.learning import ExperientialLearning
 from AGI_Evolutive.memory import MemorySystem
 from AGI_Evolutive.memory.concept_extractor import ConceptExtractor
 from AGI_Evolutive.memory.episodic_linker import EpisodicLinker
+from AGI_Evolutive.metacog.calibration import CalibrationMeter
 from AGI_Evolutive.metacognition import MetacognitiveSystem
+from AGI_Evolutive.models.user import UserModel
 from AGI_Evolutive.perception import PerceptionSystem
 from AGI_Evolutive.reasoning import ReasoningSystem
+from AGI_Evolutive.reasoning.abduction import AbductiveReasoner, Hypothesis
 from AGI_Evolutive.runtime.logger import JSONLLogger
 from AGI_Evolutive.runtime.response import ensure_contract, format_agent_reply
 from AGI_Evolutive.runtime.scheduler import Scheduler
@@ -91,6 +95,10 @@ class CognitiveArchitecture:
 
         # Advanced subsystems
         self.style_profiler = StyleProfiler(persist_path="data/style_profiles.json")
+        self.beliefs = BeliefGraph()
+        self.user_model = UserModel()
+        self.calibration = CalibrationMeter()
+        self.abduction = AbductiveReasoner(self.beliefs, self.user_model)
         self.reward_engine = RewardEngine(
             architecture=self,
             memory=self.memory,
@@ -221,6 +229,8 @@ class CognitiveArchitecture:
             self._tick_background_systems()
             return self.last_output_text
 
+        self._maybe_update_calibration(user_msg)
+
         self.telemetry.log("input", "language", {"text": user_msg})
 
         try:
@@ -243,6 +253,16 @@ class CognitiveArchitecture:
             )
         except Exception:
             pass
+
+        def _looks_like_abduction(s: str) -> bool:
+            s = (s or "").lower()
+            return any(
+                k in s
+                for k in ["devine", "pourquoi", "hypothèse", "à ton avis", "raison", "résous l'énigme"]
+            )
+
+        if _looks_like_abduction(user_msg):
+            return self._handle_abduction_request(user_msg)
 
         surface = user_msg
         hints = {}
@@ -340,8 +360,108 @@ class CognitiveArchitecture:
             reason_summary=reason_out.get("summary", ""),
         )
 
+        try:
+            mem = self.memory.get_recent_memories(60)
+            self.user_model.ingest_memories(mem)
+        except Exception:
+            pass
+
         self._tick_background_systems()
         return response
+
+    def _handle_abduction_request(self, user_msg: str) -> str:
+        try:
+            hyps = self.abduction.generate(user_msg)
+        except Exception:
+            hyps = []
+        if not hyps:
+            return "Je manque d'indices pour formuler une hypothèse utile."
+
+        top = hyps[0]
+        try:
+            if hasattr(self.memory, "add_memory"):
+                self.memory.add_memory(
+                    kind="hypothesis",
+                    content=top.label,
+                    metadata={
+                        "score": top.score,
+                        "explanation": top.explanation,
+                        "priors": top.priors,
+                    },
+                )
+        except Exception:
+            pass
+
+        ev_id = None
+        try:
+            ev_id = self.calibration.log_prediction(
+                domain="abduction", p=float(top.score), meta={"label": top.label}
+            )
+            if hasattr(self.memory, "add_memory"):
+                self.memory.add_memory(
+                    kind="calibration_observation",
+                    content="abduction_pred",
+                    metadata={"event_id": ev_id, "label": top.label, "p": float(top.score)},
+                )
+        except Exception:
+            ev_id = None
+
+        if top.ask_next:
+            handled = False
+            try:
+                qm = getattr(self, "question_manager", None)
+                if qm and hasattr(qm, "add_question"):
+                    qm.add_question(top.ask_next)
+                    handled = True
+            except Exception:
+                handled = False
+            if not handled:
+                try:
+                    if hasattr(self.memory, "add_memory"):
+                        self.memory.add_memory(
+                            kind="question_active",
+                            content=top.ask_next,
+                            metadata={"source": "abduction"},
+                        )
+                except Exception:
+                    pass
+            return f"{top.ask_next}"
+
+        conf = int(round(top.score * 100))
+        return (
+            f"Mon hypothèse la plus probable : **{top.label}** ({conf}% confiance). "
+            "Je peux réviser si tu me donnes un indice contraire."
+        )
+
+    def _maybe_update_calibration(self, user_msg: Optional[str]) -> None:
+        t = (user_msg or "").strip().lower()
+        if t not in {"oui", "non", "exact", "c'est correct"}:
+            return
+        try:
+            recents = []
+            if hasattr(self.memory, "get_recent_memories"):
+                recents = self.memory.get_recent_memories(50)
+            ev_id = None
+            for item in reversed(recents):
+                if item.get("kind") == "calibration_observation":
+                    ev_id = (item.get("metadata") or {}).get("event_id")
+                    if ev_id:
+                        break
+            if ev_id:
+                success = t in {"oui", "exact", "c'est correct"}
+                self.calibration.log_outcome(ev_id, success=success)
+                delta = self.calibration.suggested_hedging_delta(domain="abduction")
+                if hasattr(self.style_policy, "params"):
+                    hedging = self.style_policy.params.get("hedging", 0.3)
+                    self.style_policy.params["hedging"] = max(0.0, min(1.0, hedging + delta))
+                if hasattr(self.memory, "add_memory"):
+                    self.memory.add_memory(
+                        kind="calibration_feedback",
+                        content=t,
+                        metadata={"event_id": ev_id, "delta_hedging": delta},
+                    )
+        except Exception:
+            pass
 
     def _tick_background_systems(self) -> None:
         try:

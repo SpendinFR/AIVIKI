@@ -7,7 +7,7 @@ selon l'incertitude, les lacunes mémorielles et la curiosité.
 - Politique simple: si incertitude > seuil ou info manquante -> poser 1-2 questions ciblées.
 """
 import time
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 class QuestionManager:
     def __init__(self, arch):
@@ -16,7 +16,17 @@ class QuestionManager:
         self.max_queue = 10
         self.last_generated = 0.0
         self.cooldown = 10.0  # secondes minimum entre générations
-    
+
+    def add_question(self, text: str, qtype: str = "custom", metadata: Optional[Dict[str, Any]] = None) -> None:
+        if not text:
+            return
+        question = {"type": qtype, "text": text}
+        if metadata:
+            question["meta"] = metadata
+        if len(self.pending_questions) >= self.max_queue:
+            self.pending_questions.pop(0)
+        self.pending_questions.append(question)
+
     def _metacognitive_uncertainty(self) -> float:
         meta = getattr(self.arch, "metacognition", None)
         try:

@@ -89,7 +89,8 @@ class Autopilot:
             mem = getattr(self.arch, 'memory', None)
             seen = set(q.get('text','') for q in qs)
             if mem and hasattr(mem, 'get_recent_memories'):
-                for item in mem.get_recent_memories(50):
+                recents = mem.get_recent_memories(50)
+                for item in recents:
                     if item.get('kind') == 'validation_request':
                         text = item.get('content') or item.get('text') or 'Valider un apprentissage'
                         if text not in seen:
@@ -97,6 +98,16 @@ class Autopilot:
                             seen.add(text)
                         if len(qs) >= 5:
                             break
+                if len(qs) < 5:
+                    for item in recents:
+                        if item.get('kind') == 'question_active':
+                            text = item.get('content') or item.get('text') or ''
+                            if not text or text in seen:
+                                continue
+                            qs.append({"type": "active", "text": text})
+                            seen.add(text)
+                            if len(qs) >= 5:
+                                break
         except Exception:
             pass
         return qs
