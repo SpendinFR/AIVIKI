@@ -48,6 +48,7 @@ from AGI_Evolutive.core.cognitive_architecture import CognitiveArchitecture
 from AGI_Evolutive.orchestrator import Orchestrator
 from AGI_Evolutive.language.voice import VoiceProfile
 from AGI_Evolutive.language.lexicon import LiveLexicon
+from AGI_Evolutive.language.style_observer import StyleObserver
 from AGI_Evolutive.conversation.context import ContextBuilder
 from AGI_Evolutive.language.renderer import LanguageRenderer
 
@@ -93,12 +94,21 @@ def run_cli():
                 arch.lexicon,
             ),
         )
+        # Harmonise les instances utilisées par le renderer et l'observateur de style
+        if getattr(arch.style_observer, "voice", None) is not None:
+            arch.voice_profile = arch.style_observer.voice
+        if getattr(arch.style_observer, "lex", None) is not None:
+            arch.lexicon = arch.style_observer.lex
         arch.context_builder = getattr(arch, "context_builder", ContextBuilder(arch))
         arch.renderer = getattr(
             arch,
             "renderer",
             LanguageRenderer(arch.voice_profile, arch.lexicon),
         )
+        if getattr(arch.renderer, "voice", None) is not arch.voice_profile:
+            arch.renderer.voice = arch.voice_profile
+        if getattr(arch.renderer, "lex", None) is not arch.lexicon:
+            arch.renderer.lex = arch.lexicon
         # --- fin bootstrap ---
 
         orc = Orchestrator(arch)
@@ -273,21 +283,28 @@ def run_cli():
             traceback.print_exc()
             continue
 
+        reply = None
         try:
-            ctx = arch.context_builder.build(msg)
-        except Exception:
-            ctx = {"last_message": msg}
+            try:
+                ctx = arch.context_builder.build(msg)
+            except Exception:
+                ctx = {"last_message": msg}
 
-        sem = {"text": assistant_text_brut}
-        reply = arch.renderer.render_reply(sem, ctx)
-        print(reply)
+            sem = {"text": assistant_text_brut}
+            reply = arch.renderer.render_reply(sem, ctx)
+            print(reply)
+        except Exception as e:
+            print("⚠️ Erreur lors du rendu :", e)
+            traceback.print_exc()
+            continue
 
-        try:
-            auto.arch.memory.add_memory({"kind": "interaction", "role": "assistant", "text": reply})
-            arch.lexicon.add_from_text(reply, liked=False)
-            arch.lexicon.save()
-        except Exception:
-            pass
+        if reply is not None:
+            try:
+                auto.arch.memory.add_memory({"kind": "interaction", "role": "assistant", "text": reply})
+                arch.lexicon.add_from_text(reply, liked=False)
+                arch.lexicon.save()
+            except Exception:
+                pass
 
         # ==== QUESTIONS PROACTIVES ====
         questions = auto.pending_questions()
