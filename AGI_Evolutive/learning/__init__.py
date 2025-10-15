@@ -288,7 +288,43 @@ class ExperientialLearning:
             confidence = 0.5*coverage['definition'] + 0.3*coverage['examples'] + 0.2*coverage['counterexample']
             if (def_hits + ex_hits + contra_hits) >= 4:
                 confidence = min(1.0, confidence + 0.05)
-            return {'confidence': float(confidence), 'coverage': coverage, 'evidence': evidence[:10]}
+            result = {'confidence': float(confidence), 'coverage': coverage, 'evidence': evidence[:10]}
+            try:
+                arch = getattr(self, 'cognitive_architecture', None)
+                calibration = getattr(arch, 'calibration', None) if arch else None
+                if calibration:
+                    event_id = calibration.log_prediction(
+                        domain='concepts',
+                        p=float(confidence),
+                        meta={
+                            'concept': concept,
+                            'coverage': dict(coverage),
+                            'evidence_count': len(evidence),
+                        }
+                    )
+                    success = bool(
+                        coverage.get('definition', 0.0) >= 1.0
+                        and coverage.get('examples', 0.0) >= 0.5
+                        and coverage.get('counterexample', 0.0) >= 1.0
+                        and confidence >= 0.6
+                    )
+                    calibration.log_outcome(event_id, success=success)
+                    mem = getattr(arch, 'memory', None)
+                    if mem and hasattr(mem, 'add_memory'):
+                        mem.add_memory(
+                            kind='calibration_observation',
+                            content='concept_self_assess',
+                            metadata={
+                                'event_id': event_id,
+                                'domain': 'concepts',
+                                'concept': concept,
+                                'p': float(confidence),
+                                'auto_success': bool(success),
+                            }
+                        )
+            except Exception:
+                pass
+            return result
         except Exception:
             return {'confidence': 0.0, 'coverage': coverage, 'evidence': evidence}
 

@@ -1,5 +1,5 @@
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 from AGI_Evolutive.autonomy import AutonomyManager
 from AGI_Evolutive.beliefs.graph import BeliefGraph, Evidence
@@ -20,7 +20,7 @@ from AGI_Evolutive.learning import ExperientialLearning
 from AGI_Evolutive.memory import MemorySystem
 from AGI_Evolutive.memory.concept_extractor import ConceptExtractor
 from AGI_Evolutive.memory.episodic_linker import EpisodicLinker
-from AGI_Evolutive.metacog.calibration import CalibrationMeter
+from AGI_Evolutive.metacog.calibration import CalibrationMeter, NoveltyDetector
 from AGI_Evolutive.metacognition import MetacognitiveSystem
 from AGI_Evolutive.models.user import UserModel
 from AGI_Evolutive.perception import PerceptionSystem
@@ -101,6 +101,7 @@ class CognitiveArchitecture:
         self.beliefs = BeliefGraph()
         self.user_model = UserModel()
         self.calibration = CalibrationMeter()
+        self.novelty_detector = NoveltyDetector()
         self.abduction = AbductiveReasoner(self.beliefs, self.user_model)
         self.reward_engine = RewardEngine(
             architecture=self,
@@ -358,6 +359,29 @@ class CognitiveArchitecture:
         except Exception:
             pass
 
+        novelty_score = 0.0
+        novelty_flag = False
+        try:
+            novelty_score, novelty_flag = self.novelty_detector.assess(surface, update=True)
+            if novelty_flag and hasattr(self.memory, "add_memory"):
+                self.memory.add_memory(
+                    kind="novelty_alert",
+                    content=surface[:160],
+                    metadata={"score": float(novelty_score), "user_id": self.last_user_id},
+                )
+            try:
+                self.logger.write(
+                    "novelty.assessment",
+                    score=float(novelty_score),
+                    flagged=bool(novelty_flag),
+                    text=surface[:120],
+                )
+            except Exception:
+                pass
+        except Exception:
+            novelty_score = 0.0
+            novelty_flag = False
+
         # Capture d'une confirmation utilisateur pour valider un apprentissage récent
         try:
             low = (user_msg or "").lower()
@@ -391,20 +415,99 @@ class CognitiveArchitecture:
                     "prochain_test": "valider l'option la plus utile",
                 }
 
+        ask_prompts: List[str] = []
+        abstain = False
+        calibration_domain = None
+        raw_confidence = float(reason_out.get("final_confidence", 0.5))
+        adjusted_confidence = max(0.0, min(1.0, raw_confidence))
+
+        if not abduction_result:
+            calibration_domain = "planning" if reason_out.get("tests") or reason_out.get("prochain_test") else "decision"
+            if novelty_flag:
+                adjusted_confidence *= max(0.4, 1.0 - 0.35 * novelty_score)
+            adjusted_confidence = max(0.0, min(1.0, adjusted_confidence))
+            reason_out["final_confidence"] = adjusted_confidence
+            try:
+                abstain = self.calibration.should_abstain(calibration_domain, adjusted_confidence)
+            except Exception:
+                abstain = False
+            if novelty_flag and adjusted_confidence < 0.75:
+                abstain = True
+            event_id = None
+            try:
+                meta = {
+                    "domain": calibration_domain,
+                    "novelty": float(novelty_score),
+                    "abstain": bool(abstain),
+                    "raw_confidence": float(raw_confidence),
+                }
+                event_id = self.calibration.log_prediction(
+                    domain=calibration_domain,
+                    p=adjusted_confidence,
+                    meta=meta,
+                )
+                if hasattr(self.memory, "add_memory"):
+                    self.memory.add_memory(
+                        kind="calibration_observation",
+                        content=f"{calibration_domain or 'decision'}_pred",
+                        metadata={
+                            "event_id": event_id,
+                            "domain": calibration_domain,
+                            "p": float(adjusted_confidence),
+                        },
+                    )
+            except Exception:
+                event_id = None
+            if abstain:
+                reason_out.setdefault("appris", []).append(
+                    "Appliquer un refus calibré quand la confiance est insuffisante."
+                )
+                ask_prompts.append(
+                    "Confiance trop faible → peux-tu préciser ton objectif ou les contraintes clés ?"
+                )
+                reason_out["summary"] = (
+                    reason_out.get("summary", "")
+                    + " | ⚠️ abstention calibrée (demander précisions)."
+                )
+        if novelty_flag:
+            if abduction_result:
+                adjusted_confidence = max(
+                    0.0,
+                    min(1.0, adjusted_confidence * max(0.4, 1.0 - 0.35 * novelty_score)),
+                )
+                reason_out["final_confidence"] = adjusted_confidence
+            reason_out.setdefault("appris", []).append(
+                "Détecter les cas atypiques et demander un éclairage supplémentaire."
+            )
+            if "Cas inhabituel détecté → partage un exemple ou le contexte exact." not in ask_prompts:
+                ask_prompts.append(
+                    "Cas inhabituel détecté → partage un exemple ou le contexte exact."
+                )
+
         apprentissages = [
             "associer récompense sociale ↔ style",
             "tenir un journal d'épisodes de raisonnement",
         ] + list(reason_out.get("appris", []))
 
+        next_test = reason_out.get("prochain_test") or "-"
+        if abstain:
+            next_test = "clarifier avec toi les contraintes et objectifs avant d'avancer"
+
+        base_besoins = ["confirmer si tu veux patch immédiat ou plan en étapes"]
+        besoins: List[str] = []
+        for item in base_besoins + ask_prompts:
+            if not item:
+                continue
+            if item not in besoins:
+                besoins.append(item)
+
         contract = ensure_contract(
             {
                 "hypothese_choisie": reason_out.get("chosen_hypothesis", "clarifier intention"),
-                "incertitude": float(
-                    max(0.0, min(1.0, 1.0 - float(reason_out.get("final_confidence", 0.5))))
-                ),
-                "prochain_test": reason_out.get("prochain_test") or "-",
+                "incertitude": float(max(0.0, min(1.0, 1.0 - adjusted_confidence))),
+                "prochain_test": next_test,
                 "appris": apprentissages,
-                "besoin": ["confirmer si tu veux patch immédiat ou plan en étapes"],
+                "besoin": besoins,
             }
         )
 
@@ -512,7 +615,12 @@ class CognitiveArchitecture:
                 self.memory.add_memory(
                     kind="calibration_observation",
                     content="abduction_pred",
-                    metadata={"event_id": ev_id, "label": top.label, "p": float(top.score)},
+                    metadata={
+                        "event_id": ev_id,
+                        "label": top.label,
+                        "p": float(top.score),
+                        "domain": "abduction",
+                    },
                 )
         except Exception:
             ev_id = None
@@ -555,15 +663,18 @@ class CognitiveArchitecture:
             if hasattr(self.memory, "get_recent_memories"):
                 recents = self.memory.get_recent_memories(50)
             ev_id = None
+            event_meta: Dict[str, Any] = {}
             for item in reversed(recents):
                 if item.get("kind") == "calibration_observation":
-                    ev_id = (item.get("metadata") or {}).get("event_id")
+                    event_meta = item.get("metadata") or {}
+                    ev_id = event_meta.get("event_id")
                     if ev_id:
                         break
             if ev_id:
                 success = t in {"oui", "exact", "c'est correct"}
+                domain = event_meta.get("domain", "abduction")
                 self.calibration.log_outcome(ev_id, success=success)
-                delta = self.calibration.suggested_hedging_delta(domain="abduction")
+                delta = self.calibration.suggested_hedging_delta(domain=domain)
                 if hasattr(self.style_policy, "params"):
                     hedging = self.style_policy.params.get("hedging", 0.3)
                     self.style_policy.params["hedging"] = max(0.0, min(1.0, hedging + delta))
@@ -571,7 +682,7 @@ class CognitiveArchitecture:
                     self.memory.add_memory(
                         kind="calibration_feedback",
                         content=t,
-                        metadata={"event_id": ev_id, "delta_hedging": delta},
+                        metadata={"event_id": ev_id, "delta_hedging": delta, "domain": domain},
                     )
         except Exception:
             pass

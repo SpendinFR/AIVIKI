@@ -1,6 +1,7 @@
 from __future__ import annotations
-from typing import Dict, Any, Optional, List
-import os, json, time, uuid
+from typing import Dict, Any, Optional, List, Tuple
+import os, json, time, uuid, math, re
+from collections import deque
 from statistics import mean
 
 class CalibrationMeter:
@@ -56,3 +57,82 @@ class CalibrationMeter:
         if r["ece"] > 0.15:  return +0.08
         if r["ece"] < 0.05:  return -0.04
         return 0.0
+
+    # --- Extensions multi-domaines ---
+    def domain_reports(self) -> Dict[str, Dict[str, Any]]:
+        domains = sorted({row.get("domain", "global") for row in self._iter() if "success" in row})
+        return {d: self.report(d if d != "global" else None) for d in domains}
+
+    def dynamic_threshold(self, domain: Optional[str] = None, base: float = 0.45) -> float:
+        info = self.report(domain)
+        count = info.get("count", 0) or 0
+        ece = info.get("ece")
+        threshold = base
+        if ece is not None:
+            threshold += max(-0.15, min(0.20, ece * 0.6))
+        if count > 80:
+            threshold -= 0.05
+        elif count < 15:
+            threshold += 0.05
+        return max(0.1, min(0.85, threshold))
+
+    def should_abstain(self, domain: Optional[str], confidence: float, margin: float = 0.05) -> bool:
+        threshold = self.dynamic_threshold(domain)
+        return float(confidence) + margin < threshold
+
+
+class NoveltyDetector:
+    """Very light-weight detector for out-of-distribution user inputs."""
+
+    def __init__(self, window: int = 128, threshold: float = 0.45) -> None:
+        self.window = deque(maxlen=max(8, window))
+        self.threshold = max(0.05, min(0.95, threshold))
+
+    # Feature extraction intentionally simple (token stats + punctuation balance)
+    def _features(self, text: str) -> Tuple[float, ...]:
+        text = text or ""
+        tokens = re.findall(r"\w+", text.lower())
+        token_count = len(tokens)
+        unique_ratio = len(set(tokens)) / max(1, token_count)
+        char_count = len(text)
+        digit_ratio = sum(c.isdigit() for c in text) / max(1, char_count)
+        upper_ratio = sum(c.isupper() for c in text) / max(1, char_count)
+        punctuation_ratio = sum(c in "?!;:" for c in text) / max(1, char_count)
+        long_token_ratio = sum(len(t) >= 10 for t in tokens) / max(1, token_count)
+        question_tokens = sum(1 for t in tokens if t in {"pourquoi", "comment", "qui", "quoi", "où", "how", "why"})
+        question_density = question_tokens / max(1, token_count)
+        length_norm = min(1.0, token_count / 160.0)
+        return (
+            length_norm,
+            unique_ratio,
+            digit_ratio,
+            upper_ratio,
+            punctuation_ratio,
+            long_token_ratio,
+            question_density,
+        )
+
+    def _avg_vector(self) -> Optional[Tuple[float, ...]]:
+        if not self.window:
+            return None
+        dims = len(self.window[0])
+        sums = [0.0] * dims
+        for vec in self.window:
+            for i, value in enumerate(vec):
+                sums[i] += value
+        return tuple(s / len(self.window) for s in sums)
+
+    def novelty_score(self, text: str) -> float:
+        vec = self._features(text)
+        avg = self._avg_vector()
+        if avg is None:
+            return 0.0
+        dist = math.sqrt(sum((vec[i] - avg[i]) ** 2 for i in range(len(vec))))
+        return max(0.0, min(1.0, dist * 2.2))
+
+    def assess(self, text: str, update: bool = True) -> Tuple[float, bool]:
+        score = self.novelty_score(text)
+        flagged = score >= self.threshold
+        if update:
+            self.window.append(self._features(text))
+        return score, flagged
