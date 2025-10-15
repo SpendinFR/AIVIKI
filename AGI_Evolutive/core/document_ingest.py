@@ -9,6 +9,8 @@ DocumentIngest: intègre les documents de ./inbox dans la mémoire.
 import os, json, time, glob, hashlib
 from typing import Dict, Any
 
+from AGI_Evolutive.language.style_observer import StyleObserver
+
 def _hash(s: str) -> str:
     import hashlib
     return hashlib.sha1(s.encode("utf-8", errors="ignore")).hexdigest()
@@ -19,6 +21,25 @@ class DocumentIngest:
         self.inbox_dir = os.path.abspath(inbox_dir)
         os.makedirs(self.inbox_dir, exist_ok=True)
         self._index = {}  # filename -> last_hash
+        self.style_observer = None
+
+        if arch is not None:
+            try:
+                if not hasattr(arch, "style_observer"):
+                    from AGI_Evolutive.language.voice import VoiceProfile
+                    from AGI_Evolutive.language.lexicon import LiveLexicon
+
+                    arch.voice_profile = getattr(arch, "voice_profile", VoiceProfile(arch.self_model))
+                    arch.lexicon = getattr(arch, "lexicon", LiveLexicon())
+                    arch.style_observer = StyleObserver(
+                        arch.self_model,
+                        getattr(arch, "homeostasis", None),
+                        arch.voice_profile,
+                        arch.lexicon,
+                    )
+                self.style_observer = arch.style_observer
+            except Exception:
+                self.style_observer = None
     
     def scan(self) -> Dict[str, Any]:
         docs = {}
@@ -74,5 +95,10 @@ class DocumentIngest:
             except Exception:
                 pass
             self._index[name] = h
+            if self.style_observer is not None:
+                try:
+                    self.style_observer.observe_text(content, source=f"inbox:{name}", channel="inbox")
+                except Exception:
+                    pass
             added += 1
         return added

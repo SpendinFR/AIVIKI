@@ -46,6 +46,7 @@ class PerceptionInterface:
         self.path_log = path_log
         self.index_path = index_path
         self.memory = memory_store
+        self.arch = None
 
         self.bound: Dict[str, Any] = {
             "arch": None,
@@ -73,6 +74,8 @@ class PerceptionInterface:
 
         if memory is not None:
             self.memory = memory
+        if arch is not None:
+            self.arch = arch
         self.bound.update(
             {
                 "arch": arch,
@@ -213,6 +216,13 @@ class PerceptionInterface:
                     arousal_hint=0.15,
                     meta={"speaker": speaker},
                 )
+            except Exception:
+                pass
+
+        arch = self.arch or self.bound.get("arch")
+        if arch and hasattr(arch, "style_observer"):
+            try:
+                arch.style_observer.observe_text(text, source="chat:user", channel="user")
             except Exception:
                 pass
 
