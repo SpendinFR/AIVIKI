@@ -5,7 +5,7 @@ import re
 import sys
 import time
 import traceback
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 # --- Questions CLI helpers ---
 def _get_qm(auto) -> Any:
@@ -18,11 +18,16 @@ def _get_qm(auto) -> Any:
     )
 
 
-def _print_pending(qm, k: int = 3) -> List[Dict[str, Any]]:
+def _print_pending(
+    qm, k: int = 3, preset: Optional[List[Dict[str, Any]]] = None
+) -> List[Dict[str, Any]]:
     """Affiche les k dernières questions, renvoie la même liste (ordre d'affichage)."""
-    if not qm:
+    if preset is not None:
+        pending = list(preset)
+    elif not qm:
         return []
-    pending = list(getattr(qm, "pending_questions", []))
+    else:
+        pending = list(getattr(qm, "pending_questions", []))
     if not pending:
         return []
     # on prend les k dernières (les plus récentes) et on garde l'ordre d’affichage
@@ -83,13 +88,15 @@ def run_cli():
     print("🗨️  Démarrez la conversation ou tapez /help.")
 
     _last_view: List[Dict[str, Any]] = []
+    _pending_cache: List[Dict[str, Any]] = []
 
     while True:
         try:
             # Affiche jusqu'à 3 questions en attente à chaque itération
             try:
                 qm = _get_qm(auto)
-                _last_view = _print_pending(qm, k=3)  # garde en mémoire locale si tu veux
+                preset = _pending_cache if _pending_cache else None
+                _last_view = _print_pending(qm, k=3, preset=preset)  # garde en mémoire locale
             except Exception:
                 _last_view = []
 
@@ -167,6 +174,19 @@ def run_cli():
                 except Exception:
                     pass
 
+            try:
+                if _pending_cache:
+                    _pending_cache = [
+                        item
+                        for item in _pending_cache
+                        if not (
+                            (item.get("id") or item.get("qid") or item.get("uuid")) == qid
+                            or item is q
+                        )
+                    ]
+            except Exception:
+                pass
+
             print(f"✅  Réponse enregistrée pour [{idx+1}] : {answer_text}")
             # laisse la boucle continuer (l’abduction/planification la prendra au prochain tick)
             continue
@@ -217,6 +237,8 @@ def run_cli():
 
         # ==== QUESTIONS PROACTIVES ====
         questions = auto.pending_questions()
+        if questions:
+            _pending_cache = list(questions)
         for q in questions:
             print("❓", q["text"])
 
