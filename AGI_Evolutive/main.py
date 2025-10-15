@@ -1,9 +1,42 @@
 # 🚀 main.py - Point d'entrée AGI Évolutive
 import glob
 import os
+import re
 import sys
 import time
 import traceback
+from typing import Any, Dict, List
+
+# --- Questions CLI helpers ---
+def _get_qm(auto) -> Any:
+    # Essaie plusieurs emplacements possibles
+    return (
+        getattr(auto, "question_manager", None)
+        or getattr(auto, "questions", None)
+        or getattr(getattr(auto, "arch", None), "question_manager", None)
+        or getattr(getattr(auto, "arch", None), "questions", None)
+    )
+
+
+def _print_pending(qm, k: int = 3) -> List[Dict[str, Any]]:
+    """Affiche les k dernières questions, renvoie la même liste (ordre d'affichage)."""
+    if not qm:
+        return []
+    pending = list(getattr(qm, "pending_questions", []))
+    if not pending:
+        return []
+    # on prend les k dernières (les plus récentes) et on garde l'ordre d’affichage
+    view = pending[-k:]
+    print("\n— Questions en attente —")
+    for i, q in enumerate(view, 1):
+        qtype = q.get("type", "?")
+        score = q.get("score", 0.0)
+        text = q.get("text", "")
+        print(f"[{i}] ({qtype}, score={score:.2f}) {text}")
+    print("Réponds avec : a <num> <ta réponse>   ex:  a 2 oui, c’était volontaire\n")
+    return view
+
+
 
 from AGI_Evolutive.core.autopilot import Autopilot
 from AGI_Evolutive.core.cognitive_architecture import CognitiveArchitecture
@@ -49,8 +82,17 @@ def run_cli():
     print(HELP_TEXT)
     print("🗨️  Démarrez la conversation ou tapez /help.")
 
+    _last_view: List[Dict[str, Any]] = []
+
     while True:
         try:
+            # Affiche jusqu'à 3 questions en attente à chaque itération
+            try:
+                qm = _get_qm(auto)
+                _last_view = _print_pending(qm, k=3)  # garde en mémoire locale si tu veux
+            except Exception:
+                _last_view = []
+
             msg = input("\n> ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n⏳ Sauvegarde avant sortie…")
@@ -60,6 +102,75 @@ def run_cli():
                 print("⚠️ Erreur lors de la sauvegarde :", e)
             print("👋 Fin de session.")
             break
+
+        # --- Réponse à une question : "a <num> <réponse>" / "answer <num> ..."
+        m = re.match(r"^\s*(a|answer|reponds?|réponds?)\s+(\d+)\s+(.+)$", msg, flags=re.IGNORECASE)
+        if m:
+            idx = max(0, int(m.group(2)) - 1)
+            answer_text = m.group(3).strip()
+            qm = _get_qm(auto)
+            if not qm:
+                print("⚠️  Aucun gestionnaire de questions accessible.")
+                continue
+
+            # Récupère la vue actuelle (ou replie sur les pending)
+            view = _last_view if _last_view else list(getattr(qm, "pending_questions", []))[-3:]
+            if not view or idx >= len(view):
+                print("⚠️  Index hors limites. Tape 'q' pour lister.")
+                continue
+
+            q = view[idx]
+            qid = q.get("id") or q.get("qid") or q.get("uuid")
+
+            # 1) Ingestion de ta réponse comme utterance utilisateur (traçabilité)
+            try:
+                # Préfère ton interface de perception si dispo
+                per = getattr(getattr(auto, "arch", None), "perception", None)
+                meta = {"answer_to": qid, "question_text": q.get("text", ""), "ts": time.time()}
+                if per and hasattr(per, "ingest_user_utterance"):
+                    per.ingest_user_utterance(answer_text, author="user", meta=meta)
+                else:
+                    memory = getattr(getattr(auto, "arch", None), "memory", None)
+                    if memory and hasattr(memory, "add_memory"):
+                        memory.add_memory(
+                            {
+                                "kind": "user_answer",
+                                "q_id": qid,
+                                "q_text": q.get("text", ""),
+                                "text": answer_text,
+                                "ts": time.time(),
+                            }
+                        )
+            except Exception:
+                pass
+
+            # 2) Notifie le QuestionManager si une API existe
+            updated = False
+            for meth in ("record_answer", "resolve_question", "set_answer"):
+                if hasattr(qm, meth):
+                    try:
+                        getattr(qm, meth)(qid, answer_text)
+                        updated = True
+                        break
+                    except Exception:
+                        pass
+
+            # 3) Fallback : on retire manuellement la question de la file
+            if not updated:
+                try:
+                    pend = getattr(qm, "pending_questions", [])
+                    # enlève la 1re occurrence correspondante
+                    for i in range(len(pend) - 1, -1, -1):
+                        if (pend[i].get("id") or pend[i].get("qid")) == qid or pend[i] is q:
+                            pend.pop(i)
+                            break
+                except Exception:
+                    pass
+
+            print(f"✅  Réponse enregistrée pour [{idx+1}] : {answer_text}")
+            # laisse la boucle continuer (l’abduction/planification la prendra au prochain tick)
+            continue
+        # --- fin: réponse NL ---
 
         if not msg:
             continue
