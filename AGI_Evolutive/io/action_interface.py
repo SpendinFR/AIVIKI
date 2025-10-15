@@ -9,6 +9,8 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
+from AGI_Evolutive.beliefs.graph import Evidence
+
 
 def _now() -> float:
     return time.time()
@@ -214,6 +216,9 @@ class ActionInterface:
                 "reflect": self._h_reflect,
                 "learn_concept": self._h_learn_concept,
                 "search_memory": self._h_search_memory,
+                "update_belief": lambda act: self._h_update_belief(act.payload, act.context),
+                "abduce": lambda act: self._h_abduce(act.payload, act.context),
+                "set_user_pref": lambda act: self._h_set_user_pref(act.payload, act.context),
             }
             handler = handlers.get(act.type, self._h_simulate)
 
@@ -371,6 +376,85 @@ class ActionInterface:
         except Exception:
             pass
         return {"ok": True, "concept": concept, "integrated": False, "confidence": conf}
+
+    def _h_update_belief(self, payload: Dict[str, Any], context: Dict[str, Any]):
+        arch = self.bound.get("arch") if hasattr(self, "bound") else None
+        if not arch or not hasattr(arch, "beliefs"):
+            return {"ok": False, "error": "beliefs not available"}
+        payload = payload or {}
+        subject = payload.get("subject")
+        relation = payload.get("relation")
+        value = payload.get("value")
+        conf = float(payload.get("confidence", 0.5))
+        pol = int(payload.get("polarity", +1))
+        ev = Evidence.new(
+            kind=payload.get("kind", "reasoning"),
+            source=payload.get("source", "self"),
+            snippet=payload.get("snippet", ""),
+            weight=float(payload.get("weight", 0.5)),
+        )
+        b = arch.beliefs.upsert(
+            subject,
+            relation,
+            value,
+            confidence=conf,
+            polarity=pol,
+            evidence=ev,
+            created_by="action_interface",
+        )
+        try:
+            memory = self.bound.get("memory") if hasattr(self, "bound") else None
+            if memory and hasattr(memory, "add_memory"):
+                memory.add_memory(
+                    kind="belief_update",
+                    content=f"{subject} {relation} {value}",
+                    metadata={"conf": b.confidence, "pol": b.polarity},
+                )
+        except Exception:
+            pass
+        return {"ok": True, "belief": {"id": b.id, "conf": b.confidence}}
+
+    def _h_abduce(self, payload: Dict[str, Any], context: Dict[str, Any]):
+        arch = self.bound.get("arch") if hasattr(self, "bound") else None
+        if not arch or not hasattr(arch, "abduction"):
+            return {"ok": False, "error": "abduction not available"}
+        payload = payload or {}
+        context = context or {}
+        obs = payload.get("observation") or context.get("observation") or ""
+        hyps = arch.abduction.generate(obs)
+        if not hyps:
+            return {"ok": True, "hypotheses": []}
+        try:
+            memory = self.bound.get("memory") if hasattr(self, "bound") else None
+            if memory and hasattr(memory, "add_memory"):
+                memory.add_memory(
+                    kind="hypothesis",
+                    content=hyps[0].label,
+                    metadata={"score": hyps[0].score},
+                )
+        except Exception:
+            pass
+        return {"ok": True, "hypotheses": [h.__dict__ for h in hyps]}
+
+    def _h_set_user_pref(self, payload: Dict[str, Any], context: Dict[str, Any]):
+        arch = self.bound.get("arch") if hasattr(self, "bound") else None
+        if not arch or not hasattr(arch, "user_model"):
+            return {"ok": False, "error": "user_model not available"}
+        payload = payload or {}
+        label = payload.get("label")
+        liked = bool(payload.get("liked", True))
+        arch.user_model.observe_preference(str(label), liked)
+        try:
+            memory = self.bound.get("memory") if hasattr(self, "bound") else None
+            if memory and hasattr(memory, "add_memory"):
+                memory.add_memory(
+                    kind="user_pref",
+                    content=("like:" if liked else "dislike:") + str(label),
+                    metadata={"source": "action_interface"},
+                )
+        except Exception:
+            pass
+        return {"ok": True}
 
     def _h_search_memory(self, act: Action) -> Dict[str, Any]:
         memory = self.bound.get("memory")
