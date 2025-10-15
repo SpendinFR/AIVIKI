@@ -3,6 +3,8 @@ from __future__ import annotations
 import threading
 import time
 
+from typing import Any, Dict, List
+
 from AGI_Evolutive.goals.dag_store import GoalDAG
 from AGI_Evolutive.reasoning.structures import (
     Evidence,
@@ -27,6 +29,7 @@ class AutonomyCore:
         self.thread = None
         self.idle_interval = 20  # secondes sans input pour tick
         self._last_user_time = time.time()
+        self._tick = 0
 
     def notify_user_activity(self):
         self._last_user_time = time.time()
@@ -53,6 +56,7 @@ class AutonomyCore:
                 time.sleep(5)
 
     def tick(self):
+        self._tick += 1
         # 1) Choix d'objectif
         pick = self.dag.choose_next_goal()
         goal_id, evi, progress = pick["id"], pick["evi"], pick["progress"]
@@ -76,8 +80,59 @@ class AutonomyCore:
         rule = self._distill_micro_rule(goal_id)
         ev = Evidence(notes=f"Règle distillée: {rule}", confidence=0.6)
 
+        # 3bis) Décider d'une action via la policy (si dispo)
+        proposer = getattr(self.arch, "proposer", None)
+        policy = getattr(self.arch, "policy", None)
+        homeo = getattr(self.arch, "homeostasis", None) or getattr(self.arch, "homeo", None)
+        planner = getattr(self.arch, "planner", None)
+        memory = getattr(self.arch, "memory", None)
+        proposals: List[Dict[str, Any]] = []
+        if proposer and hasattr(proposer, "run_once_now"):
+            try:
+                raw_props = proposer.run_once_now() or []
+                if isinstance(raw_props, list):
+                    proposals = [p for p in raw_props if isinstance(p, dict)]
+            except Exception as exc:
+                self.logger.write("autonomy.warn", stage="proposer", error=str(exc))
+
+        belief = 0.6
+        try:
+            self_model = getattr(self.arch, "self_model", None)
+            if self_model and hasattr(self_model, "belief_confidence"):
+                belief = float(self_model.belief_confidence({}))
+        except Exception as exc:
+            self.logger.write("autonomy.warn", stage="belief_confidence", error=str(exc))
+
+        novelty_fam = 0.7
+        try:
+            recent: List[Dict[str, Any]] = []
+            if memory and hasattr(memory, "get_recent_memories"):
+                raw_recent = memory.get_recent_memories(n=100)
+                if isinstance(raw_recent, list):
+                    recent = [m for m in raw_recent if isinstance(m, dict)]
+            typs = [m.get("type", m.get("kind")) for m in recent]
+            same = sum(1 for t in typs if t == "update")
+            novelty_fam = max(0.2, min(0.95, 1.0 - (0.02 * max(0, 5 - same))))
+        except Exception as exc:
+            self.logger.write("autonomy.warn", stage="novelty_eval", error=str(exc))
+
+        decision: Dict[str, Any] = {"decision": "noop", "reason": "no policy", "confidence": 0.5}
+        if policy and hasattr(policy, "decide"):
+            try:
+                decision = policy.decide(
+                    proposals,
+                    self_state={"tick": self._tick},
+                    proposer=proposer,
+                    homeo=homeo,
+                    planner=planner,
+                    ctx={"belief_confidence": belief, "novelty_familiarity": novelty_fam},
+                )
+            except Exception as exc:
+                decision = {"decision": "error", "reason": str(exc), "confidence": 0.3}
+                self.logger.write("autonomy.warn", stage="policy_decide", error=str(exc))
+
         # 4) Mise à jour DAG + logs
-        self.dag.bump_progress(goal_id, 0.01)
+        progress_after = self.dag.bump_progress(0.01)
         ep = episode_record(
             user_msg="[idle]",
             hypotheses=h,
@@ -92,7 +147,9 @@ class AutonomyCore:
             goal=goal_id,
             evi=evi,
             progress_before=progress,
+            progress_after=progress_after,
             episode=ep,
+            policy_decision=decision,
         )
 
         # 5) Ping métacognition (si existante)
@@ -110,6 +167,15 @@ class AutonomyCore:
                 )
         except Exception:
             pass
+
+        # 6) Feedback à la policy
+        try:
+            executed = decision.get("proposal") if isinstance(decision, dict) else None
+            success = bool(decision.get("decision") == "apply") if isinstance(decision, dict) else False
+            if policy and hasattr(policy, "register_outcome") and executed:
+                policy.register_outcome(executed, success)
+        except Exception as exc:
+            self.logger.write("autonomy.warn", stage="policy_feedback", error=str(exc))
 
     def _distill_micro_rule(self, goal_id: str) -> str:
         """

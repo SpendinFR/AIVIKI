@@ -2,7 +2,7 @@ import copy
 import json
 import os
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from AGI_Evolutive.core.config import cfg
 from AGI_Evolutive.utils import now_iso, safe_write_json
@@ -99,3 +99,39 @@ class SelfModel:
         )
         self.save()
         return decision
+
+    def belief_confidence(self, ctx: Optional[Dict[str, Any]] = None) -> float:
+        """
+        Retourne une confiance [0..1] sur l’état interne (ex: cohérence drives/persona/mémoire).
+        Implémentation simple : 0.5 + 0.5 * (1 - min(1, nb_inconnues/10)).
+        Remplace par ta vraie métrique si tu en as une.
+        """
+        try:
+            ctx = ctx or {}
+            unknowns = 0
+            identity = self.state.get("identity", {})
+            persona = self.state.get("persona", {})
+            if not identity or not isinstance(identity, dict):
+                unknowns += 2
+            else:
+                if not identity.get("name"):
+                    unknowns += 1
+                if not identity.get("version"):
+                    unknowns += 1
+            if not persona or not isinstance(persona, dict):
+                unknowns += 2
+            else:
+                tone = persona.get("tone")
+                values = persona.get("values")
+                if not tone:
+                    unknowns += 1
+                if not values:
+                    unknowns += 1
+            history = self.state.get("history", [])
+            if isinstance(history, list) and len(history) > 300:
+                unknowns += min(3, len(history) // 300)
+            if ctx.get("recent_anomalies"):
+                unknowns += min(3, len(ctx["recent_anomalies"]))
+            return max(0.01, min(0.99, 0.8 - 0.03 * unknowns))
+        except Exception:
+            return 0.6
