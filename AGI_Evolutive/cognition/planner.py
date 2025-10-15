@@ -72,7 +72,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
-from core.config import cfg
+from AGI_Evolutive.core.config import cfg
 
 _PLANS = cfg()["PLANS_PATH"]
 

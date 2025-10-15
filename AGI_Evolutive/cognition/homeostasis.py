@@ -87,7 +87,7 @@ import os
 import time
 from typing import Any, Dict
 
-from core.config import cfg
+from AGI_Evolutive.core.config import cfg
 
 _PATH = cfg()["HOMEOSTASIS_PATH"]
 

@@ -3,7 +3,7 @@ import math
 import os
 from typing import Dict, List, Tuple
 
-from core.config import cfg
+from AGI_Evolutive.core.config import cfg
 
 _DIR = cfg()["VECTOR_DIR"]
 

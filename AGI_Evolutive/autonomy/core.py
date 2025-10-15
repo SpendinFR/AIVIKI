@@ -46,9 +46,14 @@ class AutonomyCore:
 import threading
 import time
 
-from goals.dag_store import GoalDAG
-from reasoning.structures import Evidence, Hypothesis, Test, episode_record
-from runtime.logger import JSONLLogger
+from AGI_Evolutive.goals.dag_store import GoalDAG
+from AGI_Evolutive.reasoning.structures import (
+    Evidence,
+    Hypothesis,
+    Test,
+    episode_record,
+)
+from AGI_Evolutive.runtime.logger import JSONLLogger
 
 
 class AutonomyCore:
