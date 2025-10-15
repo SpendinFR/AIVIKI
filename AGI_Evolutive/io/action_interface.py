@@ -219,6 +219,9 @@ class ActionInterface:
                 "update_belief": lambda act: self._h_update_belief(act.payload, act.context),
                 "abduce": lambda act: self._h_abduce(act.payload, act.context),
                 "set_user_pref": lambda act: self._h_set_user_pref(act.payload, act.context),
+                "self_improve": lambda act: self._h_self_improve(act.payload, act.context),
+                "promote": lambda act: self._h_promote(act.payload, act.context),
+                "rollback": lambda act: self._h_rollback(act.payload, act.context),
             }
             handler = handlers.get(act.type, self._h_simulate)
 
@@ -454,6 +457,34 @@ class ActionInterface:
                 )
         except Exception:
             pass
+        return {"ok": True}
+
+    def _h_self_improve(self, payload: Dict[str, Any], context: Dict[str, Any]):
+        arch = self.bound.get("arch")
+        if not arch or not hasattr(arch, "self_improver"):
+            return {"ok": False, "error": "self_improver not available"}
+        params = payload or {}
+        n = int(params.get("n", 4))
+        cid = arch.self_improver.run_cycle(n_candidates=n)
+        return {"ok": True, "candidate_id": cid}
+
+    def _h_promote(self, payload: Dict[str, Any], context: Dict[str, Any]):
+        arch = self.bound.get("arch")
+        if not arch or not hasattr(arch, "self_improver"):
+            return {"ok": False, "error": "self_improver not available"}
+        cid = (payload or {}).get("cid")
+        if not cid:
+            return {"ok": False, "error": "missing cid"}
+        arch.self_improver.promote(cid)
+        return {"ok": True}
+
+    def _h_rollback(self, payload: Dict[str, Any], context: Dict[str, Any]):
+        arch = self.bound.get("arch")
+        if not arch or not hasattr(arch, "self_improver"):
+            return {"ok": False, "error": "self_improver not available"}
+        params = payload or {}
+        steps = int(params.get("steps", 1))
+        arch.self_improver.rollback(steps=steps)
         return {"ok": True}
 
     def _h_search_memory(self, act: Action) -> Dict[str, Any]:
