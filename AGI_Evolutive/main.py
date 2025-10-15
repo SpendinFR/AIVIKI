@@ -46,6 +46,10 @@ def _print_pending(
 from AGI_Evolutive.core.autopilot import Autopilot
 from AGI_Evolutive.core.cognitive_architecture import CognitiveArchitecture
 from AGI_Evolutive.orchestrator import Orchestrator
+from AGI_Evolutive.language.voice import VoiceProfile
+from AGI_Evolutive.language.lexicon import LiveLexicon
+from AGI_Evolutive.conversation.context import ContextBuilder
+from AGI_Evolutive.language.renderer import LanguageRenderer
 
 BANNER = """
 ╔══════════════════════════════════════════════╗
@@ -82,6 +86,11 @@ def run_cli():
         print("❌ Erreur d'initialisation :", e)
         traceback.print_exc()
         sys.exit(1)
+
+    voice = VoiceProfile(auto.arch.self_model)
+    lexicon = LiveLexicon()
+    renderer = LanguageRenderer(voice, lexicon)
+    context_builder = ContextBuilder(auto.arch)
 
     print("✅ AGI initialisée. (Persistance & mémoire prêtes)")
     print(HELP_TEXT)
@@ -227,13 +236,39 @@ def run_cli():
             continue
 
         # ==== INTERACTION ====
+        t = msg.lower()
+        if any(kw in t for kw in ["++", "parfait", "top", "merci beaucoup", "exactement"]):
+            voice.update_from_feedback(msg, positive=True)
+        elif any(kw in t for kw in ["trop long", "bof", "pas clair", "trop familier", "trop froid"]):
+            voice.update_from_feedback(msg, positive=False)
+
+        if t.startswith("j'aime") and "inbox/" in t:
+            import re as _re
+            m = _re.search(r"(?:\"([^\"]+)\"|'([^']+)')", msg)
+            if m:
+                voice.update_from_liked_source(m.group(1) or m.group(2))
+
         try:
-            response = auto.step(user_msg=msg)
-            print("\n🤖", response)
+            ctx = context_builder.build(msg)
+        except Exception:
+            ctx = {"last_message": msg}
+
+        try:
+            assistant_text_brut = auto.step(user_msg=msg)
+            sem = {"text": assistant_text_brut}
+            reply = renderer.render_reply(sem, ctx)
+            print("\n🤖", reply)
         except Exception as e:
             print("⚠️ Erreur durant le cycle :", e)
             traceback.print_exc()
             continue
+
+        try:
+            auto.arch.memory.add_memory({"kind": "interaction", "role": "assistant", "text": reply})
+            lexicon.add_from_text(reply, liked=False)
+            lexicon.save()
+        except Exception:
+            pass
 
         # ==== QUESTIONS PROACTIVES ====
         questions = auto.pending_questions()
