@@ -140,9 +140,11 @@ class PerceptionInterface:
         if memory and hasattr(memory, "add_memory"):
             try:
                 memory.add_memory(
-                    kind="perception_inbox",
-                    content=content_text,
-                    metadata=meta,
+                    {
+                        "kind": "perception_inbox",
+                        "content": content_text,
+                        "metadata": meta,
+                    }
                 )
             except Exception:
                 pass
@@ -191,9 +193,11 @@ class PerceptionInterface:
         if memory and hasattr(memory, "add_memory"):
             try:
                 memory.add_memory(
-                    kind="dialogue_turn",
-                    content=text,
-                    metadata={"speaker": speaker, **(meta or {})},
+                    {
+                        "kind": "dialogue_turn",
+                        "content": text,
+                        "metadata": {"speaker": speaker, **(meta or {})},
+                    }
                 )
             except Exception:
                 pass
