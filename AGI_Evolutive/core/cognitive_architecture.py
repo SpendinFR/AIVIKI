@@ -100,7 +100,7 @@ class CognitiveArchitecture:
         self.world_model = PhysicsEngine(self, self.memory)
 
         self.telemetry.log("init", "core", {"stage": "language"})
-        self.language = SemanticUnderstanding(self, self.memory)
+        self.language = SemanticUnderstanding(self, self.memory, intent_model=self.intent_model)
 
         self.concept_extractor = ConceptExtractor(self.memory)
         self.episodic_linker = EpisodicLinker(self.memory)
