@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from .metrics import aggregate_metrics, bootstrap_superiority, dominates
 from .mutations import generate_overrides
@@ -21,17 +21,34 @@ class SelfImprover:
         question_manager: Optional[Any] = None,
         config_root: str = "config",
         eval_root: str = "data/eval",
+        apply_overrides: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> None:
         self.arch_factory = arch_factory
         self.memory = memory
         self.questions = question_manager
         self.prom = PromotionManager(config_root)
         self.sandbox = SandboxRunner(arch_factory, eval_root=eval_root)
+        self._apply_overrides = apply_overrides
+
+        # Ensure any previously promoted overrides affect the live architecture.
+        self._refresh_live_overrides()
 
     # ------------------------------------------------------------------
     # Internal helpers
     def _active_overrides(self) -> Dict[str, Any]:
         return self.prom.load_active()
+
+    def _refresh_live_overrides(self) -> None:
+        if not self._apply_overrides:
+            return
+        try:
+            overrides = self.prom.load_active()
+        except Exception:
+            return
+        try:
+            self._apply_overrides(overrides)
+        except Exception:
+            pass
 
     def _log_experiment(self, payload: Dict[str, Any]) -> None:
         os.makedirs("data/self_improve", exist_ok=True)
@@ -126,6 +143,7 @@ class SelfImprover:
 
     def promote(self, cid: str) -> None:
         self.prom.promote(cid)
+        self._refresh_live_overrides()
         try:
             if hasattr(self.memory, "add_memory"):
                 self.memory.add_memory(kind="promotion", content=f"Promu {cid}")
@@ -134,6 +152,7 @@ class SelfImprover:
 
     def rollback(self, steps: int = 1) -> None:
         self.prom.rollback(steps)
+        self._refresh_live_overrides()
         try:
             if hasattr(self.memory, "add_memory"):
                 self.memory.add_memory(kind="rollback", content=f"Rollback {steps}")

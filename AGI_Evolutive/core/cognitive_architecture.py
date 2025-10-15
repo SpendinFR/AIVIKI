@@ -166,6 +166,7 @@ class CognitiveArchitecture:
                 arch_factory=self._arch_factory,
                 memory=self.memory,
                 question_manager=getattr(self, "question_manager", None),
+                apply_overrides=lambda overrides: _apply_overrides(self, overrides),
             )
             self.promotions = self.self_improver.prom
         else:
