@@ -80,6 +80,27 @@ def run_cli():
     print("Chargement de l'architecture cognitive…")
     try:
         arch = CognitiveArchitecture()
+        # --- bootstrap voix & contexte ---
+        arch.voice_profile = getattr(arch, "voice_profile", VoiceProfile(arch.self_model))
+        arch.lexicon = getattr(arch, "lexicon", LiveLexicon())
+        arch.style_observer = getattr(
+            arch,
+            "style_observer",
+            StyleObserver(
+                arch.self_model,
+                getattr(arch, "homeostasis", None),
+                arch.voice_profile,
+                arch.lexicon,
+            ),
+        )
+        arch.context_builder = getattr(arch, "context_builder", ContextBuilder(arch))
+        arch.renderer = getattr(
+            arch,
+            "renderer",
+            LanguageRenderer(arch.voice_profile, arch.lexicon),
+        )
+        # --- fin bootstrap ---
+
         orc = Orchestrator(arch)
         auto = Autopilot(arch, orchestrator=orc)
     except Exception as e:
@@ -87,10 +108,7 @@ def run_cli():
         traceback.print_exc()
         sys.exit(1)
 
-    voice = VoiceProfile(auto.arch.self_model)
-    lexicon = LiveLexicon()
-    renderer = LanguageRenderer(voice, lexicon)
-    context_builder = ContextBuilder(auto.arch)
+    voice = arch.voice_profile
 
     print("✅ AGI initialisée. (Persistance & mémoire prêtes)")
     print(HELP_TEXT)
@@ -249,24 +267,25 @@ def run_cli():
                 voice.update_from_liked_source(m.group(1) or m.group(2))
 
         try:
-            ctx = context_builder.build(msg)
-        except Exception:
-            ctx = {"last_message": msg}
-
-        try:
             assistant_text_brut = auto.step(user_msg=msg)
-            sem = {"text": assistant_text_brut}
-            reply = renderer.render_reply(sem, ctx)
-            print("\n🤖", reply)
         except Exception as e:
             print("⚠️ Erreur durant le cycle :", e)
             traceback.print_exc()
             continue
 
         try:
+            ctx = arch.context_builder.build(msg)
+        except Exception:
+            ctx = {"last_message": msg}
+
+        sem = {"text": assistant_text_brut}
+        reply = arch.renderer.render_reply(sem, ctx)
+        print(reply)
+
+        try:
             auto.arch.memory.add_memory({"kind": "interaction", "role": "assistant", "text": reply})
-            lexicon.add_from_text(reply, liked=False)
-            lexicon.save()
+            arch.lexicon.add_from_text(reply, liked=False)
+            arch.lexicon.save()
         except Exception:
             pass
 
