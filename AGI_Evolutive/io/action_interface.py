@@ -320,9 +320,11 @@ class ActionInterface:
         try:
             if memory and hasattr(memory, "add_memory"):
                 memory.add_memory(
-                    kind="learning_intent",
-                    content=f"Apprendre le concept: {concept}",
-                    metadata={"reason": why, "source": "action_interface"},
+                    {
+                        "kind": "learning_intent",
+                        "content": f"Apprendre le concept : {concept}",
+                        "metadata": {"reason": why, "source": "action_interface"},
+                    }
                 )
         except Exception:
             pass
@@ -341,7 +343,13 @@ class ActionInterface:
             try:
                 arch._record_skill(concept)
                 if memory and hasattr(memory, "add_memory"):
-                    memory.add_memory(kind="learning_validated", content=concept, metadata={"source": "self_assess", "confidence": conf})
+                    memory.add_memory(
+                        {
+                            "kind": "learning_validated",
+                            "content": concept,
+                            "metadata": {"source": "self_assess", "confidence": conf},
+                        }
+                    )
                 return {"ok": True, "concept": concept, "integrated": True, "confidence": conf}
             except Exception:
                 pass
@@ -350,9 +358,15 @@ class ActionInterface:
         try:
             if memory and hasattr(memory, "add_memory"):
                 memory.add_memory(
-                    kind="validation_request",
-                    content=f"Valider mon apprentissage du concept: {concept}",
-                    metadata={"concept": concept, "need": "confirm_understanding", "confidence": conf},
+                    {
+                        "kind": "validation_request",
+                        "content": f"Valider mon apprentissage du concept: {concept}",
+                        "metadata": {
+                            "concept": concept,
+                            "need": "confirm_understanding",
+                            "confidence": conf,
+                        },
+                    }
                 )
         except Exception:
             pass
