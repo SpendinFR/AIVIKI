@@ -247,3 +247,17 @@ class GoalDAG:
                 json.dump(json_sanitize(self._state), fh, ensure_ascii=False, indent=2)
         except Exception:
             pass
+
+    def bump_progress(self, delta: float = 0.01) -> float:
+        cur = float(self._state.get("progress", 0.0))
+        cur = min(1.0, max(0.0, cur + float(delta)))
+        self._state["progress"] = cur
+        try:
+            self._save()  # si tu as déjà _save(); sinon ignore
+        except Exception:
+            try:
+                with open(self.path, "w", encoding="utf-8") as fh:
+                    json.dump(json_sanitize(self._state), fh, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+        return cur
