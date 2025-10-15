@@ -341,8 +341,9 @@ class CognitiveArchitecture:
                 for k in ["devine", "pourquoi", "hypothèse", "à ton avis", "raison", "résous l'énigme"]
             )
 
+        abduction_result: Optional[Dict[str, Any]] = None
         if _looks_like_abduction(user_msg):
-            return self._handle_abduction_request(user_msg)
+            abduction_result = self._handle_abduction_request(user_msg)
 
         surface = user_msg
         hints = {}
@@ -373,18 +374,21 @@ class CognitiveArchitecture:
             pass
 
         reason_out: Dict[str, Any] = {}
-        try:
-            reason_out = self.reasoning.reason_about(surface, context={"inbox_docs": inbox_docs})
-        except Exception as exc:
-            self.logger.write("reasoning.error", error=str(exc), user_msg=surface)
-            reason_out = {
-                "summary": "Raisonnement basique uniquement (fallback).",
-                "chosen_hypothesis": "clarifier intention + proposer 1 test",
-                "tests": ["proposer 2 options et valider"],
-                "final_confidence": 0.5,
-                "appris": ["garder une trace même en cas d'erreur"],
-                "prochain_test": "valider l'option la plus utile",
-            }
+        if abduction_result:
+            reason_out = dict(abduction_result.get("reason_out") or {})
+        else:
+            try:
+                reason_out = self.reasoning.reason_about(surface, context={"inbox_docs": inbox_docs})
+            except Exception as exc:
+                self.logger.write("reasoning.error", error=str(exc), user_msg=surface)
+                reason_out = {
+                    "summary": "Raisonnement basique uniquement (fallback).",
+                    "chosen_hypothesis": "clarifier intention + proposer 1 test",
+                    "tests": ["proposer 2 options et valider"],
+                    "final_confidence": 0.5,
+                    "appris": ["garder une trace même en cas d'erreur"],
+                    "prochain_test": "valider l'option la plus utile",
+                }
 
         apprentissages = [
             "associer récompense sociale ↔ style",
@@ -405,6 +409,9 @@ class CognitiveArchitecture:
 
         base_text = self._generate_base_text(surface, reason_out)
         response = format_agent_reply(base_text, **contract)
+
+        if abduction_result:
+            response = abduction_result.get("response", response)
 
         try:
             response = self.style_profiler.rewrite_to_match(response, self.last_user_id)
@@ -449,15 +456,38 @@ class CognitiveArchitecture:
         self._tick_background_systems()
         return response
 
-    def _handle_abduction_request(self, user_msg: str) -> str:
+    def _handle_abduction_request(self, user_msg: str) -> Dict[str, Any]:
+        reason_out: Dict[str, Any] = {
+            "summary": "Aucune hypothèse abductive trouvée.",
+            "chosen_hypothesis": "aucune",
+            "final_confidence": 0.0,
+            "prochain_test": None,
+            "appris": ["reconnaître une demande abductive"],
+        }
         try:
             hyps = self.abduction.generate(user_msg)
         except Exception:
             hyps = []
         if not hyps:
-            return "Je manque d'indices pour formuler une hypothèse utile."
+            return {
+                "response": "Je manque d'indices pour formuler une hypothèse utile.",
+                "reason_out": reason_out,
+            }
 
         top = hyps[0]
+        score = float(getattr(top, "score", 0.0))
+        reason_out.update(
+            {
+                "summary": top.explanation or "Hypothèse générée via abduction.",
+                "chosen_hypothesis": top.label,
+                "final_confidence": score,
+                "prochain_test": getattr(top, "ask_next", None),
+            }
+        )
+        appris = list(reason_out.get("appris") or [])
+        if getattr(top, "priors", None):
+            appris.append("mobiliser les priors abductifs")
+        reason_out["appris"] = appris
         try:
             if hasattr(self.memory, "add_memory"):
                 self.memory.add_memory(
@@ -505,13 +535,15 @@ class CognitiveArchitecture:
                         )
                 except Exception:
                     pass
-            return f"{top.ask_next}"
+            reason_out["summary"] = top.explanation or "Question de clarification abductive."
+            return {"response": f"{top.ask_next}", "reason_out": reason_out}
 
-        conf = int(round(top.score * 100))
-        return (
+        conf = int(round(score * 100))
+        response = (
             f"Mon hypothèse la plus probable : **{top.label}** ({conf}% confiance). "
             "Je peux réviser si tu me donnes un indice contraire."
         )
+        return {"response": response, "reason_out": reason_out}
 
     def _maybe_update_calibration(self, user_msg: Optional[str]) -> None:
         t = (user_msg or "").strip().lower()
