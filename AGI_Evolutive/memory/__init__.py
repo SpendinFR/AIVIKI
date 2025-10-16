@@ -188,7 +188,15 @@ class MemorySystem:
             user = str(record.get("user", ""))
             agent = str(record.get("agent", ""))
             extra = {k: v for k, v in record.items() if k not in ("user", "agent")}
-            self.retrieval.add_interaction(user=user, agent=agent, extra=extra)
+            interaction_id = self.retrieval.add_interaction(user=user, agent=agent, extra=extra)
+            semantic = getattr(self, "semantic", None)
+            if semantic and hasattr(semantic, "index_document"):
+                meta = {"type": "interaction", **extra}
+                semantic.index_document(
+                    f"interaction::{interaction_id}",
+                    record.get("text", ""),
+                    metadata=meta,
+                )
         except Exception:
             pass
 
@@ -197,7 +205,15 @@ class MemorySystem:
         if not getattr(self, "retrieval", None):
             return
         try:
-            self.retrieval.add_document(text=text, title=title, source=source)
+            doc_id = self.retrieval.add_document(text=text, title=title, source=source)
+            semantic = getattr(self, "semantic", None)
+            if semantic and hasattr(semantic, "index_document"):
+                meta = {"type": "document", "title": title, "source": source}
+                semantic.index_document(
+                    f"doc::{doc_id}",
+                    text,
+                    metadata={k: v for k, v in meta.items() if v},
+                )
         except Exception:
             pass
     

@@ -4,10 +4,12 @@ import json
 import os
 import time
 import uuid
-from typing import Any, Dict
+from typing import Any, Dict, Optional, TYPE_CHECKING
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
 
+if TYPE_CHECKING:
+    from .quality import QualityGateRunner
 
 class PromotionManager:
     """Manage candidate overrides and promotion history."""
@@ -56,8 +58,16 @@ class PromotionManager:
         with open(path, "r", encoding="utf-8") as handle:
             return json.load(handle)
 
-    def promote(self, cid: str) -> None:
+    def promote(self, cid: str, quality_runner: Optional["QualityGateRunner"] = None) -> Dict[str, Any]:
         data = self.read_candidate(cid)
+        quality_report: Optional[Dict[str, Any]] = None
+        if quality_runner is not None:
+            try:
+                quality_report = quality_runner.run(data.get("overrides", {}))
+            except Exception as exc:
+                raise RuntimeError(f"quality_gate_error: {exc}") from exc
+            if not quality_report.get("passed", False):
+                raise RuntimeError("quality_gates_failed")
         self.save_active(data.get("overrides", {}))
         record = {
             "t": time.time(),
@@ -66,9 +76,11 @@ class PromotionManager:
             "overrides": data.get("overrides"),
             "metrics": data.get("metrics"),
             "metadata": data.get("metadata"),
+            "quality": quality_report,
         }
         with open(self.hist_path, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(json_sanitize(record)) + "\n")
+        return record
 
     def rollback(self, steps: int = 1) -> None:
         if not os.path.exists(self.hist_path):

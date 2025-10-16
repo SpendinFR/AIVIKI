@@ -57,3 +57,26 @@ class MemoryStore:
     def flush(self):
         if self._dirty:
             self._save()
+
+    # ------------------------------------------------------------------
+    # Persistence helpers used by :class:`PersistenceManager`
+    def to_state(self) -> Dict[str, Any]:
+        return {
+            "path": self.path,
+            "max_items": self.max_items,
+            "memories": list(self.state.get("memories", [])),
+        }
+
+    def from_state(self, payload: Dict[str, Any]) -> None:
+        if not isinstance(payload, dict):
+            return
+        self.path = str(payload.get("path", self.path))
+        self.max_items = int(payload.get("max_items", self.max_items))
+        memories = payload.get("memories")
+        if isinstance(memories, list):
+            self.state["memories"] = list(memories)
+        self._dirty = 0
+        try:
+            self._save()
+        except Exception:
+            pass

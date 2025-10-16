@@ -3,6 +3,8 @@ from typing import Optional, Dict, Any
 import re, time, json, os
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.goals import GoalType
+from AGI_Evolutive.goals.curiosity import CuriosityEngine
 
 
 @dataclass
@@ -102,6 +104,9 @@ class RewardEngine:
         self.metacognition = metacognition
         self.persist_dir = persist_dir
         os.makedirs(os.path.join(self.persist_dir, "logs"), exist_ok=True)
+        self.curiosity_engine = CuriosityEngine(architecture=architecture)
+        self._last_intrinsic_goal = 0.0
+        self._last_reward_event = time.time()
 
     def ingest_user_message(
         self,
@@ -248,6 +253,11 @@ class RewardEngine:
         except Exception:
             pass
 
+        if ev.extrinsic_reward > 0.05:
+            self._last_reward_event = ev.timestamp
+
+        self._maybe_spawn_curiosity_goals(ev)
+
         try:
             if self.memory:
                 payload = {
@@ -311,3 +321,47 @@ class RewardEngine:
             return 0.0
         upper = sum(1 for c in letters if c.isupper())
         return upper / max(1, len(letters))
+
+    def _maybe_spawn_curiosity_goals(self, ev: RewardEvent) -> None:
+        goals = self.goals or getattr(self.arch, "goals", None)
+        if not goals or not hasattr(goals, "curiosity"):
+            return
+        now = time.time()
+        if ev.extrinsic_reward > 0.05:
+            self._last_reward_event = now
+            return
+        if (now - self._last_intrinsic_goal) < 180.0:
+            return
+        if (now - self._last_reward_event) < 90.0 and ev.extrinsic_reward >= 0.0:
+            return
+        parent = None
+        try:
+            if hasattr(goals, "store"):
+                parent = goals.store.get_active()
+        except Exception:
+            parent = None
+        parent_payload = parent.to_dict() if parent and hasattr(parent, "to_dict") else None
+        engine = getattr(goals, "curiosity", None) or self.curiosity_engine
+        try:
+            proposals = engine.suggest_subgoals(parent_payload, k=2)
+        except Exception:
+            proposals = []
+        added = False
+        for proposal in proposals:
+            try:
+                goals.add_goal(
+                    proposal.get("description", "Explorer un sujet intrigant."),
+                    goal_type=GoalType.EXPLORATION,
+                    criteria=proposal.get("criteria"),
+                    parent_ids=proposal.get("parent_ids"),
+                    value=float(proposal.get("value", 0.55)),
+                    competence=float(proposal.get("competence", 0.5)),
+                    curiosity=float(proposal.get("curiosity", 0.7)),
+                    urgency=float(proposal.get("urgency", 0.35)),
+                    created_by=proposal.get("created_by", "curiosity"),
+                )
+                added = True
+            except Exception:
+                continue
+        if added:
+            self._last_intrinsic_goal = now

@@ -10,8 +10,9 @@ class VoiceProfile:
     - lectures aimées (inbox marquées liked)
     - succès/échec de formulation (si tu loggues des retours)
     """
-    def __init__(self, self_model, path: str = "data/voice_profile.json"):
+    def __init__(self, self_model, user_model=None, path: str = "data/voice_profile.json"):
         self.self_model = self_model
+        self.user_model = user_model
         self.path = path
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         self.state: Dict[str, Any] = {
@@ -49,9 +50,13 @@ class VoiceProfile:
             pass
 
     def _init_from_persona(self):
-        p = (getattr(self.self_model, "state", {}) or {}).get("persona", {})
-        tone = (p.get("tone") or "").lower()
-        vals = [v.lower() for v in p.get("values", [])]
+        persona = self._persona_profile()
+        tone = (persona.get("tone") or "").lower()
+        raw_vals = persona.get("values", [])
+        if isinstance(raw_vals, dict):
+            vals = [key.lower() for key, level in raw_vals.items() if level]
+        else:
+            vals = [v.lower() for v in raw_vals]
         # mapping simple (peut être enrichi)
         if "inquisitive" in tone or "analytical" in tone:
             self.state["style"]["analytical"] = min(1.0, self.state["style"]["analytical"] + 0.2)
@@ -109,3 +114,22 @@ class VoiceProfile:
             d[knob] = max(0.0, min(1.0, d[knob] + float(delta)))
             self.state["last_update"] = time.time()
             self.save()
+
+    def _persona_profile(self) -> Dict[str, Any]:
+        persona: Dict[str, Any] = {}
+        try:
+            base_state = getattr(self.self_model, "state", {}) if self.self_model is not None else {}
+            persona = dict((base_state or {}).get("persona", {}) or {})
+        except Exception:
+            persona = {}
+        if self.user_model is not None and hasattr(self.user_model, "describe"):
+            try:
+                user_state = self.user_model.describe() or {}
+                user_persona = user_state.get("persona") or {}
+                if user_persona:
+                    merged = dict(persona)
+                    merged.update(user_persona)
+                    persona = merged
+            except Exception:
+                pass
+        return persona

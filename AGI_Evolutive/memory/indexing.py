@@ -18,12 +18,15 @@ class InMemoryIndex:
         self.encoder = encoder or TinyEncoder()
         self._docs: List[Dict[str, Any]] = []  # {"id": int, "text": str, "meta": {"source": str}, "vec": List[float]}
         self._next_id: int = 1
+        self._by_id: Dict[int, Dict[str, Any]] = {}
 
     def add_document(self, text: str, meta: Optional[Dict[str, Any]] = None) -> int:
         vec = self.encoder.encode(text or "")
         doc_id = self._next_id
         self._next_id += 1
-        self._docs.append({"id": doc_id, "text": text or "", "meta": meta or {}, "vec": vec})
+        record = {"id": doc_id, "text": text or "", "meta": meta or {}, "vec": vec}
+        self._docs.append(record)
+        self._by_id[doc_id] = record
         return doc_id
 
     def _search_vec(self, qvec: List[float], top_k: int = 5) -> List[Tuple[int, float]]:
@@ -39,9 +42,8 @@ class InMemoryIndex:
         hits = self._search_vec(qvec, top_k=top_k)
         # Résolution en docs
         out = []
-        by_id = {d["id"]: d for d in self._docs}
         for did, score in hits:
-            d = by_id.get(did)
+            d = self._by_id.get(did)
             if not d:
                 continue
             out.append({
@@ -67,16 +69,22 @@ class InMemoryIndex:
                 payload = json.load(f)
             self._next_id = int(payload.get("next_id", 1))
             self._docs = []
+            self._by_id = {}
             for d in payload.get("docs", []):
                 # sécurité minimale
                 if not isinstance(d, dict):
                     continue
-                self._docs.append({
+                record = {
                     "id": int(d.get("id", 0)),
                     "text": str(d.get("text", "")),
                     "meta": dict(d.get("meta", {})),
                     "vec": list(d.get("vec", [])),
-                })
+                }
+                self._docs.append(record)
+                self._by_id[record["id"]] = record
         except FileNotFoundError:
             # premier run: normal
             pass
+
+    def get_document(self, doc_id: int) -> Optional[Dict[str, Any]]:
+        return self._by_id.get(int(doc_id))

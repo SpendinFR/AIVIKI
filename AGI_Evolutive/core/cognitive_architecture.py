@@ -15,7 +15,7 @@ from AGI_Evolutive.goals import GoalSystem
 from AGI_Evolutive.goals.dag_store import GoalDAG
 from AGI_Evolutive.io.action_interface import ActionInterface
 from AGI_Evolutive.io.perception_interface import PerceptionInterface
-from AGI_Evolutive.language import SemanticUnderstanding
+from AGI_Evolutive.language.understanding import SemanticUnderstanding
 from AGI_Evolutive.language.style_policy import StylePolicy
 from AGI_Evolutive.language.social_reward import extract_social_reward
 from AGI_Evolutive.language.style_profiler import StyleProfiler
@@ -23,6 +23,7 @@ from AGI_Evolutive.learning import ExperientialLearning
 from AGI_Evolutive.memory import MemorySystem
 from AGI_Evolutive.memory.concept_extractor import ConceptExtractor
 from AGI_Evolutive.memory.episodic_linker import EpisodicLinker
+from AGI_Evolutive.memory.vector_store import VectorStore
 from AGI_Evolutive.metacog.calibration import CalibrationMeter, NoveltyDetector
 from AGI_Evolutive.metacognition import MetacognitiveSystem
 from AGI_Evolutive.models import IntentModel, UserModel
@@ -39,6 +40,7 @@ from AGI_Evolutive.self_improver import SelfImprover
 from AGI_Evolutive.self_improver.code_evolver import CodeEvolver
 from AGI_Evolutive.self_improver.promote import PromotionManager
 from AGI_Evolutive.planning.htn import HTNPlanner
+from AGI_Evolutive.core.persistence import PersistenceManager
 
 
 class CognitiveArchitecture:
@@ -64,12 +66,19 @@ class CognitiveArchitecture:
 
         # Core subsystems
         self.telemetry.log("init", "core", {"stage": "memory"})
+        self.vector_store = VectorStore()
         self.memory = MemorySystem(self)
         from AGI_Evolutive.memory.semantic_manager import (  # type: ignore  # local import avoids circular init
             SemanticMemoryManager,
         )
 
-        self.memory.semantic = SemanticMemoryManager(self.memory, architecture=self)
+        self.memory.semantic = SemanticMemoryManager(
+            self.memory,
+            architecture=self,
+            index_backend=self.vector_store,
+        )
+        if getattr(self.memory, "retrieval", None) is not None:
+            setattr(self.memory.retrieval, "vector_store", self.vector_store)
 
         self.telemetry.log("init", "core", {"stage": "perception"})
         self.perception = PerceptionSystem(self, self.memory)
@@ -203,6 +212,14 @@ class CognitiveArchitecture:
             self.promotions = None
             self.code_evolver = None
 
+        # Persistence layer shared with Autopilot/logger
+        existing_persistence = getattr(self, "persistence", None)
+        if isinstance(existing_persistence, PersistenceManager):
+            self.persistence = existing_persistence
+        else:
+            self.persistence = PersistenceManager(self)
+        self.logger.persistence = self.persistence
+
         # Bind helper components
         self._bind_interfaces()
         self._bind_extractors()
@@ -304,6 +321,18 @@ class CognitiveArchitecture:
             "status": self.get_cognitive_status(),
             "tail": self.telemetry.tail(tail),
         }
+
+    def summarize_beliefs(self, timeframe: str = "daily") -> Dict[str, Any]:
+        beliefs = getattr(self, "beliefs", None)
+        if not beliefs:
+            return {}
+        try:
+            summary = beliefs.latest_summary()
+            if timeframe:
+                return summary.get(timeframe, {})
+            return summary
+        except Exception:
+            return {}
 
     # ------------------------------------------------------------------
     # Cycle

@@ -8,11 +8,12 @@ import time
 class StyleObserver:
     """Observe les textes lus et ajuste la voix / le lexique en douceur."""
 
-    def __init__(self, self_model, homeostasis, voice_profile, lexicon) -> None:
+    def __init__(self, self_model, homeostasis, voice_profile, lexicon, user_model=None) -> None:
         self.self_model = self_model
         self.homeo = homeostasis
         self.voice = voice_profile
         self.lex = lexicon
+        self.user_model = user_model
         self.last_updates: List[float] = []  # timestamps pour rate limit
 
     # --------- API publique ----------
@@ -25,7 +26,7 @@ class StyleObserver:
         items = self._extract_candidates(text)
 
         # 2) scorer l'appétence (0..1)
-        persona = (getattr(self.self_model, "state", {}) or {}).get("persona", {})
+        persona = self._persona_profile()
         drives = (getattr(self.homeo, "state", {}) or {}).get("drives", {})
         scored: List[tuple[float, Dict[str, Any]]] = []
         for it in items:
@@ -82,7 +83,11 @@ class StyleObserver:
         channel: str,
     ) -> float:
         tone = (persona.get("tone") or "").lower()
-        vals = [v.lower() for v in persona.get("values", [])]
+        raw_vals = persona.get("values", [])
+        if isinstance(raw_vals, dict):
+            vals = [key.lower() for key, level in raw_vals.items() if level]
+        else:
+            vals = [v.lower() for v in raw_vals]
 
         # features simples
         txt = item["text"].lower()
@@ -144,3 +149,23 @@ class StyleObserver:
                 state.setdefault("style_learned", []).append({"text": txt, "ts": time.time(), "source": "style_observer"})
         except Exception:
             pass
+
+    def _persona_profile(self) -> Dict[str, Any]:
+        persona: Dict[str, Any] = {}
+        try:
+            if self.self_model is not None:
+                base_state = getattr(self.self_model, "state", {}) or {}
+                persona = dict(base_state.get("persona", {}) or {})
+        except Exception:
+            persona = {}
+        if self.user_model is not None and hasattr(self.user_model, "describe"):
+            try:
+                user_state = self.user_model.describe() or {}
+                user_persona = user_state.get("persona") or {}
+                if user_persona:
+                    merged = dict(persona)
+                    merged.update(user_persona)
+                    persona = merged
+            except Exception:
+                pass
+        return persona
