@@ -8,6 +8,17 @@ import random, copy, json, os, time
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
 
+
+def rag_quality_signal(signals: dict) -> float:
+    if not signals:
+        return 0.0
+    top1 = float(signals.get("rag_top1", 0.0))
+    mean = float(signals.get("rag_mean", 0.0))
+    div  = float(signals.get("rag_diversity", 0.0))
+    n    = float(signals.get("rag_docs", 0.0))
+    return max(0.0, min(1.0, 0.45*top1 + 0.35*mean + 0.15*div + 0.05*min(n/5.0,1.0)))
+
+
 class PolicyEngine:
     """Stores lightweight policy directives and strategy hints."""
 
@@ -227,6 +238,106 @@ class PolicyEngine:
             return {"decision": "needs_human", "reason": "changement identité important"}
 
         return {"decision": "allow", "reason": "OK"}
+
+    def compute_frame_utility(
+        self,
+        frame: Any,
+        *,
+        weights: Optional[Dict[str, float]] = None,
+        components: Optional[Dict[str, float]] = None,
+    ) -> float:
+        """Compute aggregate utility for a conversational frame."""
+
+        def _clamp01(value: float) -> float:
+            return max(0.0, min(1.0, float(value)))
+
+        def _collect_from(obj: Any, keys: List[str]) -> Dict[str, float]:
+            collected: Dict[str, float] = {}
+            for key in keys:
+                source = None
+                if isinstance(obj, dict):
+                    source = obj.get(key)
+                else:
+                    source = getattr(obj, key, None)
+                if isinstance(source, dict):
+                    for name, val in source.items():
+                        try:
+                            collected[name] = float(val)
+                        except (TypeError, ValueError):
+                            continue
+            return collected
+
+        comp_sources = _collect_from(frame, ["utilities", "utility_components", "scores", "drives"])
+        if components:
+            for key, val in components.items():
+                try:
+                    comp_sources[key] = float(val)
+                except (TypeError, ValueError):
+                    continue
+
+        w_sources = _collect_from(frame, ["weights", "drive_weights", "priorities"])
+        if weights:
+            for key, val in weights.items():
+                try:
+                    w_sources[key] = float(val)
+                except (TypeError, ValueError):
+                    continue
+
+        U_survive = _clamp01(
+            comp_sources.get("survive", comp_sources.get("Survive", 0.5))
+        )
+        U_evolve = _clamp01(
+            comp_sources.get("evolve", comp_sources.get("Evolve", 0.5))
+        )
+        U_interact = _clamp01(
+            comp_sources.get("interact", comp_sources.get("Interact", 0.5))
+        )
+
+        w_survive = w_sources.get("survive", w_sources.get("Survive", 1.0))
+        w_evolve = w_sources.get("evolve", w_sources.get("Evolve", 1.0))
+        w_interact = w_sources.get("interact", w_sources.get("Interact", 1.0))
+
+        try:
+            w_survive = float(w_survive)
+        except (TypeError, ValueError):
+            w_survive = 1.0
+        try:
+            w_evolve = float(w_evolve)
+        except (TypeError, ValueError):
+            w_evolve = 1.0
+        try:
+            w_interact = float(w_interact)
+        except (TypeError, ValueError):
+            w_interact = 1.0
+
+        total_w = w_survive + w_evolve + w_interact
+        if total_w <= 0:
+            w_survive = w_evolve = w_interact = 1.0 / 3.0
+        else:
+            w_survive /= total_w
+            w_evolve /= total_w
+            w_interact /= total_w
+
+        rq = rag_quality_signal(getattr(frame, "signals", {}))
+        if isinstance(frame, dict):
+            rq = rag_quality_signal(frame.get("signals", {}))
+
+        # “Survivre” → éviter erreurs si support faible
+        U_survive *= (0.7 + 0.6*rq)
+
+        # “Évoluer” → exploiter lorsque support solide
+        U_evolve  *= (0.8 + 0.5*rq)
+
+        # “Interagir” → si support moyen/faible, favoriser clarification
+        if rq < 0.35:
+            U_interact *= 0.85
+        elif rq < 0.6:
+            U_interact *= 1.0
+        else:
+            U_interact *= 1.1
+
+        U = w_survive*U_survive + w_evolve*U_evolve + w_interact*U_interact
+        return max(0.0, min(1.0, U))
 
     def decide(self,
                proposals: List[Dict[str, Any]],
