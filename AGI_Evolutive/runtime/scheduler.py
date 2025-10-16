@@ -63,6 +63,10 @@ class Scheduler:
     Par défaut, enchaîne :
       homeostasis → consolidation → concept_extractor → episodic_linker →
       goals/planning → reflection → evolution_manager
+
+    À ne pas confondre avec :class:`AGI_Evolutive.scheduler.Scheduler`
+    (planificateur léger synchronisé à appeler dans une boucle).  Cette
+    version runtime persiste son état et tourne dans un thread dédié.
     """
 
     def __init__(self, arch, data_dir: str = "data"):

@@ -79,6 +79,12 @@ class SemanticUnderstanding:
      - tokenisation simple, NER par regex (dates, nombres, emails, urls, montants)
      - frame intent+slots : détecte objectifs fréquents (demander, informer, créer, planifier, envoyer)
      - calcul d'incertitude : hedges ("peut-être", "je crois"), tournures interrogatives
+
+    Cette implémentation monolithique permet d'importer ``AGI_Evolutive.language``
+    sans dépendances supplémentaires.  Le fichier
+    :mod:`AGI_Evolutive.language.understanding` propose, lui, une variante
+    plus modulaire centrée sur l'état de dialogue et les questions de
+    clarification.
     """
     RE_NUMBER = re.compile(r"\b\d+(?:[.,]\d+)?\b")
     RE_DATE = re.compile(r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b")

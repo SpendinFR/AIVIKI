@@ -17,7 +17,13 @@ class EntityRecord:
 
 
 class EntityLinker:
-    """Maintains a tiny alias table for entity resolution."""
+    """
+    Maintains the low-level alias table for the belief graph.
+
+    Ce composant ne dépend que des structures de croyances et sert de
+    fondation à la façade ``knowledge.EntityLinker`` qui ajoute une
+    intégration avec l'ontologie et la mémoire déclarative.
+    """
 
     def __init__(self) -> None:
         self._entities: Dict[str, EntityRecord] = {}

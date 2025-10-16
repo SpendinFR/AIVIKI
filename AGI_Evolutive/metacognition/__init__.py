@@ -55,7 +55,12 @@ class MetacognitiveEvent:
 
 @dataclass
 class SelfModel:
-    """Modèle de soi - représentation interne de ses propres capacités"""
+    """Modèle de soi dynamique pour la métacognition.
+
+    À ce niveau on stocke des évaluations internes (performances, styles,
+    limitations).  Le module ``core.self_model`` gère, lui, l'identité
+    persistante/persona sauvegardée sur disque.
+    """
     # Capacités cognitives auto-évaluées
     cognitive_abilities: Dict[str, float] = field(default_factory=lambda: {
         "memory_capacity": 0.5,

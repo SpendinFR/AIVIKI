@@ -4,7 +4,11 @@ from typing import Callable, Dict, Any
 class Scheduler:
     """
     Planificateur léger: tick-driven (appel périodique), sans threads obligatoires.
-    register_job(name, interval_sec, func); puis scheduler.tick() dans ta boucle.
+
+    Il est conçu pour les architectures minimalistes ou les tests unitaires
+    où l'on préfère piloter la boucle soi-même.  Les scénarios nécessitant
+    persistance et exécution en arrière-plan doivent utiliser
+    :mod:`AGI_Evolutive.runtime.scheduler`.
     """
     def __init__(self):
         self.jobs: Dict[str, Dict[str,Any]] = {}

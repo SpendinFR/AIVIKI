@@ -7,7 +7,14 @@ from typing import Any, Dict, List, Optional
 
 
 class CuriosityEngine:
-    """Generate candidate sub-goals based on simple heuristics."""
+    """Generate candidate sub-goals based on simple heuristics.
+
+    Cette version vit dans le module *goals* et s'occupe de traduire des
+    signaux de curiosité (lacunes détectées, contradictions, concepts
+    nouveaux) en objectifs concrets pour le :class:`DagStore`.  Elle est
+    complémentaire au moteur de curiosité du package ``learning`` qui ne
+    produit qu'une récompense intrinsèque numérique.
+    """
 
     def __init__(self, architecture=None):
         self.architecture = architecture

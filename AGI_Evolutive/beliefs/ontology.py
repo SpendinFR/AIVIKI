@@ -65,7 +65,12 @@ class EventType:
 
 
 class Ontology:
-    """Central registry for entity, relation and event types."""
+    """Central registry for entity, relation and event types.
+
+    C'est l'implémentation canonique côté ``beliefs`` ; le package
+    ``knowledge`` se contente d'en fournir une enveloppe qui clone les
+    types par défaut pour un usage read-only.
+    """
 
     def __init__(self) -> None:
         self.entity_types: Dict[str, EntityType] = {}
