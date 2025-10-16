@@ -207,6 +207,59 @@ class PerceptionInterface:
             except Exception:
                 pass
 
+        try:
+            from AGI_Evolutive.social.social_critic import SocialCritic
+            from AGI_Evolutive.social.interaction_rule import ContextBuilder
+
+            arch = self.arch or self.bound.get("arch")
+            if arch and getattr(arch, "memory", None):
+                critic = getattr(arch, "social_critic", None)
+                if critic is None:
+                    critic = SocialCritic(arch)
+                    setattr(arch, "social_critic", critic)
+
+                trace = None
+                memory_obj = arch.memory
+                finder = getattr(memory_obj, "find_recent", None)
+                if callable(finder):
+                    trace = finder(kind="decision_trace", since_sec=240)
+                else:
+                    recent: List[Dict[str, Any]] = []
+                    getter = getattr(memory_obj, "get_recent_memories", None)
+                    if callable(getter):
+                        try:
+                            recent = getter(200)
+                        except TypeError:
+                            recent = getter(n=200)
+                    now_ts = time.time()
+                    for item in reversed(recent):
+                        if not isinstance(item, dict):
+                            continue
+                        if item.get("kind") != "decision_trace":
+                            continue
+                        ts = item.get("ts") or item.get("t") or item.get("timestamp")
+                        if ts is None or now_ts - float(ts) <= 240:
+                            trace = item
+                            break
+
+                if trace and trace.get("rule_id"):
+                    post_ctx = ContextBuilder.build(arch, extra={
+                        "pending_questions_count": len(
+                            getattr(getattr(arch, "question_manager", None), "pending_questions", [])
+                            or []
+                        )
+                    })
+                    pre_ctx = trace.get("ctx_snapshot") or {}
+                    outcome = critic.compute_outcome(
+                        user_msg=text,
+                        decision_trace=trace,
+                        pre_ctx=pre_ctx,
+                        post_ctx=post_ctx,
+                    )
+                    critic.update_rule_with_outcome(trace["rule_id"], outcome)
+        except Exception:
+            pass
+
         emotions = self.bound.get("emotions")
         if emotions and hasattr(emotions, "register_emotion_event"):
             try:

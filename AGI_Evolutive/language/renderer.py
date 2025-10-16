@@ -146,4 +146,49 @@ class LanguageRenderer:
                 self._cooldown["colloc"] = 2.0
                 self._last_used["colloc"] = colloc_txt
 
+        try:
+            rule_obj = semantics.get("rule") if isinstance(semantics, dict) else None
+            if not rule_obj and isinstance(semantics, dict):
+                rule_obj = semantics.get("interaction_rule")
+            rule_id = None
+            rule_dict = None
+            if rule_obj is not None:
+                if hasattr(rule_obj, "to_dict"):
+                    rule_dict = rule_obj.to_dict()
+                    rule_id = rule_dict.get("id")
+                elif isinstance(rule_obj, dict):
+                    rule_dict = rule_obj
+                    rule_id = rule_dict.get("id")
+            if rule_id:
+                from AGI_Evolutive.social.interaction_rule import ContextBuilder
+
+                arch = getattr(getattr(self.voice, "self_model", None), "arch", None)
+                if arch and getattr(arch, "memory", None):
+                    pre_ctx = ContextBuilder.build(arch, extra={
+                        "pending_questions_count": len(
+                            getattr(getattr(arch, "question_manager", None), "pending_questions", [])
+                            or []
+                        )
+                    })
+                    arch.memory.add_memory({
+                        "kind": "decision_trace",
+                        "rule_id": rule_id,
+                        "tactic": (rule_dict or {}).get("tactic"),
+                        "ctx_snapshot": pre_ctx,
+                        "ts": time.time(),
+                    })
+                    if hasattr(rule_obj, "register_use"):
+                        try:
+                            rule_obj.register_use()
+                            payload = rule_obj.to_dict() if hasattr(rule_obj, "to_dict") else rule_dict
+                            if payload:
+                                if hasattr(arch.memory, "update_memory"):
+                                    arch.memory.update_memory(payload)
+                                else:
+                                    arch.memory.add_memory(payload)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
         return out
