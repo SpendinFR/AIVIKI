@@ -1,5 +1,13 @@
-import json
-import math
+try:
+    import json
+except ImportError as exc:  # pragma: no cover - standard library is expected
+    raise RuntimeError("The json module is required for VectorStore operations") from exc
+
+try:
+    from math import sqrt
+except ImportError as exc:  # pragma: no cover - standard library is expected
+    raise RuntimeError("math.sqrt is required for VectorStore operations") from exc
+
 import os
 from typing import Dict, List, Tuple
 
@@ -20,8 +28,8 @@ def _tokenize(text: str) -> Dict[str, int]:
 def _cosine(a: Dict[str, int], b: Dict[str, int]) -> float:
     inter = set(a.keys()) & set(b.keys())
     dot = sum(a[key] * b[key] for key in inter)
-    norm_a = math.sqrt(sum(v * v for v in a.values()))
-    norm_b = math.sqrt(sum(v * v for v in b.values()))
+    norm_a = sqrt(sum(v * v for v in a.values()))
+    norm_b = sqrt(sum(v * v for v in b.values()))
     if norm_a == 0 or norm_b == 0:
         return 0.0
     return dot / (norm_a * norm_b)
