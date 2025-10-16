@@ -438,6 +438,21 @@ class MemorySystem:
                 recent_entry["text"] = text_payload
 
             self._recent_memories.append(recent_entry)
+
+            # Feed RAG 5★ automatiquement (si présent)
+            try:
+                arch = getattr(self, "cognitive_architecture", None)
+                if arch is not None and getattr(arch, "rag", None) is not None:
+                    txt = recent_entry.get("text")
+                    if txt:
+                        arch.rag.add_document(
+                            recent_entry.get("id", f"mem#{int(recent_entry.get('ts',0))}"),
+                            txt,
+                            meta={"ts": recent_entry.get("ts"), "source_trust": 0.6}
+                        )
+            except Exception:
+                # ne bloque jamais la mémoire
+                pass
         except Exception:
             # La collecte récente ne doit jamais interrompre l'encodage principal.
             pass
