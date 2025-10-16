@@ -257,6 +257,14 @@ class PerceptionInterface:
                         post_ctx=post_ctx,
                     )
                     critic.update_rule_with_outcome(trace["rule_id"], outcome)
+                    try:
+                        from AGI_Evolutive.social.tactic_selector import TacticSelector
+
+                        arch.tactic_selector = getattr(arch, "tactic_selector", TacticSelector(arch))
+                        reward01 = float(outcome.get("reward", 0.5))
+                        arch.tactic_selector.bandit_update(trace["rule_id"], post_ctx, reward01)
+                    except Exception:
+                        pass
         except Exception:
             pass
 

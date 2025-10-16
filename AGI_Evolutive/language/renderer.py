@@ -5,6 +5,9 @@ import random
 import re
 import time
 
+from AGI_Evolutive.social.tactic_selector import TacticSelector
+from AGI_Evolutive.social.interaction_rule import ContextBuilder
+
 
 def _tokens(s: str) -> set:
     return set(re.findall(r"[A-Za-zÀ-ÿ]{3,}", (s or "").lower()))
@@ -130,6 +133,51 @@ class LanguageRenderer:
         )
 
         # Toujours max 1 ornement, priorité au passé s’il est pertinent
+        arch = getattr(getattr(self.voice, "self_model", None), "arch", None)
+        if arch and getattr(arch, "memory", None):
+            try:
+                arch.tactic_selector = getattr(arch, "tactic_selector", TacticSelector(arch))
+                selector_ctx = ContextBuilder.build(
+                    arch,
+                    extra={
+                        "pending_questions_count": len(
+                            getattr(getattr(arch, "question_manager", None), "pending_questions", [])
+                            or []
+                        )
+                    },
+                )
+                rule, why = arch.tactic_selector.pick(selector_ctx)
+            except Exception:
+                rule, why = (None, None)
+            if rule:
+                rule["last_used_ts"] = time.time()
+                rule["usage_count"] = int(rule.get("usage_count", 0)) + 1
+                if hasattr(arch.memory, "update_memory"):
+                    arch.memory.update_memory(rule)
+                else:
+                    arch.memory.add_memory(rule)
+
+                arch.memory.add_memory(
+                    {
+                        "kind": "decision_trace",
+                        "rule_id": rule["id"],
+                        "tactic": (rule.get("tactic") or {}).get("name"),
+                        "ctx_snapshot": selector_ctx,
+                        "why": why,
+                        "ts": time.time(),
+                    }
+                )
+
+                tac = (rule.get("tactic") or {}).get("name", "")
+                if tac == "banter_leger" and "?" not in base:
+                    base = base + " (clin d’œil)"
+                elif tac == "ack_grateful":
+                    base = base + " Merci, je le note."
+                elif tac == "reformulation_empathique":
+                    pass
+                elif tac == "clarify_definition":
+                    pass
+
         out = self._decorate_with_voice(base)
         if use_past:
             snippet = f"\n\n↪ En lien : {past_txt}"
@@ -145,50 +193,5 @@ class LanguageRenderer:
                 out += snippet
                 self._cooldown["colloc"] = 2.0
                 self._last_used["colloc"] = colloc_txt
-
-        try:
-            rule_obj = semantics.get("rule") if isinstance(semantics, dict) else None
-            if not rule_obj and isinstance(semantics, dict):
-                rule_obj = semantics.get("interaction_rule")
-            rule_id = None
-            rule_dict = None
-            if rule_obj is not None:
-                if hasattr(rule_obj, "to_dict"):
-                    rule_dict = rule_obj.to_dict()
-                    rule_id = rule_dict.get("id")
-                elif isinstance(rule_obj, dict):
-                    rule_dict = rule_obj
-                    rule_id = rule_dict.get("id")
-            if rule_id:
-                from AGI_Evolutive.social.interaction_rule import ContextBuilder
-
-                arch = getattr(getattr(self.voice, "self_model", None), "arch", None)
-                if arch and getattr(arch, "memory", None):
-                    pre_ctx = ContextBuilder.build(arch, extra={
-                        "pending_questions_count": len(
-                            getattr(getattr(arch, "question_manager", None), "pending_questions", [])
-                            or []
-                        )
-                    })
-                    arch.memory.add_memory({
-                        "kind": "decision_trace",
-                        "rule_id": rule_id,
-                        "tactic": (rule_dict or {}).get("tactic"),
-                        "ctx_snapshot": pre_ctx,
-                        "ts": time.time(),
-                    })
-                    if hasattr(rule_obj, "register_use"):
-                        try:
-                            rule_obj.register_use()
-                            payload = rule_obj.to_dict() if hasattr(rule_obj, "to_dict") else rule_dict
-                            if payload:
-                                if hasattr(arch.memory, "update_memory"):
-                                    arch.memory.update_memory(payload)
-                                else:
-                                    arch.memory.add_memory(payload)
-                        except Exception:
-                            pass
-        except Exception:
-            pass
 
         return out
