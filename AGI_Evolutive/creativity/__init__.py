@@ -298,47 +298,53 @@ class CreativitySystem:
 
     # -------------------- Background threads --------------------
 
+    def _creative_monitoring_loop(self) -> None:
+        while self.running:
+            try:
+                crea_normalize(self)
+                self._monitor_creative_state()
+                self._update_conceptual_space()
+                self._evaluate_ongoing_ideas()
+            except Exception:
+                pass
+            time.sleep(2)
+
+    def _incubation_loop(self) -> None:
+        while self.running:
+            try:
+                crea_normalize(self)
+                self._process_incubation_phase()
+            except Exception:
+                pass
+            time.sleep(10)
+
+    def _insight_detection_loop(self) -> None:
+        while self.running:
+            try:
+                crea_normalize(self)
+                self._monitor_insight_conditions()
+            except Exception:
+                pass
+            time.sleep(5)
+
     def _start_creative_monitoring(self) -> None:
         import threading
-        def loop():
-            while self.running:
-                try:
-                    crea_normalize(self)
-                    self._monitor_creative_state()
-                    self._update_conceptual_space()
-                    self._evaluate_ongoing_ideas()
-                except Exception:
-                    pass
-                time.sleep(2)
-        t = threading.Thread(target=loop, daemon=True)
+
+        t = threading.Thread(target=self._creative_monitoring_loop, daemon=True)
         t.start()
         self.processing_threads["creative_monitoring"] = t
 
     def _start_incubation_process(self) -> None:
         import threading
-        def loop():
-            while self.running:
-                try:
-                    crea_normalize(self)
-                    self._process_incubation_phase()
-                except Exception:
-                    pass
-                time.sleep(10)
-        t = threading.Thread(target=loop, daemon=True)
+
+        t = threading.Thread(target=self._incubation_loop, daemon=True)
         t.start()
         self.processing_threads["incubation_process"] = t
 
     def _start_insight_detection(self) -> None:
         import threading
-        def loop():
-            while self.running:
-                try:
-                    crea_normalize(self)
-                    self._monitor_insight_conditions()
-                except Exception:
-                    pass
-                time.sleep(5)
-        t = threading.Thread(target=loop, daemon=True)
+
+        t = threading.Thread(target=self._insight_detection_loop, daemon=True)
         t.start()
         self.processing_threads["insight_detection"] = t
 

@@ -167,10 +167,10 @@ class SemanticUnderstanding:
         return utt
 
     def respond(self, user_text: str, context: Optional[Dict[str, Any]] = None) -> str:
-        """Parse l'énoncé utilisateur et orchestre un raisonnement léger pour répondre."""
+        """Produit une réponse textuelle tout en fournissant un résumé de l'analyse."""
         context = context or {}
-        utterance = self.parse_utterance(user_text, context)
-        frame = getattr(utterance, "frame", None)
+        parsed = self.parse_utterance(user_text, context)
+        frame = getattr(parsed, "frame", None)
 
         arch = getattr(self, "arch", None) or getattr(self, "cognitive_arch", None)
         reasoner = getattr(arch, "reasoning", None) if arch else None
@@ -180,14 +180,50 @@ class SemanticUnderstanding:
         reasoned = None
         if reasoner and hasattr(reasoner, "reason"):
             try:
-                q = (
-                    getattr(utterance, "surface_form", None)
+                question = (
+                    getattr(parsed, "surface_form", None)
                     or getattr(frame, "normalized_text", None)
                     or user_text
                 )
-                reasoned = reasoner.reason(q, context={"frame_intent": getattr(frame, "intent", "")})
+                reasoned = reasoner.reason(
+                    question,
+                    context={"frame_intent": getattr(frame, "intent", "")},
+                )
             except Exception:
                 reasoned = None
+
+        contexts = self._retrieve_context(parsed)
+
+        if frame is None and isinstance(parsed, Frame):
+            frame = parsed
+
+        intent = getattr(frame, "intent", "inform")
+        confidence = float(getattr(frame, "confidence", 0.5) or 0.0)
+        slots = getattr(frame, "slots", {}) or {}
+
+        slot_bits: List[str] = []
+        for key, val in slots.items():
+            if isinstance(val, (list, tuple)):
+                slot_bits.append(f"{key}=" + ", ".join(str(v) for v in val))
+            else:
+                slot_bits.append(f"{key}={val}")
+
+        summary = f"Intent détecté: {intent} (confiance {confidence:.2f})."
+        if slot_bits:
+            summary += " Slots: " + "; ".join(slot_bits)
+
+        context_lines: List[str] = []
+        if contexts:
+            for c in contexts:
+                label = c.get("title") or "mémoire"
+                context_lines.append(f"• ({c['score']:.2f}) {label}: {c['snippet']}")
+
+        contextualised_summary_parts = [summary]
+        if context_lines:
+            contextualised_summary_parts.append(
+                "Contexte pertinent retrouvé:\n" + "\n".join(context_lines)
+            )
+        contextualised_summary = "\n\n".join(contextualised_summary_parts)
 
         if reasoned:
             steps_lines = [
@@ -203,15 +239,21 @@ class SemanticUnderstanding:
             meta = reasoned.get("meta") or {}
             confidence = float(reasoned.get("confidence", 0.0))
             complexity = float(meta.get("complexity", 0.0))
-            response = (
+            answer = (
                 f"{reasoned.get('answer', '')}\n"
                 f"(confiance ~ {confidence:.2f}, complexité {complexity:.2f})\n"
                 f"Démarche:\n{steps}{support_lines}"
             )
-        else:
-            response = f"Reçu: {getattr(utterance, 'surface_form', user_text)}"
+            if contextualised_summary:
+                return f"{answer}\n\n{contextualised_summary}"
+            return answer
 
-        return response
+        fallback = getattr(parsed, "surface_form", user_text)
+        base_response = f"Reçu: {fallback}"
+        if contextualised_summary:
+            return f"{base_response}\n\n{contextualised_summary}"
+        return base_response
+
     def _retrieve_context(self, frame) -> List[dict]:
         """
         Cherche 3 éléments pertinents (interactions + docs) à partir du texte normalisé
@@ -261,39 +303,6 @@ class SemanticUnderstanding:
             return []
         return results
 
-    def respond(self, text: str, context: Optional[Dict[str, Any]] = None) -> str:
-        frame = self.parse_utterance(text, context=context)
-        contexts = self._retrieve_context(frame)
-
-        utter_frame = frame.frame if isinstance(frame, Utterance) else getattr(frame, "frame", None)
-        if utter_frame is None and isinstance(frame, Frame):
-            utter_frame = frame
-
-        intent = utter_frame.intent if utter_frame else "inform"
-        conf = utter_frame.confidence if utter_frame else 0.5
-        slots = utter_frame.slots if utter_frame else {}
-
-        slot_bits: List[str] = []
-        for key, val in (slots or {}).items():
-            if isinstance(val, (list, tuple)):
-                slot_bits.append(f"{key}=" + ", ".join(str(v) for v in val))
-            else:
-                slot_bits.append(f"{key}={val}")
-
-        summary = f"Intent détecté: {intent} (confiance {conf:.2f})."
-        if slot_bits:
-            summary += " Slots: " + "; ".join(slot_bits)
-
-        parts = [summary]
-
-        if contexts:
-            ctx_lines = []
-            for c in contexts:
-                lbl = f"{c['title']}" if c["title"] else "mémoire"
-                ctx_lines.append(f"• ({c['score']:.2f}) {lbl}: {c['snippet']}")
-            parts.append("Contexte pertinent retrouvé :\n" + "\n".join(ctx_lines))
-
-        return "\n\n".join(parts)
     def generate_reflective_reply(self, arch, user_msg: str) -> str:
         """Génère une réponse réflexive courte et lisible."""
         status = {}
