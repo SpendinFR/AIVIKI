@@ -16,7 +16,7 @@ import math
 import json
 import inspect
 
-from .experimentation import MetacogExperimenter, calibrate_self_model
+from .experimentation import MetacognitionExperimenter, calibrate_self_model
 
 class MetacognitiveState(Enum):
     """États métacognitifs possibles"""
@@ -206,7 +206,7 @@ class MetacognitiveSystem:
         self.monitoring_threads = {}
         self.running = True
 
-        self.experimenter = MetacogExperimenter(system_ref=self)
+        self.experimenter = MetacognitionExperimenter(system_ref=self)
         
         # logger si dispo
         self.logger = getattr(self.cognitive_architecture, "logger", None)
