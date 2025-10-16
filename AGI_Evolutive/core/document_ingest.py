@@ -9,6 +9,7 @@ DocumentIngest: intègre les documents de ./inbox dans la mémoire.
 import os, json, time, glob, hashlib
 from typing import Dict, Any
 
+from AGI_Evolutive.core.config import cfg
 from AGI_Evolutive.knowledge.concept_recognizer import ConceptRecognizer
 
 def _hash(s: str) -> str:
@@ -16,9 +17,11 @@ def _hash(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8", errors="ignore")).hexdigest()
 
 class DocumentIngest:
-    def __init__(self, arch, inbox_dir: str):
+    def __init__(self, arch, inbox_dir: str | None = None):
         self.arch = arch
-        self.inbox_dir = os.path.abspath(inbox_dir)
+        data_dir = cfg().get("DATA_DIR", "data")
+        fallback = os.path.join(data_dir, "inbox")
+        self.inbox_dir = os.path.abspath(inbox_dir or fallback)
         os.makedirs(self.inbox_dir, exist_ok=True)
         self._index = {}  # filename -> last_hash
     
@@ -80,6 +83,13 @@ class DocumentIngest:
                     # fallback: stocker sur une clé 'EPISODIC'
                     LTM.setdefault("EPISODIC", {})[key] = trace
                 mem.memory_metadata["total_memories"] = mem.memory_metadata.get("total_memories", 0) + 1
+            except Exception:
+                pass
+
+            # pipeline indexing -> semantic vector store
+            try:
+                if hasattr(mem, "ingest_document"):
+                    mem.ingest_document(content, title=name, source=f"inbox:{name}")
             except Exception:
                 pass
 

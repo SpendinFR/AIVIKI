@@ -7,6 +7,7 @@ from AGI_Evolutive.utils.jsonsafe import json_sanitize
 
 from .ontology import Ontology
 from .entity_linker import EntityLinker
+from .summarizer import BeliefSummarizer
 
 @dataclass
 class Evidence:
@@ -303,6 +304,9 @@ class BeliefGraph:
         self._rules: List[LocalRule] = self._default_rules()
         self.decay_rates = {"anchor": 0.0001, "episode": 0.001}
         self._load()
+        self.summarizer = BeliefSummarizer(self)
+        self._last_summary: Dict[str, Any] = {}
+        self._last_summary_ts: float = 0.0
 
     def set_entity_linker(self, linker: EntityLinker) -> None:
         self.entity_linker = linker
@@ -671,6 +675,20 @@ class BeliefGraph:
         self._flush()
         return new_belief
 
+    def update(
+        self,
+        subject: str,
+        relation: str,
+        value: str,
+        *,
+        summarize: bool = True,
+        **kwargs: Any,
+    ) -> Belief:
+        belief = self.upsert(subject, relation, value, **kwargs)
+        if summarize:
+            self._maybe_refresh_summaries()
+        return belief
+
     def add_evidence(self, belief_id: str, evidence: Evidence) -> bool:
         b = self._cache.get(belief_id)
         if not b: return False
@@ -765,3 +783,22 @@ class BeliefGraph:
                 for i in top
             ]
         return summary
+
+    def latest_summary(self) -> Dict[str, Any]:
+        if not self._last_summary:
+            self._maybe_refresh_summaries(force=True)
+        return dict(self._last_summary)
+
+    def _maybe_refresh_summaries(self, force: bool = False) -> None:
+        now = time.time()
+        if not force and (now - self._last_summary_ts) < 60.0:
+            return
+        results: Dict[str, Any] = {}
+        for timeframe in ("daily", "weekly"):
+            try:
+                results[timeframe] = self.summarizer.write_summary(timeframe, now=now)
+            except Exception:
+                continue
+        if results:
+            self._last_summary = results
+            self._last_summary_ts = now

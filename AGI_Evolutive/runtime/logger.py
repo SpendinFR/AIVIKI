@@ -4,10 +4,12 @@ import json
 import os
 import threading
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Optional, TYPE_CHECKING
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
 
+if TYPE_CHECKING:
+    from AGI_Evolutive.core.persistence import PersistenceManager
 
 class JSONLLogger:
     """
@@ -15,10 +17,11 @@ class JSONLLogger:
     Ecrit dans runtime/agent_events.jsonl + snapshots optionnels.
     """
 
-    def __init__(self, path: str = "runtime/agent_events.jsonl"):
+    def __init__(self, path: str = "runtime/agent_events.jsonl", persistence: Optional["PersistenceManager"] = None):
         self.path = path
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         self._lock = threading.Lock()
+        self.persistence: Optional["PersistenceManager"] = persistence
 
     def write(self, event_type: str, **fields: Any) -> None:
         rec = {
@@ -31,14 +34,29 @@ class JSONLLogger:
             with open(self.path, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
 
-    def snapshot(self, name: str, payload: Dict[str, Any]) -> str:
+    def snapshot(
+        self,
+        name: str,
+        payload: Optional[Dict[str, Any]] = None,
+        *,
+        persistence: Optional["PersistenceManager"] = None,
+    ) -> str:
         snap_dir = "runtime/snapshots"
         os.makedirs(snap_dir, exist_ok=True)
         ts = int(time.time())
         out = os.path.join(snap_dir, f"{ts}_{name}.json")
+        manager = persistence or self.persistence
+        data = payload
+        if data is None and manager is not None:
+            try:
+                data = manager.make_snapshot()
+            except Exception:
+                data = {}
+        if data is None:
+            data = {}
         with self._lock:
             with open(out, "w", encoding="utf-8") as f:
-                json.dump(json_sanitize(payload), f, ensure_ascii=False, indent=2)
+                json.dump(json_sanitize(data), f, ensure_ascii=False, indent=2)
         return out
 
     def rotate(self, keep_last: int = 5) -> None:

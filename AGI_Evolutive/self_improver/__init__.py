@@ -345,7 +345,7 @@ class SelfImprover:
             patch_payload.setdefault("metadata", metadata)
             self.code_evolver.promote_patch(patch_payload)
 
-        self.prom.promote(cid)
+        self.prom.promote(cid, quality_runner=self.quality)
         self._refresh_live_overrides()
         try:
             if hasattr(self.memory, "add_memory"):

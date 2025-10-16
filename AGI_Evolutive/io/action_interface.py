@@ -408,7 +408,7 @@ class ActionInterface:
             snippet=payload.get("snippet", ""),
             weight=float(payload.get("weight", 0.5)),
         )
-        b = arch.beliefs.upsert(
+        b = arch.beliefs.update(
             subject,
             relation,
             value,
@@ -443,7 +443,7 @@ class ActionInterface:
         polarity = int(payload.get("polarity", 1))
         evidence_text = payload.get("evidence") or (context or {}).get("evidence") or f"{subject} {relation} {value}"
         ev = Evidence.new("action", "assert_fact", evidence_text, weight=min(1.0, max(0.0, confidence)))
-        belief = arch.beliefs.upsert(
+        belief = arch.beliefs.update(
             subject,
             relation,
             value,
@@ -718,7 +718,14 @@ class ActionInterface:
                 code_evolver.promote_patch(patch_payload)
         except Exception:
             metadata = metadata or {}
-        prom.promote(cid)
+        quality_runner = None
+        improver = getattr(arch, "self_improver", None)
+        if improver is not None:
+            quality_runner = getattr(improver, "quality", None)
+        try:
+            prom.promote(cid, quality_runner=quality_runner)
+        except RuntimeError as exc:
+            return {"ok": False, "error": str(exc)}
         try:
             memory = self.bound.get("memory") if hasattr(self, "bound") else None
             if memory and hasattr(memory, "add_memory"):

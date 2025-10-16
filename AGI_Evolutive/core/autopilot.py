@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 from typing import Any, Optional
 
+from .config import cfg
 from .document_ingest import DocumentIngest
 from .persistence import PersistenceManager
 from .question_manager import QuestionManager
@@ -24,9 +25,18 @@ class Autopilot:
         self.project_root = project_root or os.path.abspath(
             os.path.join(os.path.dirname(__file__), "..")
         )
-        self.inbox_dir = os.path.join(self.project_root, "inbox")
+        data_dir = cfg().get("DATA_DIR", "data")
+        self.inbox_dir = os.path.join(data_dir, "inbox")
         self.ingest = DocumentIngest(arch, self.inbox_dir)
-        self.persist = PersistenceManager(arch)
+        existing_pm = getattr(arch, "persistence", None)
+        if existing_pm is not None:
+            self.persist = existing_pm
+        else:
+            self.persist = PersistenceManager(arch)
+            setattr(arch, "persistence", self.persist)
+        logger = getattr(arch, "logger", None)
+        if logger is not None:
+            setattr(logger, "persistence", self.persist)
         existing_qm = getattr(arch, "question_manager", None)
         if existing_qm is not None:
             self.questions = existing_qm

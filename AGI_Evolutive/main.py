@@ -84,7 +84,11 @@ def run_cli():
         arch = CognitiveArchitecture()
         arch.prioritizer = getattr(arch, "prioritizer", GoalPrioritizer(arch))
         # --- bootstrap voix & contexte ---
-        arch.voice_profile = getattr(arch, "voice_profile", VoiceProfile(arch.self_model))
+        arch.voice_profile = getattr(
+            arch,
+            "voice_profile",
+            VoiceProfile(arch.self_model, user_model=getattr(arch, "user_model", None)),
+        )
         arch.lexicon = getattr(arch, "lexicon", LiveLexicon())
         arch.style_observer = getattr(
             arch,
@@ -94,6 +98,7 @@ def run_cli():
                 getattr(arch, "homeostasis", None),
                 arch.voice_profile,
                 arch.lexicon,
+                user_model=getattr(arch, "user_model", None),
             ),
         )
         # Harmonise les instances utilisées par le renderer et l'observateur de style
