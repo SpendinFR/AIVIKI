@@ -36,7 +36,6 @@ from AGI_Evolutive.reasoning.question_engine import QuestionEngine
 from AGI_Evolutive.runtime.logger import JSONLLogger
 from AGI_Evolutive.runtime.response import ensure_contract, format_agent_reply
 from AGI_Evolutive.runtime.scheduler import Scheduler
-from AGI_Evolutive.retrieval.rag5.pipeline import RAGPipeline
 from AGI_Evolutive.world_model import PhysicsEngine
 from AGI_Evolutive.self_improver import SelfImprover
 from AGI_Evolutive.self_improver.code_evolver import CodeEvolver
@@ -82,58 +81,74 @@ class CognitiveArchitecture:
         if getattr(self.memory, "retrieval", None) is not None:
             setattr(self.memory.retrieval, "vector_store", self.vector_store)
 
-        # === RAG 5★ : init + indexation de boot ===
+        # === RAG 5★ : init lazy & optionnel ===
+        self.rag = None
+        self.rag_cfg = None
         try:
-            with open("configs/rag.json", "r", encoding="utf-8") as fh:
-                self.rag_cfg = json.load(fh)
-        except Exception:
-            # fallback sûr si le fichier manque
-            self.rag_cfg = {
-                "retrieval": {
-                    "topk_dense": 200,
-                    "topk_sparse": 100,
-                    "topk_fused": 80,
-                    "alpha_dense": 0.6,
-                    "beta_sparse": 0.4,
-                    "recency_boost": 0.2,
-                    "recency_half_life_days": 14.0,
-                },
-                "ann": {
-                    "backend": "faiss",
-                    "hnsw": True,
-                    "efSearch": 128,
-                    "M": 32,
-                    "metric": "ip",
-                },
-                "rerank": {"topk": 30, "mmr_lambda": 0.7},
-                "compose": {
-                    "budget_tokens": 1500,
-                    "snippet_chars": 420,
-                    "tokenizer": "bert-base-multilingual-cased",
-                },
-                "guards": {
-                    "min_support_docs": 2,
-                    "min_support_score": 0.15,
-                    "min_top1_score": 0.25,
-                    "refuse_message": "Je ne peux pas répondre de façon fiable : support insuffisant. Peux-tu préciser la question ou partager une source ?",
-                },
-            }
+            import json
 
-        self.rag = RAGPipeline(self.rag_cfg)
+            try:
+                with open("configs/rag.json", "r", encoding="utf-8") as fh:
+                    self.rag_cfg = json.load(fh)
+            except Exception:
+                self.rag_cfg = {
+                    "retrieval": {
+                        "topk_dense": 200,
+                        "topk_sparse": 100,
+                        "topk_fused": 80,
+                        "alpha_dense": 0.6,
+                        "beta_sparse": 0.4,
+                        "recency_boost": 0.2,
+                        "recency_half_life_days": 14.0,
+                    },
+                    "ann": {
+                        "backend": "faiss",
+                        "hnsw": True,
+                        "efSearch": 128,
+                        "M": 32,
+                        "metric": "ip",
+                    },
+                    "rerank": {"topk": 30, "mmr_lambda": 0.7},
+                    "compose": {
+                        "budget_tokens": 1500,
+                        "snippet_chars": 420,
+                        "tokenizer": "bert-base-multilingual-cased",
+                    },
+                    "guards": {
+                        "min_support_docs": 2,
+                        "min_support_score": 0.15,
+                        "min_top1_score": 0.25,
+                        "refuse_message": "Je ne peux pas répondre de façon fiable : support insuffisant. Peux-tu préciser la question ou partager une source ?",
+                    },
+                }
 
-        # Seed initial depuis souvenirs récents (si dispo)
-        try:
-            for m in self.memory.get_recent_memories(n=2000):
-                txt = m.get("text")
-                if txt:
-                    self.rag.add_document(
-                        m.get("id", f"mem#{int(m.get('ts', 0))}"),
-                        txt,
-                        meta={"ts": m.get("ts"), "source_trust": 0.6},
+            # Import du pipeline uniquement ici, et seulement si on va l’utiliser
+            try:
+                from AGI_Evolutive.retrieval.rag5.pipeline import RAGPipeline
+
+                self.rag = RAGPipeline(self.rag_cfg)
+                # Seed initial depuis la mémoire (non bloquant)
+                try:
+                    for m in self.memory.get_recent_memories(n=2000):
+                        txt = m.get("text")
+                        if txt:
+                            self.rag.add_document(
+                                m.get("id", f"mem#{int(m.get('ts', 0))}"),
+                                txt,
+                                meta={"ts": m.get("ts"), "source_trust": 0.6},
+                            )
+                except Exception:
+                    pass
+            except Exception as e:
+                # RAG restera désactivé si dépendances absentes
+                self.rag = None
+                if hasattr(self, "logger"):
+                    self.logger.warning(
+                        "RAG désactivé (dépendances manquantes ou erreur d'init): %s", e
                     )
         except Exception:
-            # jamais bloquant
-            pass
+            # Ne jamais empêcher l'architecture de booter
+            self.rag = None
 
         self.telemetry.log("init", "core", {"stage": "perception"})
         self.perception = PerceptionSystem(self, self.memory)
