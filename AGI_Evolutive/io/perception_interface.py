@@ -262,7 +262,7 @@ class PerceptionInterface:
 
                         arch.tactic_selector = getattr(arch, "tactic_selector", TacticSelector(arch))
                         reward01 = float(outcome.get("reward", 0.5))
-                        arch.tactic_selector.bandit_update(trace["rule_id"], post_ctx, reward01)
+                        arch.tactic_selector.bandit_update(trace["rule_id"], pre_ctx, reward01)
                     except Exception:
                         pass
         except Exception:
