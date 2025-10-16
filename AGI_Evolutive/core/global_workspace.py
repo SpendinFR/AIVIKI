@@ -51,6 +51,30 @@ class GlobalWorkspace:
         attention = max(0.0, min(1.0, attention))
         self._bids.append((channel, bid_type, attention, payload))
 
+    def _policy_score_safe(self, frame: Any, option: Optional[str] = None) -> float:
+        """Return a policy score using the best available API or a RAG-based fallback."""
+
+        pol = getattr(self, "policy", None)
+        try:
+            if pol and hasattr(pol, "evaluate"):
+                return float(pol.evaluate(frame, option=option))
+            if pol and hasattr(pol, "confidence_for"):
+                return float(pol.confidence_for(frame, option=option))
+            if pol and hasattr(pol, "confidence"):
+                return float(pol.confidence(frame))
+        except Exception:
+            pass
+
+        signals = getattr(frame, "signals", {}) or {}
+        top1 = float(signals.get("rag_top1", 0.0))
+        mean = float(signals.get("rag_mean", 0.0))
+        div = float(signals.get("rag_diversity", 0.0))
+        n_docs = float(signals.get("rag_docs", 0.0))
+        return max(
+            0.0,
+            min(1.0, 0.45 * top1 + 0.35 * mean + 0.15 * div + 0.05 * min(n_docs / 5.0, 1.0)),
+        )
+
     def _submit_rag_bid(self, frame: Any, utility_delta: float) -> None:
         signals = getattr(frame, "signals", {}) or {}
         ig = _info_gain_from_rag(signals)
@@ -71,7 +95,7 @@ class GlobalWorkspace:
         if self.policy is None:
             return
 
-        current_u = self.policy.evaluate(frame, option="no_rag_use")
-        rag_u = self.policy.evaluate(frame, option="use_rag")
+        current_u = self._policy_score_safe(frame, option="no_rag_use")
+        rag_u = self._policy_score_safe(frame, option="use_rag")
         utility_delta = rag_u - current_u
         self._submit_rag_bid(frame, utility_delta)
