@@ -65,15 +65,16 @@ class GlobalWorkspace:
         except Exception:
             pass
 
+        if option == "no_rag_use":
+            return 0.0
+
         signals = getattr(frame, "signals", {}) or {}
         top1 = float(signals.get("rag_top1", 0.0))
         mean = float(signals.get("rag_mean", 0.0))
         div = float(signals.get("rag_diversity", 0.0))
         n_docs = float(signals.get("rag_docs", 0.0))
-        return max(
-            0.0,
-            min(1.0, 0.45 * top1 + 0.35 * mean + 0.15 * div + 0.05 * min(n_docs / 5.0, 1.0)),
-        )
+        fallback = 0.45 * top1 + 0.35 * mean + 0.15 * div + 0.05 * min(n_docs / 5.0, 1.0)
+        return max(0.0, min(1.0, fallback))
 
     def _submit_rag_bid(self, frame: Any, utility_delta: float) -> None:
         signals = getattr(frame, "signals", {}) or {}
