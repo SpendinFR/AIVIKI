@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, List, Tuple
 import time, math, re, json
 
+from AGI_Evolutive.social.adaptive_lexicon import AdaptiveLexicon
 from AGI_Evolutive.social.interaction_rule import (
     InteractionRule, ContextBuilder, clamp
 )
@@ -58,6 +59,43 @@ class SocialCritic:
     def __init__(self, arch):
         self.arch = arch
         self.cfg = self._load_cfg()
+        self.lex = getattr(self.arch, "lexicon", None)
+        if self.lex is None:
+            # seed avec tes POS/NEG statiques pour ne pas “perdre” ton actuel
+            self.arch.lexicon_seeds = {
+                "pos": [
+                    "j'adore",
+                    "génial",
+                    "top",
+                    "parfait",
+                    "bravo",
+                    "merci",
+                    "super",
+                    "nickel",
+                    "impeccable",
+                    "parfaitement",
+                    "très bien",
+                    "bien vu",
+                    "ça me va",
+                    "ok c'est bon",
+                ],
+                "neg": [
+                    "trop",
+                    "arrête",
+                    "stop",
+                    "pas ça",
+                    "relou",
+                    "ça me saoule",
+                    "mauvais",
+                    "bof",
+                    "je n'aime pas",
+                    "non pas comme ça",
+                    "pas terrible",
+                    "déçu",
+                    "insupportable",
+                ],
+            }
+            self.lex = self.arch.lexicon = AdaptiveLexicon(self.arch)
 
     def _load_cfg(self) -> Dict[str, Any]:
         path = getattr(self.arch, "social_critic_cfg_path", "data/social_critic_config.json")
@@ -133,9 +171,14 @@ class SocialCritic:
         val = _sentiment_heuristic(user_msg or "")
         acc = _acceptance_marker(user_msg or "")
 
-        # feedback explicite
-        exp_pos = _contains_any(low, POS_MARKERS)
-        exp_neg = _contains_any(low, NEG_MARKERS)
+        # feedback explicite (hybride: statique + lexique appris)
+        user_id = getattr(self.arch, "user_id", None)
+        exp_pos = _contains_any(low, POS_MARKERS) or self.lex.match(
+            user_msg, polarity="pos", user_id=user_id
+        )
+        exp_neg = _contains_any(low, NEG_MARKERS) or self.lex.match(
+            user_msg, polarity="neg", user_id=user_id
+        )
         explicit = 0.5
         if exp_pos and not exp_neg:
             explicit = 1.0
@@ -182,6 +225,17 @@ class SocialCritic:
         support += 0.10 if acc else 0.0
         support += 0.10  # base
         confidence = clamp(max(self.cfg.get("min_confidence", 0.15), support), 0.0, 1.0)
+
+        # apprentissage du lexique (pas binaire — reward et confidence pondèrent)
+        try:
+            self.lex.observe_message(
+                user_msg,
+                reward01=reward,
+                confidence=confidence,
+                user_id=user_id,
+            )
+        except Exception:
+            pass
 
         return {
             "reduced_uncertainty": reduced_unc,
