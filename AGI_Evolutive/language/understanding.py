@@ -102,6 +102,22 @@ class SemanticUnderstanding:
         if plan:
             parts.append(f"Prochain pas (proposé) : {plan}")
 
+        # --- RAG 5★ : réponse appuyée par sources ---
+        try:
+            arch = getattr(self, "arch", None) or getattr(self, "architecture", None) or getattr(getattr(self, "state", None), "architecture", None)
+            if arch and getattr(arch, "rag", None):
+                rag_out = arch.rag.ask(text)
+                if rag_out.get("status") == "ok":
+                    parts.append("Réponse appuyée par sources :")
+                    parts.append(rag_out["answer"])
+                    cites = rag_out.get("citations") or []
+                    if cites:
+                        parts.append("Sources: " + " | ".join(f"[{c['doc_id']} {c['start']}–{c['end']}]" for c in cites[:3]))
+                else:
+                    parts.append("⚠️ Support insuffisant. Peux-tu préciser la question ou partager un lien ?")
+        except Exception:
+            pass
+
         return "\n".join(parts)
 
     # ---------- INTENT & ACTS ----------
