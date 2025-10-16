@@ -1,4 +1,4 @@
-"""Knowledge-layer helpers wrapping the belief ontology and entity linker."""
+"""Facade exposing the canonical belief ontology to the knowledge layer."""
 
 from __future__ import annotations
 

@@ -17,7 +17,7 @@ from AGI_Evolutive.memory.concept_extractor import ConceptExtractor
 from AGI_Evolutive.memory.consolidator import Consolidator
 from AGI_Evolutive.memory.episodic_linker import EpisodicLinker
 from AGI_Evolutive.memory.memory_store import MemoryStore
-from AGI_Evolutive.scheduler import Scheduler
+from AGI_Evolutive.light_scheduler import LightScheduler
 
 class Orchestrator:
     """Coordonne un cycle cognitif enrichi autour de l'architecture de base."""
@@ -45,7 +45,7 @@ class Orchestrator:
         self.reflect_loop = ReflectionLoop(self.meta, interval_sec=300)
         self.reflect_loop.start()
         # Scheduler (sans threads nécessaires)
-        self.scheduler = Scheduler()
+        self.scheduler = LightScheduler()
         self._register_jobs()
 
         # Boot log

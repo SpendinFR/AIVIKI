@@ -4,7 +4,7 @@ from typing import Any, Dict, Optional, List, Tuple
 
 from AGI_Evolutive.autonomy import AutonomyManager
 from AGI_Evolutive.beliefs.graph import BeliefGraph, Evidence
-from AGI_Evolutive.knowledge.ontology import EntityLinker, Ontology
+from AGI_Evolutive.knowledge.ontology_facade import EntityLinker, Ontology
 from AGI_Evolutive.cognition.evolution_manager import EvolutionManager
 from AGI_Evolutive.cognition.reward_engine import RewardEngine
 from AGI_Evolutive.core.telemetry import Telemetry
@@ -16,7 +16,7 @@ from AGI_Evolutive.goals.dag_store import GoalDAG
 from AGI_Evolutive.io.action_interface import ActionInterface
 from AGI_Evolutive.io.perception_interface import PerceptionInterface
 from AGI_Evolutive.language import SemanticUnderstanding
-from AGI_Evolutive.language.policy import StylePolicy
+from AGI_Evolutive.language.style_policy import StylePolicy
 from AGI_Evolutive.language.social_reward import extract_social_reward
 from AGI_Evolutive.language.style_profiler import StyleProfiler
 from AGI_Evolutive.learning import ExperientialLearning

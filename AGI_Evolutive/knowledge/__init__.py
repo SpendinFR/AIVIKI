@@ -1,6 +1,6 @@
-"""Light-weight knowledge layer exposing ontology and entity linking helpers."""
+"""Knowledge layer helpers re-exporting the belief ontology facade."""
 
-from .ontology import Ontology, EntityLinker
+from .ontology_facade import EntityLinker, Ontology
 
 __all__ = ["Ontology", "EntityLinker"]
 
