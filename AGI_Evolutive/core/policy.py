@@ -206,6 +206,15 @@ class PolicyEngine:
         self.state.setdefault("hints", []).append(entry)
         self.state["hints"] = self.state["hints"][-100:]
         self._save()
+
+    def validate_tactic(self, rule: Dict[str, Any], ctx: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Stub pour validation de tactique : autorise par défaut."""
+        return {"decision": "allow", "reason": "default_allow"}
+
+    def recent_frictions(self, window_sec: int = 600) -> int:
+        """Stub pour comptage des frictions récentes."""
+        return 0
+
     def validate_proposal(self, proposal: Dict[str, Any], self_state: Dict[str, Any]) -> Dict[str, Any]:
         path = proposal.get("path", [])
         if not path:
