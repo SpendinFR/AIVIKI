@@ -40,7 +40,7 @@ class Experiment:
         return json.dumps(json_sanitize(d), ensure_ascii=False)
 
 
-class MetacogExperimenter:
+class MetacognitionExperimenter:
     """
     Génère de petits tests concrets à partir des métriques,
     et consigne le résultat pour fermer la boucle.
