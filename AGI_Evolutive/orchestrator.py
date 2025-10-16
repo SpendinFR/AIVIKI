@@ -91,6 +91,12 @@ class Orchestrator:
             self.planner.add_step("understand_humans","Tester une hypothèse d'intention par question")
 
     def action_cycle(self):
+        try:
+            prioritizer = getattr(self.arch, "prioritizer", None)
+            if prioritizer is not None:
+                prioritizer.reprioritize_all()
+        except Exception:
+            pass
         # traiter d'abord un goal d'apprentissage si présent
         picked = None
         lock = getattr(self.planner, "lock", None)

@@ -45,6 +45,7 @@ def _print_pending(
 
 from AGI_Evolutive.core.autopilot import Autopilot
 from AGI_Evolutive.core.cognitive_architecture import CognitiveArchitecture
+from AGI_Evolutive.cognition.prioritizer import GoalPrioritizer
 from AGI_Evolutive.orchestrator import Orchestrator
 from AGI_Evolutive.language.voice import VoiceProfile
 from AGI_Evolutive.language.lexicon import LiveLexicon
@@ -81,6 +82,7 @@ def run_cli():
     print("Chargement de l'architecture cognitive…")
     try:
         arch = CognitiveArchitecture()
+        arch.prioritizer = getattr(arch, "prioritizer", GoalPrioritizer(arch))
         # --- bootstrap voix & contexte ---
         arch.voice_profile = getattr(arch, "voice_profile", VoiceProfile(arch.self_model))
         arch.lexicon = getattr(arch, "lexicon", LiveLexicon())
