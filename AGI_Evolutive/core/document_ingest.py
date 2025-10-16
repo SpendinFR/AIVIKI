@@ -80,6 +80,33 @@ class DocumentIngest:
                 mem.memory_metadata["total_memories"] = mem.memory_metadata.get("total_memories", 0) + 1
             except Exception:
                 pass
+
+            # --- INDUCTION DE RÈGLES SOCIALES ---
+            try:
+                from AGI_Evolutive.social.interaction_miner import InteractionMiner
+                from AGI_Evolutive.social.interaction_rule import InteractionRule
+
+                self.arch.interaction_miner = getattr(self.arch, "interaction_miner", InteractionMiner(self.arch))
+                rules = self.arch.interaction_miner.mine_text(content, source=f"inbox:{name}")
+
+                # seuil bas pour enregistrer, moyen/haut pour proposer validation
+                for rule in rules:
+                    self.arch.memory.add_memory(rule.to_dict())
+
+                    # (optionnel) goal de validation quand confiance moyenne
+                    if 0.55 <= float(rule.confidence) < 0.75:
+                        gid = f"validate_rule::{rule.id}"
+                        self.arch.planner.ensure_goal(gid, f"Valider règle sociale {rule.id}", priority=0.62)
+                        # pipeline simple : simuler ou chercher contre-exemples
+                        self.arch.planner.add_action_step(gid, "simulate_dialogue", {"rule_id": rule.id}, priority=0.60)
+                        self.arch.planner.add_action_step(gid, "search_counterexample", {"rule_id": rule.id}, priority=0.58)
+            except Exception as e:
+                # ne casse jamais l'ingestion si la mine échoue
+                try:
+                    self.arch.memory.add_memory({"kind": "warn", "text": f"interaction_miner_failed:{e}"})
+                except Exception:
+                    pass
+            # --- fin induction ---
             self._index[name] = h
             added += 1
         return added
