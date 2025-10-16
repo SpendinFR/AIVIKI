@@ -2,8 +2,6 @@ import re
 import time
 from typing import Any, Dict, Optional, List, Tuple
 
-from AGI_Evolutive.utils.jsonsafe import json_sanitize
-
 from AGI_Evolutive.autonomy import AutonomyManager
 from AGI_Evolutive.beliefs.graph import BeliefGraph, Evidence
 from AGI_Evolutive.knowledge.ontology import EntityLinker, Ontology
@@ -1073,37 +1071,176 @@ class CognitiveArchitecture:
         except Exception:
             pass
 
-    def _record_skill(self, concept: str) -> None:
-        """Persiste un concept appris comme 'skill' + trace mémoire."""
-        # trace mémoire
+    def _record_skill(
+        self,
+        concept: str,
+        *,
+        source: str = "learn_concept",
+        confidence: float | None = None,
+        metadata: dict | None = None,
+    ) -> dict:
+        """
+        Enregistre un 'skill/concept' appris et consolide la connaissance :
+          - Persistance JSON (data/skills.json)
+          - Mémoire milestone (tags: lesson, concept:<name>)
+          - Ontology/Beliefs: crée le nœud concept:*, evidence 'defined_by'
+          - Consolidator: ajoute une 'lesson' (résumé court)
+          - Émet un événement 'virtue_learned' (si concept fait sens pour la persona)
+        Robuste: aucun crash si un composant (ontology/beliefs/consolidator/voice) est absent.
+        """
+        import os, json, time, traceback
+
+        t0 = time.time()
+        out = {"ok": True, "concept": concept, "path": None, "errors": []}
+        concept_norm = (concept or "").strip()
+        if not concept_norm:
+            return {"ok": False, "concept": concept, "errors": ["empty_concept"]}
+
+        # ---------------------------------------
+        # 1) Persistance JSON (skills.json)
+        # ---------------------------------------
+        skills_path = getattr(self, "skills_path", os.path.join("data", "skills.json"))
+        os.makedirs(os.path.dirname(skills_path) or ".", exist_ok=True)
+
         try:
-            self.memory.add_memory(kind='concept_learned', content=concept, metadata={'source':'user_confirm'})
-        except Exception:
-            pass
-        # persistance sur disque
-        import os, json, time
-        skills_path = os.path.join('data', 'skills.json')
-        try:
-            os.makedirs('data', exist_ok=True)
             skills = {}
             if os.path.exists(skills_path):
-                with open(skills_path, 'r', encoding='utf-8') as f:
-                    skills = json.load(f)
-            skills[str(concept)] = {
-                'learned_at': time.time(),
-                'source': 'user_confirm',
-            }
-            with open(skills_path, 'w', encoding='utf-8') as f:
-                json.dump(json_sanitize(skills), f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
-        # petit nudge côté Learning (si présent)
+                with open(skills_path, "r", encoding="utf-8") as f:
+                    try:
+                        skills = json.load(f) or {}
+                    except Exception:
+                        skills = {}
+
+            entry = skills.get(concept_norm) or {}
+            entry.update({
+                "name": concept_norm,
+                "acquired": True,
+                "last_update": t0,
+                "source": source,
+                "confidence": float(confidence) if confidence is not None else entry.get("confidence", 1.0),
+                "meta": {**(entry.get("meta", {}) or {}), **(metadata or {})},
+            })
+            skills[concept_norm] = entry
+
+            with open(skills_path, "w", encoding="utf-8") as f:
+                json.dump(skills, f, ensure_ascii=False, indent=2)
+            out["path"] = skills_path
+        except Exception as e:
+            out["ok"] = False
+            out["errors"].append(f"skills_persist:{e}")
+            # on continue malgré tout
+
+        # ---------------------------------------
+        # 2) Mémoire milestone (trace datée)
+        # ---------------------------------------
         try:
-            if hasattr(self, 'learning') and hasattr(self.learning, 'learning_competencies'):
-                v = self.learning.learning_competencies.get('skills_compiled', 0.0)
-                self.learning.learning_competencies['skills_compiled'] = min(1.0, v + 0.01)
-        except Exception:
-            pass
+            if hasattr(self, "memory") and getattr(self, "memory"):
+                self.memory.add_memory({
+                    "kind": "milestone",
+                    "text": f"Compréhension de {concept_norm} validée",
+                    "ts": t0,
+                    "tags": ["lesson", f"concept:{concept_norm}"],
+                    "metadata": {
+                        "concept": concept_norm,
+                        "source": source,
+                        "confidence": confidence,
+                        **(metadata or {})
+                    }
+                })
+        except Exception as e:
+            out["errors"].append(f"milestone:{e}")
+
+        # ---------------------------------------
+        # 3) Ontology + Beliefs (evidence)
+        # ---------------------------------------
+        try:
+            # Ontology
+            if hasattr(self, "ontology") and getattr(self, "ontology"):
+                # API tolérante: add_entity(id, attrs=...) ou add_entity(id, **attrs)
+                try:
+                    self.ontology.add_entity(f"concept:{concept_norm}", attrs={"kind": "concept", "label": concept_norm, "source": source})
+                except TypeError:
+                    self.ontology.add_entity(f"concept:{concept_norm}", kind="concept", label=concept_norm, source=source)
+            # Beliefs
+            if hasattr(self, "beliefs") and getattr(self, "beliefs"):
+                ev = None
+                try:
+                    from AGI_Evolutive.beliefs.graph import Evidence
+                    # Evidence.new(type, via, info, weight)
+                    ev = Evidence.new("action", source, f"appris:{concept_norm}", weight=0.8)
+                except Exception:
+                    ev = None
+                # tolérance d’API: add_fact(...) ou add_evidence(...)
+                if hasattr(self.beliefs, "add_fact"):
+                    self.beliefs.add_fact(subject=f"concept:{concept_norm}",
+                                          predicate="defined_by",
+                                          obj=source,
+                                          evidence=ev)
+                elif hasattr(self.beliefs, "add_evidence"):
+                    self.beliefs.add_evidence(subject=f"concept:{concept_norm}",
+                                              predicate="defined_by",
+                                              obj=source,
+                                              weight=0.8)
+                if hasattr(self.beliefs, "flush"):
+                    self.beliefs.flush()
+        except Exception as e:
+            out["errors"].append(f"ontology_beliefs:{e}")
+
+        # ---------------------------------------
+        # 4) Consolidator: lesson/synthèse
+        # ---------------------------------------
+        try:
+            if hasattr(self, "consolidator") and getattr(self, "consolidator"):
+                summary = f"Concept : {concept_norm} — défini et validé (source={source}). " \
+                          f"Confiance={confidence if confidence is not None else 'n/a'}."
+                st = getattr(self.consolidator, "state", None)
+                if st is not None:
+                    lessons = st.setdefault("lessons", [])
+                    lessons.append({
+                        "topic": concept_norm,
+                        "summary": summary,
+                        "sources": [f"goal:{source}"] if source else [],
+                        "ts": t0,
+                        "tags": ["lesson", f"concept:{concept_norm}"]
+                    })
+                    # _save() si dispo
+                    if hasattr(self.consolidator, "_save"):
+                        self.consolidator._save()
+        except Exception as e:
+            out["errors"].append(f"consolidator:{e}")
+
+        # ---------------------------------------
+        # 5) Événement pour la persona/voix (optionnel, non bloquant)
+        #    -> permettra au Proposer de faire évoluer persona.values/tone
+        # ---------------------------------------
+        try:
+            if hasattr(self, "memory") and getattr(self, "memory"):
+                # Si c’est une “vertu”/valeur probable, on émet un hook
+                virtues = {"empathy", "compassion", "kindness", "honesty", "precision"}
+                if concept_norm.lower() in virtues:
+                    self.memory.add_memory({
+                        "kind": "virtue_learned",
+                        "value": concept_norm.lower(),
+                        "ts": t0,
+                        "tags": ["persona_hook", f"concept:{concept_norm}"]
+                    })
+            # petit coup de pouce voix (si présent) – non bloquant
+            if hasattr(self, "voice_profile") and getattr(self, "voice_profile"):
+                try:
+                    if concept_norm.lower() in {"empathy", "compassion", "kindness"}:
+                        self.voice_profile.bump("warmth", +0.03)
+                        self.voice_profile.bump("emoji", +0.02)
+                    elif concept_norm.lower() in {"precision", "rigor", "rigueur"}:
+                        self.voice_profile.bump("conciseness", +0.02)
+                        self.voice_profile.bump("analytical", +0.02)
+                except Exception:
+                    pass
+        except Exception as e:
+            out["errors"].append(f"voice_event:{e}")
+
+        out["duration_s"] = round(time.time() - t0, 3)
+        # Si on a rencontré des erreurs non critiques, on reste ok=True mais on les remonte
+        return out
 
     # ------------------------------------------------------------------
     def _generate_base_text(self, surface: str, reason_out: Dict[str, Any]) -> str:
