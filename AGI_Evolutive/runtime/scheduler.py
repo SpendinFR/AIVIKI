@@ -64,7 +64,7 @@ class Scheduler:
       homeostasis → consolidation → concept_extractor → episodic_linker →
       goals/planning → reflection → evolution_manager
 
-    À ne pas confondre avec :class:`AGI_Evolutive.scheduler.Scheduler`
+    À ne pas confondre avec :class:`AGI_Evolutive.light_scheduler.LightScheduler`
     (planificateur léger synchronisé à appeler dans une boucle).  Cette
     version runtime persiste son état et tourne dans un thread dédié.
     """

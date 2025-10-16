@@ -1,3 +1,5 @@
+"""Language style policy definitions used by dialogue modules."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
