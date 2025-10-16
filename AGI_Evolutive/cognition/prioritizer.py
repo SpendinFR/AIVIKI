@@ -454,9 +454,19 @@ class GoalPrioritizer:
         return {"priority": pr, "tags": list(tags), "explain": reasons[:6]}
 
     def reprioritize_all(self):
-        plans: Dict[str, Dict[str, Any]] = _safe(
-            self.arch, "planner", "state", "plans", default={}
-        ) or {}
+        planner = getattr(self.arch, "planner", None)
+        if not planner:
+            return
+
+        plans: Dict[str, Dict[str, Any]] = {}
+        state = getattr(planner, "state", None)
+        if isinstance(state, dict):
+            plans = state.get("plans") or {}
+        elif isinstance(getattr(planner, "plans", None), dict):
+            plans = getattr(planner, "plans") or {}
+
+        if not isinstance(plans, dict):
+            plans = {}
         if not plans:
             return
         for gid, plan in plans.items():
