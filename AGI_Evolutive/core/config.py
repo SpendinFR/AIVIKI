@@ -1,35 +1,11 @@
 import json
 import os
 from functools import lru_cache
-
-_DEFAULT_CONFIG = {
-    "version": 1,
-    "name": "agi_evolutive"
-}
-
-@lru_cache(maxsize=1)
-def load_config(path: str = "config.json") -> dict:
-    """Loads a simple JSON configuration file, returning defaults if absent."""
-    if os.path.isabs(path):
-        candidate_paths = [path]
-    else:
-        here = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-        candidate_paths = [os.path.join(here, path), path]
-
-    for candidate in candidate_paths:
-        if os.path.exists(candidate):
-            try:
-                with open(candidate, "r", encoding="utf-8") as fh:
-                    data = json.load(fh)
-                    return data
-            except Exception:
-                break
-    return dict(_DEFAULT_CONFIG)
-import os
-import json
 from typing import Any, Dict, Optional
 
 _DEFAULTS: Dict[str, Any] = {
+    "version": 1,
+    "name": "agi_evolutive",
     "DATA_DIR": "data",
     "MEM_DIR": "data/memories",
     "PLANS_PATH": "data/plans.json",
@@ -41,22 +17,33 @@ _DEFAULTS: Dict[str, Any] = {
     "GOALS_DAG_PATH": "logs/goals_dag.json",
 }
 
+_DIR_KEYS = ("DATA_DIR", "MEM_DIR", "SELF_VERSIONS_DIR", "VECTOR_DIR", "LOGS_DIR")
+
 _cfg: Optional[Dict[str, Any]] = None
 
 
+@lru_cache(maxsize=1)
 def load_config(path: str = "config.json") -> Dict[str, Any]:
-    """Load configuration from *path* and ensure core directories exist."""
+    """Load configuration from *path*, applying defaults and creating directories."""
     global _cfg
-    cfg = dict(_DEFAULTS)
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                cfg.update(json.load(f))
-        except Exception:
-            # Silently ignore malformed configuration, keep defaults
-            pass
 
-    for key in ("DATA_DIR", "MEM_DIR", "SELF_VERSIONS_DIR", "VECTOR_DIR", "LOGS_DIR"):
+    if os.path.isabs(path):
+        candidate_paths = [path]
+    else:
+        here = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        candidate_paths = [os.path.join(here, path), path]
+
+    cfg = dict(_DEFAULTS)
+    for candidate in candidate_paths:
+        if os.path.exists(candidate):
+            try:
+                with open(candidate, "r", encoding="utf-8") as fh:
+                    cfg.update(json.load(fh))
+                break
+            except Exception:
+                continue
+
+    for key in _DIR_KEYS:
         os.makedirs(cfg[key], exist_ok=True)
 
     _cfg = cfg
