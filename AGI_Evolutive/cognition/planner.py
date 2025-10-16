@@ -4,8 +4,6 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
-from AGI_Evolutive.retrieval.rag5.pipeline import RAGPipeline
-
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
 
 from AGI_Evolutive.core.config import cfg
@@ -69,45 +67,42 @@ class Planner:
 
     def _maybe_preplan_with_rag(self, frame: Any, architecture: Optional[Any]) -> Dict[str, Any]:
         out = {"rag_out": None, "rag_signals": {}, "grounded_context": []}
-        arch = architecture or self.architecture
-        if arch is None:
-            return out
         try:
-            intent = _get_field(frame, "intent")
-            if intent not in {"ask", "request", "summarize"}:
-                return out
-            rag_component = getattr(arch, "rag", None)
-            if rag_component is None and isinstance(arch, RAGPipeline):
-                rag_component = arch
-            if rag_component is None:
-                return out
-            if isinstance(rag_component, RAGPipeline) or hasattr(rag_component, "ask"):
-                rag_iface = rag_component
-            else:
-                return out
-            text = _get_field(frame, "text")
-            if not text:
-                text = _get_field(frame, "surface_form")
-            if not text:
-                return out
-            rag_out = rag_iface.ask(str(text))
-            out["rag_out"] = rag_out
-            if isinstance(rag_out, dict) and rag_out.get("status") == "ok":
-                out["rag_signals"] = _rag_signals(rag_out)
-                citations = rag_out.get("citations") or []
-                grounded = []
-                for cite in citations:
-                    if not isinstance(cite, dict):
-                        continue
-                    grounded.append(
-                        {
-                            "doc_id": cite.get("doc_id"),
-                            "offsets": (cite.get("start"), cite.get("end")),
-                            "snippet": cite.get("snippet"),
-                            "score": cite.get("score"),
-                        }
+            arch = architecture or self.architecture
+            rag = getattr(arch, "rag", None)
+            if getattr(frame, "intent", None) in {"ask", "request", "summarize"} and rag:
+                text = _get_field(frame, "text") or _get_field(frame, "surface_form")
+                if not text:
+                    return out
+                rag_out = rag.ask(str(text))
+                out["rag_out"] = rag_out
+                if isinstance(rag_out, dict) and rag_out.get("status") == "ok":
+                    cites = rag_out.get("citations") or []
+                    scores = [c.get("score", 0.0) for c in cites if isinstance(c, dict)]
+                    top1 = max(scores) if scores else 0.0
+                    mean = sum(scores) / max(1, len(scores)) if scores else 0.0
+                    div = (
+                        len({c.get("doc_id") for c in cites if isinstance(c, dict)})
+                        / max(1, len(cites))
+                        if cites
+                        else 0.0
                     )
-                out["grounded_context"] = grounded
+                    out["rag_signals"] = {
+                        "rag_top1": float(top1),
+                        "rag_docs": float(len(cites)),
+                        "rag_mean": float(mean),
+                        "rag_diversity": float(div),
+                    }
+                    out["grounded_context"] = [
+                        {
+                            "doc_id": c.get("doc_id"),
+                            "offsets": (c.get("start"), c.get("end")),
+                            "snippet": c.get("snippet"),
+                            "score": c.get("score"),
+                        }
+                        for c in cites
+                        if isinstance(c, dict)
+                    ]
         except Exception:
             pass
         return out
