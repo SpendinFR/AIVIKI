@@ -60,7 +60,10 @@ class SocialCritic:
         self.arch = arch
         self.cfg = self._load_cfg()
         self.lex = getattr(self.arch, "lexicon", None)
-        if self.lex is None:
+        needs_adaptive = self.lex is None or not all(
+            callable(getattr(self.lex, attr, None)) for attr in ("match", "observe_message")
+        )
+        if needs_adaptive:
             # seed avec tes POS/NEG statiques pour ne pas “perdre” ton actuel
             self.arch.lexicon_seeds = {
                 "pos": [
@@ -95,7 +98,8 @@ class SocialCritic:
                     "insupportable",
                 ],
             }
-            self.lex = self.arch.lexicon = AdaptiveLexicon(self.arch)
+            self.lex = AdaptiveLexicon(self.arch)
+            setattr(self.arch, "lexicon", self.lex)
 
     def _load_cfg(self) -> Dict[str, Any]:
         path = getattr(self.arch, "social_critic_cfg_path", "data/social_critic_config.json")
@@ -173,11 +177,12 @@ class SocialCritic:
 
         # feedback explicite (hybride: statique + lexique appris)
         user_id = getattr(self.arch, "user_id", None)
-        exp_pos = _contains_any(low, POS_MARKERS) or self.lex.match(
-            user_msg, polarity="pos", user_id=user_id
+        match_fn = getattr(self.lex, "match", None)
+        exp_pos = _contains_any(low, POS_MARKERS) or (
+            callable(match_fn) and match_fn(user_msg, polarity="pos", user_id=user_id)
         )
-        exp_neg = _contains_any(low, NEG_MARKERS) or self.lex.match(
-            user_msg, polarity="neg", user_id=user_id
+        exp_neg = _contains_any(low, NEG_MARKERS) or (
+            callable(match_fn) and match_fn(user_msg, polarity="neg", user_id=user_id)
         )
         explicit = 0.5
         if exp_pos and not exp_neg:
@@ -227,15 +232,17 @@ class SocialCritic:
         confidence = clamp(max(self.cfg.get("min_confidence", 0.15), support), 0.0, 1.0)
 
         # apprentissage du lexique (pas binaire — reward et confidence pondèrent)
-        try:
-            self.lex.observe_message(
-                user_msg,
-                reward01=reward,
-                confidence=confidence,
-                user_id=user_id,
-            )
-        except Exception:
-            pass
+        observe_fn = getattr(self.lex, "observe_message", None)
+        if callable(observe_fn):
+            try:
+                observe_fn(
+                    user_msg,
+                    reward01=reward,
+                    confidence=confidence,
+                    user_id=user_id,
+                )
+            except Exception:
+                pass
 
         return {
             "reduced_uncertainty": reduced_unc,
