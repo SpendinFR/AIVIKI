@@ -42,5 +42,49 @@ class JSONLLogger:
         return out
 
     def rotate(self, keep_last: int = 5) -> None:
+        if keep_last is not None and keep_last < 0:
+            raise ValueError("keep_last doit être >= 0")
+
         # basique: ne supprime rien par défaut
-        pass
+        if not os.path.exists(self.path):
+            return
+
+        directory = os.path.dirname(self.path) or "."
+        basename = os.path.basename(self.path)
+        timestamp = int(time.time())
+        rotated_path = os.path.join(directory, f"{basename}.{timestamp}")
+
+        with self._lock:
+            if not os.path.exists(self.path):
+                return
+
+            # éviter collisions si plusieurs rotations dans la même seconde
+            suffix = 0
+            candidate = rotated_path
+            while os.path.exists(candidate):
+                suffix += 1
+                candidate = os.path.join(directory, f"{basename}.{timestamp}.{suffix}")
+            os.replace(self.path, candidate)
+
+            # créer un nouveau fichier vide pour le log courant
+            open(self.path, "a", encoding="utf-8").close()
+
+            if keep_last is None:
+                return
+
+            # supprimer les plus anciens fichiers archivés au-delà de la limite
+            entries = []
+            for name in os.listdir(directory):
+                if name == basename:
+                    continue
+                if name.startswith(f"{basename}."):
+                    full_path = os.path.join(directory, name)
+                    entries.append((os.path.getmtime(full_path), full_path))
+
+            entries.sort(reverse=True)
+            for _, path in entries[keep_last:]:
+                try:
+                    os.remove(path)
+                except OSError:
+                    # ne pas interrompre la rotation si suppression impossible
+                    pass

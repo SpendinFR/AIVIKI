@@ -18,7 +18,9 @@ class ReasoningStrategy:
           "time": float
         }
         """
-        raise NotImplementedError
+        raise NotImplementedError(
+            "ReasoningStrategy.apply doit être implémentée par les sous-classes"
+        )
 
 
 # ---------- 1) Décomposition (sous-problèmes) ----------
