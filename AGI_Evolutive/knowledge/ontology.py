@@ -10,7 +10,13 @@ from AGI_Evolutive.beliefs.ontology import Ontology as _BeliefOntology
 
 
 class Ontology(_BeliefOntology):
-    """Thin wrapper that defaults to the richer belief ontology."""
+    """
+    Thin wrapper re-exporting the belief ontology for the knowledge layer.
+
+    Il fournit un constructeur sans argument qui clone les types par
+    défaut afin d'éviter les effets de bord lorsque l'on manipule
+    l'ontologie côté *knowledge* sans toucher aux structures de croyances.
+    """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__()
@@ -22,7 +28,13 @@ class Ontology(_BeliefOntology):
 
 
 class EntityLinker(_BeliefEntityLinker):
-    """Entity linker aware of the ontology and the belief graph."""
+    """
+    Entity linker aware of the ontology and the belief graph.
+
+    Cette façade enrichit :class:`AGI_Evolutive.beliefs.entity_linker.EntityLinker`
+    avec l'accès à une ontologie et – optionnellement – au graphe de
+    croyances pour pré-remplir la table d'alias.
+    """
 
     def __init__(
         self,

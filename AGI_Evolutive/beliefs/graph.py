@@ -10,6 +10,14 @@ from .entity_linker import EntityLinker
 
 @dataclass
 class Evidence:
+    """
+    Trace factuelle stockée avec une croyance.
+
+    Les justifications manipulées ici sont persistées dans le graphe de
+    croyances.  Elles sont plus riches (id, source, snippet, poids) que
+    les "evidence" du module ``reasoning.structures`` qui ne servent qu'à
+    journaliser une session d'inférence.
+    """
     id: str
     kind: str                # "observation" | "dialog" | "memory" | "file" | "reasoning"
     source: str              # libre: "user", "inbox:<file>", "self", ...

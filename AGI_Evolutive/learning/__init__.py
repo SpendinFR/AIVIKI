@@ -524,7 +524,12 @@ class ReinforcementLearning:
 class CuriosityEngine:
     """
     Génère des récompenses intrinsèques basées sur la nouveauté et l'imprévu.
-    Peut stimuler la recherche d'information et l'auto-questionnement.
+
+    Ce moteur appartient au package ``learning`` : il renvoie un score
+    scalaire que les autres modules peuvent utiliser pour ajuster la
+    motivation ou la vitesse d'apprentissage.  Il ne crée pas de nouveaux
+    objectifs ; cette responsabilité est assurée par
+    :class:`AGI_Evolutive.goals.curiosity.CuriosityEngine`.
     """
     def __init__(self, cognitive_architecture: Any = None):
         self.cognitive_architecture = cognitive_architecture

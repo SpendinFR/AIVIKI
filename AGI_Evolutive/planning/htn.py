@@ -8,7 +8,13 @@ from AGI_Evolutive.reasoning.structures import HTNPlanner as _BasePlanner
 
 
 class HTNPlanner(_BasePlanner):
-    """Small extension that records planning context for calibration."""
+    """
+    Small extension of :class:`AGI_Evolutive.reasoning.structures.HTNPlanner`.
+
+    Elle relie le planner abstrait à la couche *planning* en injectant des
+    métriques issues du graphe de croyances/ontologie dans le contexte de
+    planification.
+    """
 
     def __init__(self, beliefs: Any, ontology: Any) -> None:
         super().__init__()

@@ -9,6 +9,16 @@ def _fmt_date(ts: float) -> str:
         return "?"
 
 class ContextBuilder:
+    """Build a conversational snapshot from the memory buffers.
+
+    The conversation module uses this builder to feed UI/prompts with
+    recent exchanges, salient milestones and lightweight user style
+    heuristics.  It deliberately focuses on human-facing summaries and is
+    distinct from the rule-engine context builder located in
+    :mod:`AGI_Evolutive.social.interaction_rule`, which prepares symbolic
+    predicates for social tactics selection.
+    """
+
     def __init__(self, arch):
         self.arch = arch
         self.mem = arch.memory

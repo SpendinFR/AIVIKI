@@ -9,6 +9,13 @@ from typing import Any, Dict, Iterable, List, Optional
 
 @dataclass
 class Hypothesis:
+    """Lightweight hypothesis used during reasoning sessions.
+
+    Elle représente un candidat explicatif manipulé par les moteurs de
+    raisonnement.  Contrairement à ``beliefs.graph.Hypothesis`` (qui n'existe
+    pas) ou aux structures de croyances persistantes, ces instances sont
+    éphémères et destinées à être sérialisées dans des journaux d'épisode.
+    """
     content: str
     prior: float = 0.5
 
@@ -34,6 +41,12 @@ class Test:
 
 @dataclass
 class Evidence:
+    """Qualitative evidence note kept for reasoning audit trails.
+
+    Cette forme réduite (texte + confiance) documente les étapes d'un
+    raisonnement.  Les objets plus détaillés destinés à la mémoire long
+    terme vivent dans :mod:`AGI_Evolutive.beliefs.graph`.
+    """
     notes: str
     confidence: float = 0.5
 
@@ -252,7 +265,12 @@ class TaskNode:
 
 
 class HTNPlanner:
-    """Minimal hierarchical task network planner."""
+    """Minimal hierarchical task network planner.
+
+    Le module :mod:`AGI_Evolutive.planning.htn` en fournit une extension
+    concrète connectée aux croyances/ontologie.  Cette implémentation-ci
+    reste purement algorithmique pour éviter les dépendances croisées.
+    """
 
     def __init__(self) -> None:
         self._templates: Dict[str, TaskNode] = {}

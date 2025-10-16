@@ -20,6 +20,14 @@ def _normalize(text: str) -> str:
 
 
 class SemanticUnderstanding:
+    """
+    Variante orientée dialogue avec suivi d'état et self-ask.
+
+    Elle suppose la présence des sous-modules ``dialogue_state`` et
+    ``frames`` et complète l'implémentation monolithique disponible via
+    ``language.__init__`` en ajoutant la génération de questions et un
+    suivi fin de l'incertitude.
+    """
     def __init__(self, architecture=None, memory=None, intent_model=None, **_ignored):
         self.arch = architecture
         self.memory = memory

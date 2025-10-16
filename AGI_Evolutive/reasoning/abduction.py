@@ -11,6 +11,12 @@ if TYPE_CHECKING:  # pragma: no cover - typing helper
 
 @dataclass
 class Hypothesis:
+    """Abductive hypothesis enriched with scoring metadata.
+
+    Utilisé uniquement par le moteur d'abduction : il prolonge la
+    structure simple définie dans ``reasoning.structures`` avec des champs
+    supplémentaires (priors, causal_support, plan, etc.).
+    """
     label: str
     explanation: str
     score: float

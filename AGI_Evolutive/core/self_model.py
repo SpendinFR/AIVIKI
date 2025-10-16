@@ -22,7 +22,12 @@ _DEFAULT_SELF: Dict[str, Any] = {
 
 
 class SelfModel:
-    """Persisted representation of the system identity/persona."""
+    """Persisted representation of the system identity/persona.
+
+    Ce modèle longue durée s'occupe de la fiche d'identité, des valeurs et
+    de l'historique sauvegardé.  Il est distinct du
+    ``metacognition.SelfModel`` qui capture des auto-évaluations volatiles.
+    """
 
     def __init__(self) -> None:
         conf = cfg()

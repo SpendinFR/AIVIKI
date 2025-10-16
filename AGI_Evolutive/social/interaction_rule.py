@@ -284,8 +284,12 @@ class InteractionRule:
 # ---------- Contexte de décision : builder depuis l’architecture ----------
 class ContextBuilder:
     """
-    Construit un contexte symbolique exploitable par les Predicate.test()
-    en allant puiser dans l’architecture sans dépendre fortement de l’implémentation.
+    Construit un contexte symbolique exploitable par les ``Predicate.test``.
+
+    Ici on prépare un dictionnaire compact dédié au moteur de règles
+    sociales (actes de dialogue, polarité, risques, persona…).  Il ne faut
+    pas le confondre avec :class:`AGI_Evolutive.conversation.context.ContextBuilder`
+    qui, lui, assemble un résumé narratif pour l'interface de conversation.
     """
     @staticmethod
     def build(arch, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
