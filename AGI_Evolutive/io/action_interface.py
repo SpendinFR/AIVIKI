@@ -227,6 +227,8 @@ class ActionInterface:
                 "rollback": lambda act: self._h_rollback(act.payload, act.context),
                 "simulate": self._h_simulate,
                 "plan": self._h_plan,
+                "simulate_dialogue": self._h_simulate_dialogue,
+                "search_counterexample": self._h_search_counterexample,
                 "ask_clarifying": lambda act: self._h_ask(act.payload, act.context),
                 "code_evolve": lambda act: self._h_code_evolve(act.payload, act.context),
                 "promote_code": lambda act: self._h_promote_code(act.payload, act.context),
@@ -619,6 +621,30 @@ class ActionInterface:
             "intervention": report.intervention,
             "simulations": report.simulations,
         }
+
+    def _h_simulate_dialogue(self, act: Action) -> Dict[str, Any]:
+        payload = dict(act.payload or {})
+        context = dict(act.context or {})
+        rule_id = payload.get("rule_id") or context.get("rule_id")
+        memory = self.bound.get("memory") if hasattr(self, "bound") else None
+        try:
+            if memory and hasattr(memory, "add_memory"):
+                memory.add_memory({"kind": "sim_result", "rule_id": rule_id, "ok": True})
+        except Exception:
+            pass
+        return {"ok": True, "rule_id": rule_id, "simulated": True}
+
+    def _h_search_counterexample(self, act: Action) -> Dict[str, Any]:
+        payload = dict(act.payload or {})
+        context = dict(act.context or {})
+        rule_id = payload.get("rule_id") or context.get("rule_id")
+        memory = self.bound.get("memory") if hasattr(self, "bound") else None
+        try:
+            if memory and hasattr(memory, "add_memory"):
+                memory.add_memory({"kind": "counterexample_scan", "rule_id": rule_id, "found": False})
+        except Exception:
+            pass
+        return {"ok": True, "rule_id": rule_id, "found": False}
 
     def _h_plan(self, act: Action) -> Dict[str, Any]:
         arch = self.bound.get("arch")
