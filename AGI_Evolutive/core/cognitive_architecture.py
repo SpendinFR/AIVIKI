@@ -1238,6 +1238,31 @@ class CognitiveArchitecture:
         except Exception as e:
             out["errors"].append(f"voice_event:{e}")
 
+        try:
+            if not getattr(self, "concept_recognizer", None):
+                from AGI_Evolutive.knowledge.concept_recognizer import ConceptRecognizer
+                self.concept_recognizer = ConceptRecognizer(self)
+            mem = getattr(self, "memory", None)
+            ev = {}
+            if mem and hasattr(mem, "find_recent"):
+                ev = mem.find_recent(kind="concept_candidate", since_sec=3600 * 24, where={"label": concept_norm}) or {}
+            evidence_payload = {}
+            if isinstance(ev, dict):
+                evidence_payload = ev.get("evidence", {}) or {}
+            elif isinstance(ev, list) and ev:
+                first = ev[0]
+                if isinstance(first, dict):
+                    evidence_payload = first.get("evidence", {}) or {}
+            if getattr(self, "concept_recognizer", None):
+                self.concept_recognizer.learn_from_confirmation(
+                    kind="concept",
+                    label=concept_norm,
+                    evidence=evidence_payload,
+                    reward=0.85,
+                )
+        except Exception:
+            pass
+
         out["duration_s"] = round(time.time() - t0, 3)
         # Si on a rencontré des erreurs non critiques, on reste ok=True mais on les remonte
         return out
