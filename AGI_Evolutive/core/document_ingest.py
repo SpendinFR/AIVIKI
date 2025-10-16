@@ -9,6 +9,8 @@ DocumentIngest: intègre les documents de ./inbox dans la mémoire.
 import os, json, time, glob, hashlib
 from typing import Dict, Any
 
+from AGI_Evolutive.knowledge.concept_recognizer import ConceptRecognizer
+
 def _hash(s: str) -> str:
     import hashlib
     return hashlib.sha1(s.encode("utf-8", errors="ignore")).hexdigest()
@@ -78,6 +80,23 @@ class DocumentIngest:
                     # fallback: stocker sur une clé 'EPISODIC'
                     LTM.setdefault("EPISODIC", {})[key] = trace
                 mem.memory_metadata["total_memories"] = mem.memory_metadata.get("total_memories", 0) + 1
+            except Exception:
+                pass
+
+            # --- DÉTECTION DE CONCEPTS, TERMES, STYLES ---
+            try:
+                arch = self.arch
+                if not getattr(arch, "concept_recognizer", None):
+                    arch.concept_recognizer = ConceptRecognizer(arch)
+                dialog_hints = {}
+                try:
+                    hints = arch.memory.find_recent(kind="dialog_hints", since_sec=3600)
+                    dialog_hints = hints or {}
+                except Exception:
+                    dialog_hints = {}
+                items = arch.concept_recognizer.extract_candidates(content, dialog_hints=dialog_hints)
+                arch.concept_recognizer.commit_candidates_to_memory(source=f"inbox:{name}", items=items, arch=arch)
+                arch.concept_recognizer.autogoals_for_high_confidence(items, arch=arch)
             except Exception:
                 pass
 
