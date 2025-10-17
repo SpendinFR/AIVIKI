@@ -51,6 +51,7 @@ class ActionInterface:
             "metacog": None,
             "emotions": None,
             "language": None,
+            "jobs": None,
         }
 
         self.queue: List[Action] = []
@@ -68,9 +69,12 @@ class ActionInterface:
         metacog: Any = None,
         emotions: Any = None,
         language: Any = None,
+        jobs: Any = None,
     ) -> None:
         if memory is not None:
             self.bound["memory"] = memory
+        if jobs is not None:
+            self.bound["jobs"] = jobs
         self.bound.update(
             {
                 "arch": arch,
@@ -135,6 +139,50 @@ class ActionInterface:
         except Exception:
             pass
         return None
+
+    def _maybe_offload(self, act, handler):
+        """
+        Si un JobManager est dispo et que l'action est lourde, on l'envoie en background.
+        On retourne un dict minimal de "submission".
+        """
+        jm = self.bound.get("jobs")
+        if not jm:
+            return None
+
+        heavy = {
+            "simulate_dialogue": ("compute", "background", 0.60),
+            "search_counterexample": ("compute", "background", 0.65),
+            "consolidate_recent": ("io", "background", 0.55),
+            "validate_rules": ("compute", "background", 0.55),
+            "harvest_candidates": ("compute", "background", 0.50),
+            "backup_snapshot": ("io", "background", 0.40),
+            "code_evolve": ("compute", "background", 0.70),
+        }
+        spec = heavy.get(act.type)
+        if not spec:
+            return None
+
+        kind, lane, prio = spec
+
+        # Closure sûre : exécuter le handler dans le worker
+        def _runner(ctx, args):
+            # Le handler retourne un dict ; on peut mettre à jour le progrès si besoin :
+            # ctx.update_progress(0.5)  # exemple
+            res = handler(act)  # handler lit self.bound[...] (thread-safe si tes sous-systèmes supportent la lecture)
+            return res
+
+        key = f"{act.type}:{hash(json.dumps({'p': act.payload, 'c': act.context}, sort_keys=True))}"
+        jid = jm.submit(
+            kind=kind,
+            fn=_runner,
+            args={},
+            queue=lane,
+            priority=prio,
+            key=key,
+            timeout_s=None,
+        )
+        # trace en mémoire (thread principal via drain)
+        return {"ok": True, "offloaded": True, "job_id": jid, "queue": lane}
 
     def step(self) -> None:
         emo = self.bound.get("emotions")
@@ -236,6 +284,31 @@ class ActionInterface:
                 "rotate_curriculum": lambda act: self._h_rotate_curriculum(act.payload, act.context),
             }
             handler = handlers.get(act.type, self._h_simulate)
+
+            # offload si possible
+            off = self._maybe_offload(act, handler)
+            if off is not None:
+                act.status = "done"
+                # on loggue une trace "submitted"
+                try:
+                    mem = self.bound.get("memory")
+                    if mem and hasattr(mem, "add_memory"):
+                        mem.add_memory(
+                            {
+                                "kind": "job_submitted",
+                                "content": act.type,
+                                "metadata": {
+                                    "job_id": off.get("job_id"),
+                                    "queue": off.get("queue"),
+                                    "priority": act.priority,
+                                },
+                            }
+                        )
+                except Exception:
+                    pass
+                # cool-down minimal pour éviter un spin
+                time.sleep(self.cooldown_s)
+                return
 
             act.status = "running"
             try:

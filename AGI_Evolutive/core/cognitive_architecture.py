@@ -36,12 +36,14 @@ from AGI_Evolutive.reasoning.question_engine import QuestionEngine
 from AGI_Evolutive.runtime.logger import JSONLLogger
 from AGI_Evolutive.runtime.response import ensure_contract, format_agent_reply
 from AGI_Evolutive.runtime.scheduler import Scheduler
+from AGI_Evolutive.runtime.job_manager import JobManager
 from AGI_Evolutive.world_model import PhysicsEngine
 from AGI_Evolutive.self_improver import SelfImprover
 from AGI_Evolutive.self_improver.code_evolver import CodeEvolver
 from AGI_Evolutive.self_improver.promote import PromotionManager
 from AGI_Evolutive.planning.htn import HTNPlanner
 from AGI_Evolutive.core.persistence import PersistenceManager
+from AGI_Evolutive.core.config import cfg
 
 
 class CognitiveArchitecture:
@@ -290,6 +292,13 @@ class CognitiveArchitecture:
             self.persistence = PersistenceManager(self)
         self.logger.persistence = self.persistence
 
+        # Job manager for background/offloaded actions
+        try:
+            data_dir = cfg().get("DATA_DIR", "data")
+        except Exception:
+            data_dir = "data"
+        self.jobs = JobManager(self, data_dir=data_dir)
+
         # Bind helper components
         self._bind_interfaces()
         self._bind_extractors()
@@ -328,6 +337,7 @@ class CognitiveArchitecture:
             metacog=self.metacognition,
             emotions=self.emotions,
             language=self.language,
+            jobs=self.jobs,
         )
         self.perception_interface.bind(
             arch=self,
@@ -1136,6 +1146,12 @@ class CognitiveArchitecture:
             pass
 
     def _tick_background_systems(self) -> None:
+        try:
+            if getattr(self, "jobs", None):
+                self.jobs.drain_to_memory(self.memory)
+        except Exception:
+            pass
+
         try:
             if self.perception_interface:
                 self.perception_interface.step()
