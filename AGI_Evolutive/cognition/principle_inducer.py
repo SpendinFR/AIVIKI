@@ -141,3 +141,15 @@ class PrincipleInducer:
         except Exception:
             # En dernier recours: ne rien faire (pas de promotion silencieuse)
             return
+
+    def run(self, recent_docs, recent_dialogues, metrics_snapshot: Dict[str, Any]):
+        try:
+            from AGI_Evolutive.social.interaction_miner import InteractionMiner
+
+            miner = InteractionMiner()
+            patterns = miner.extract_normative_patterns(recent_docs, recent_dialogues)
+            candidates = self.induce_from_patterns(patterns)
+            candidates = self.prefilter(candidates, history_stats=metrics_snapshot or {})
+            self.submit_for_evaluation(candidates)
+        except Exception:
+            pass
