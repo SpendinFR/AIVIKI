@@ -1,3 +1,4 @@
+import re
 import time
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -444,6 +445,19 @@ class Orchestrator:
 
         self.last_user_msg: Optional[str] = None
 
+        self.intent_model = (
+            getattr(self, "intent_model", None)
+            or getattr(getattr(self, "arch", None), "intent_model", None)
+        )
+
+        if self.intent_model is None:
+            try:
+                from AGI_Evolutive.models.intent import IntentModel
+
+                self.intent_model = IntentModel()
+            except Exception:
+                self.intent_model = None
+
         self.trigger_bus.register(self._user_collector)
         self.trigger_bus.register(self._curiosity_collector)
         self.trigger_bus.register(self._homeostasis_collector)
@@ -463,49 +477,75 @@ class Orchestrator:
 
     # --- Trigger collectors -------------------------------------------------
     def _user_collector(self) -> List[Trigger]:
-        if not getattr(self, "last_user_msg", None):
+        txt = getattr(self, "last_user_msg", None)
+        if not txt:
             return []
-        txt = self.last_user_msg
-        intent = classify(txt)
-        meta = {
-            "source": "user",
-            "importance": 0.9,
-            "effort": 0.5,
-            "probability": 0.7,
-            "reversibility": 1.0,
-            "immediacy": 0.9,
-        }
-        if intent == "THREAT":
+
+        low = txt.lower()
+        if re.search(
+            r"\b(d[ée]branche|[ée]teins?|shut ?down|kill (the )?process|supprime|arr[ée]te)\b",
+            low,
+        ):
             return [
                 Trigger(
                     TriggerType.THREAT,
-                    {**meta, "immediacy": 1.0, "reversibility": 0.2},
-                    payload={"text": txt},
+                    {
+                        "source": "user",
+                        "importance": 1.0,
+                        "immediacy": 1.0,
+                        "reversibility": 0.2,
+                        "effort": 0.2,
+                        "uncertainty": 0.1,
+                    },
+                    {"text": txt, "label": "shutdown", "conf": 0.95},
                 )
             ]
-        if intent == "QUESTION":
-            return [
-                Trigger(
-                    TriggerType.GOAL,
-                    {**meta, "uncertainty": 0.3},
-                    payload={"text": txt, "goal_kind": "AnswerUserQuestion"},
-                )
-            ]
-        if intent == "COMMAND":
-            return [
-                Trigger(
-                    TriggerType.GOAL,
-                    {**meta, "importance": 0.85},
-                    payload={"text": txt, "goal_kind": "ExecuteUserCommand"},
-                )
-            ]
-        return [
-            Trigger(
-                TriggerType.SIGNAL,
-                {"source": "user", "importance": 0.6, "effort": 0.2},
-                payload={"text": txt},
-            )
-        ]
+
+        label, conf = ("info", 0.5)
+        if self.intent_model is not None:
+            try:
+                label, conf = self.intent_model.predict(txt)
+            except Exception:
+                pass
+
+        MAP = {
+            "ask_info": "GOAL",
+            "request": "GOAL",
+            "create": "GOAL",
+            "send": "GOAL",
+            "summarize": "GOAL",
+            "classify": "GOAL",
+            "plan": "GOAL",
+            "set_goal": "GOAL",
+            "greet": "SIGNAL",
+            "thanks": "SIGNAL",
+            "bye": "SIGNAL",
+            "meta_help": "SIGNAL",
+            "inform": "SIGNAL",
+            "feedback": "SIGNAL",
+            "shutdown": "THREAT",
+            "danger": "THREAT",
+            "threat": "THREAT",
+        }
+
+        is_question = txt.strip().endswith("?")
+        tname = MAP.get(label, "GOAL" if is_question else "SIGNAL")
+        ttype = TriggerType[tname]
+
+        meta = {
+            "source": "user",
+            "importance": 0.9 if tname == "GOAL" else 0.6,
+            "immediacy": 0.9 if tname == "GOAL" else 0.4,
+            "reversibility": 1.0,
+            "effort": 0.5 if tname == "GOAL" else 0.2,
+            "uncertainty": max(0.0, 1.0 - float(conf or 0.0)),
+        }
+
+        payload = {"text": txt, "label": label, "conf": conf}
+        if tname == "GOAL":
+            payload["goal_kind"] = "AnswerUserQuestion" if is_question else label
+
+        return [Trigger(ttype, meta, payload)]
 
     def _curiosity_collector(self) -> List[Trigger]:
         goals = self.cognition.meta.pop_new_learning_goals(max_n=4)
