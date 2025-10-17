@@ -26,7 +26,7 @@ class NLGContext:
 
     # --- API utilisée par les handlers ---
     def mark_applied(self, bid: Bid) -> None:
-        entry = {"origin": bid.origin_tag(), "hint": bid.action_hint}
+        entry = {"origin": bid.source, "hint": bid.action_hint}
         if entry not in self._applied:
             self._applied.append(entry)
 

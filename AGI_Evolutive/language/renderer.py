@@ -67,6 +67,11 @@ class LanguageRenderer:
         }
 
     # ---------- utilitaires ----------
+    def apply_action_hint(self, text: str, hint: str) -> str:
+        """Expose l'utilitaire d'application d'hints MAI pour d'autres pipelines."""
+
+        return _apply_action_hint(text, hint)
+
     def _confidence(self) -> float:
         # essaie d’extraire une confiance globale depuis la policy
         try:

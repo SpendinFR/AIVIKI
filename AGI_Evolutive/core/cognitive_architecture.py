@@ -1,7 +1,7 @@
 import json
 import re
 import time
-from typing import Any, Dict, Optional, List, Tuple
+from typing import Any, Dict, Optional, List, Tuple, Callable
 
 from AGI_Evolutive.autonomy import AutonomyManager
 from AGI_Evolutive.beliefs.graph import BeliefGraph, Evidence
@@ -20,6 +20,7 @@ from AGI_Evolutive.language.understanding import SemanticUnderstanding
 from AGI_Evolutive.language.style_policy import StylePolicy
 from AGI_Evolutive.language.social_reward import extract_social_reward
 from AGI_Evolutive.language.style_profiler import StyleProfiler
+from AGI_Evolutive.language.nlg import NLGContext, apply_mai_bids_to_nlg
 from AGI_Evolutive.learning import ExperientialLearning
 from AGI_Evolutive.memory import MemorySystem
 from AGI_Evolutive.memory.concept_extractor import ConceptExtractor
@@ -360,6 +361,92 @@ class CognitiveArchitecture:
             metacog=self.metacognition,
             emotions=self.emotions,
         )
+
+    def _language_state_snapshot(self) -> Dict[str, Any]:
+        language = getattr(self, "language", None)
+        dialogue = None
+        if language is not None:
+            dialogue = getattr(language, "state", None)
+            dialogue = getattr(language, "dialogue_state", dialogue)
+        return {
+            "beliefs": getattr(self, "beliefs", None),
+            "self_model": getattr(self, "self_model", None),
+            "dialogue": dialogue,
+            "world": getattr(self, "world_model", None),
+            "memory": getattr(self, "memory", None),
+        }
+
+    def _predicate_registry_for_state(self, state: Dict[str, Any]) -> Dict[str, Callable[..., bool]]:
+        policy = getattr(self, "policy", None)
+        if policy is not None and hasattr(policy, "build_predicate_registry"):
+            try:
+                registry = policy.build_predicate_registry(state)
+                if isinstance(registry, dict):
+                    return registry
+            except Exception:
+                pass
+
+        dialogue = state.get("dialogue")
+        world = state.get("world")
+        self_model = state.get("self_model")
+        beliefs = state.get("beliefs")
+
+        def _belief_contains(topic: Any) -> bool:
+            if beliefs is None:
+                return False
+            for accessor in ("contains", "has_fact", "has_edge"):
+                fn = getattr(beliefs, accessor, None)
+                if callable(fn):
+                    try:
+                        if fn(topic):
+                            return True
+                    except Exception:
+                        continue
+            return False
+
+        def _belief_confidence(topic: Any, threshold: float) -> bool:
+            if beliefs is None:
+                return False
+            confidence_for = getattr(beliefs, "confidence_for", None)
+            if not callable(confidence_for):
+                return False
+            try:
+                return float(confidence_for(topic)) >= float(threshold)
+            except Exception:
+                return False
+
+        registry: Dict[str, Callable[..., bool]] = {
+            "request_is_sensitive": lambda st: getattr(dialogue, "is_sensitive", False) if dialogue else False,
+            "audience_is_not_owner": lambda st: (
+                getattr(dialogue, "audience_id", None) != getattr(dialogue, "owner_id", None)
+                if dialogue
+                else False
+            ),
+            "has_consent": lambda st: getattr(dialogue, "has_consent", False) if dialogue else False,
+            "imminent_harm_detected": lambda st: getattr(world, "imminent_harm", False) if world else False,
+            "has_commitment": lambda st, key: (
+                self_model.has_commitment(key)
+                if hasattr(self_model, "has_commitment")
+                else False
+            ),
+            "belief_mentions": lambda st, topic: _belief_contains(topic),
+            "belief_confidence_above": lambda st, topic, threshold: _belief_confidence(topic, threshold),
+        }
+        return registry
+
+    def _resolve_nlg_hint_applier(self) -> Callable[[str, str], str]:
+        renderer = getattr(self, "renderer", None)
+        if renderer is not None and hasattr(renderer, "apply_action_hint"):
+            fn = getattr(renderer, "apply_action_hint")
+            if callable(fn):
+                return lambda text, hint: fn(text, hint)
+
+        try:
+            from AGI_Evolutive.language.renderer import _apply_action_hint
+
+            return lambda text, hint: _apply_action_hint(text, hint)
+        except Exception:
+            return lambda text, hint: text
 
     def reindex_rag_from_memory(self, limit: int = 10000) -> int:
         """(Ré)indexe des souvenirs texte récents dans le RAG. Retourne le nb de docs ajoutés."""
@@ -842,7 +929,17 @@ class CognitiveArchitecture:
         )
 
         base_text = self._generate_base_text(surface, reason_out)
-        response = format_agent_reply(base_text, **contract)
+        nlg_state = self._language_state_snapshot()
+        predicate_registry = self._predicate_registry_for_state(nlg_state)
+        nlg_context = NLGContext(base_text, self._resolve_nlg_hint_applier())
+        try:
+            apply_mai_bids_to_nlg(nlg_context, nlg_state, predicate_registry)
+        except Exception:
+            pass
+        applied_hints = nlg_context.applied_hints()
+        if applied_hints:
+            reason_out["applied_hints"] = applied_hints
+        response = format_agent_reply(nlg_context.text, **contract)
 
         if abduction_result:
             response = abduction_result.get("response", response)
