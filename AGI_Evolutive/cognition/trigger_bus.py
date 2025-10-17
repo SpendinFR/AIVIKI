@@ -3,6 +3,8 @@ from dataclasses import dataclass
 import hashlib
 import json
 import time
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional
 
 from AGI_Evolutive.core.trigger_types import Trigger, TriggerType
 from AGI_Evolutive.core.evaluation import unified_priority
@@ -23,10 +25,17 @@ class TriggerBus:
     def __init__(self):
         self.collectors: List[Collector] = []
         self.cooldown_cache: Dict[str, float] = {}  # simple dedup/cooldown
+        self._habit_strength_source: Optional[Any] = None
 
     def register(self, fn: Collector):
         self.collectors.append(fn)
 
+    def set_habit_strength_source(self, source: Any) -> None:
+        """Alimente la force d'habitude via EvolutionManager ou un callable."""
+
+        self._habit_strength_source = source
+
+    def _key(self, t: Trigger) -> str:
     def _payload_fingerprint(self, payload: Any) -> str:
         try:
             serialized = json.dumps(payload, sort_keys=True, default=str)
@@ -59,8 +68,30 @@ class TriggerBus:
         m.setdefault("immediacy", 0.2)
         m.setdefault("habit_strength", 0.0)
         m.setdefault("source", "system")
+        habit_key = m.get("habit_key") or m.get("key")
+        if not habit_key and t.payload and isinstance(t.payload, dict):
+            habit_key = t.payload.get("habit_key") or t.payload.get("id")
+        strength = self._lookup_habit_strength(habit_key) if habit_key else 0.0
+        if strength:
+            m["habit_strength"] = strength
         # emotion influence is applied in scoring (not stored)
         return t
+
+    def _lookup_habit_strength(self, key: Any) -> float:
+        if key is None or self._habit_strength_source is None:
+            return 0.0
+        source = self._habit_strength_source
+        try:
+            if callable(source):
+                return float(source(key))
+            if isinstance(source, dict):
+                return float(source.get(key, 0.0))
+            getter = getattr(source, "get", None)
+            if callable(getter):
+                return float(getter(key, 0.0))
+        except Exception:
+            return 0.0
+        return 0.0
 
     def collect_and_score(self, valence: float = 0.0) -> List[ScoredTrigger]:
         now = time.time()

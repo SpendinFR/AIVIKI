@@ -54,6 +54,13 @@ class PolicyEngine:
         self._mechanisms = MechanismStore()
         self._bandit_selector = _SimpleBanditSelector()
 
+        # Stats légères pour la policy (modes d'action)
+        self.stats = {
+            "success": 0,
+            "fail": 0,
+            "by_mode": {"reflex": 0, "habit": 0, "deliberate": 0},
+        }
+
         # charge si existe (best-effort)
         try:
             if os.path.exists(self._stats_path):
@@ -98,6 +105,14 @@ class PolicyEngine:
             self._stats_save()
         except Exception:
             pass
+        mode = None
+        if isinstance(proposal, dict):
+            mode = proposal.get("mode")
+            if mode is None:
+                meta = proposal.get("meta")
+                if isinstance(meta, dict):
+                    mode = meta.get("mode")
+        self.update_outcome(mode or "", success)
 
     def _wilson_lower_bound(self, s: int, n: int, z: float = 1.96) -> float:
         """Borne inférieure de Wilson (intervalle de confiance) = prudente."""
@@ -434,20 +449,34 @@ class PolicyEngine:
         U = w_survive*U_survive + w_evolve*U_evolve + w_interact*U_interact
         return max(0.0, min(1.0, U))
 
-    def decide(self,
-               proposals: List[Dict[str, Any]],
-               self_state: Optional[Dict[str, Any]] = None,
-               *,
-               proposer=None,
-               homeo=None,
-               planner=None,
-               ctx: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Sélectionne la meilleure proposition + confiance, avec abstention contrôlée."""
+    def decide(
+        self,
+        proposals_or_ctx,
+        self_state: Optional[Dict[str, Any]] = None,
+        *,
+        proposer=None,
+        homeo=None,
+        planner=None,
+        ctx: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Sélectionne la meilleure proposition + confiance, avec abstention contrôlée.
+
+        Compatible avec l'API historique (liste de propositions) et une API contextuelle
+        simplifiée ``decide({"frame": ..., "scratch": ...})`` utilisée par le
+        nouveau pipeline Policy/Planner.
+        """
+
+        if isinstance(proposals_or_ctx, dict) and self_state is None and proposer is None and homeo is None and planner is None and ctx is None:
+            return self._decide_from_ctx(proposals_or_ctx)
+
+        proposals: List[Dict[str, Any]] = list(proposals_or_ctx or [])
         self_state = self_state or {}
         ctx = ctx or {}
         if not proposals:
             self.last_decision = {"decision": "noop", "reason": "no proposals", "confidence": 0.5}
             return self.last_decision
+
+        priority_hint = self._extract_priority(ctx)
 
         scored: List[Tuple[float, Dict[str, Any], Dict[str, Any], Dict[str, Any]]] = []
         for p in proposals:
@@ -461,8 +490,10 @@ class PolicyEngine:
             if gate.get("decision") == "needs_human":
                 conf -= 0.15
             final = max(0.0, min(1.0, conf + bonus))
+            if priority_hint is not None:
+                final = max(0.0, min(1.0, 0.65 * final + 0.35 * priority_hint))
 
-            scored.append((final, p, gate, {"conf": conf, "bonus": bonus}))
+            scored.append((final, p, gate, {"conf": conf, "bonus": bonus, "priority_hint": priority_hint}))
 
         if not scored:
             self.last_decision = {"decision": "noop", "reason": "all denied", "confidence": 0.45}
@@ -503,6 +534,109 @@ class PolicyEngine:
             "meta": meta,
         }
         return self.last_decision
+
+    def _extract_priority(self, ctx: Optional[Dict[str, Any]]) -> Optional[float]:
+        if not isinstance(ctx, dict):
+            return None
+        scratch = ctx.get("scratch") if isinstance(ctx.get("scratch"), dict) else None
+        if scratch is None:
+            return None
+        priority = scratch.get("priority")
+        if isinstance(priority, dict):
+            for key in ("score", "value", "priority", "p"):
+                if key in priority and isinstance(priority[key], (int, float)):
+                    priority = priority[key]
+                    break
+        if isinstance(priority, (int, float)):
+            return max(0.0, min(1.0, float(priority)))
+        return None
+
+    def _decide_from_ctx(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
+        ctx = ctx or {}
+        scratch = ctx.get("scratch") if isinstance(ctx.get("scratch"), dict) else {}
+        priority_hint = self._extract_priority({"scratch": scratch})
+        action = self._compose_action_from_frame_or_goal(ctx)
+        expected_score = priority_hint if priority_hint is not None else 1.0
+        decision: Dict[str, Any] = {
+            "action": action,
+            "expected": {"score": float(max(0.0, min(1.0, expected_score)))},
+        }
+        reason = ctx.get("reason")
+        if reason:
+            decision["reason"] = reason
+        mode = ctx.get("mode") or scratch.get("mode")
+        if mode:
+            decision["mode"] = mode
+        payload = ctx.get("payload")
+        if isinstance(payload, dict) and payload:
+            decision.setdefault("context", {})
+            decision["context"]["payload"] = payload
+        self.last_decision = decision
+        return decision
+
+    def _compose_action_from_frame_or_goal(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
+        payload = ctx.get("payload")
+        if isinstance(payload, dict) and payload.get("type"):
+            return dict(payload)
+
+        action: Dict[str, Any] = {"type": "reflect", "payload": {}}
+        frame = ctx.get("frame")
+        goal = ctx.get("goal")
+
+        if isinstance(goal, dict) and goal:
+            action_type = goal.get("action_type") or goal.get("type") or "plan_goal"
+            action = {
+                "type": action_type,
+                "payload": {
+                    "goal_id": goal.get("id") or goal.get("goal_id"),
+                    "description": goal.get("description") or goal.get("desc"),
+                    "context": goal.get("context"),
+                },
+            }
+
+        elif frame:
+            intent = None
+            text = None
+            if isinstance(frame, dict):
+                intent = frame.get("intent") or frame.get("act")
+                text = frame.get("text") or frame.get("surface_form")
+            else:
+                intent = getattr(frame, "intent", None)
+                text = getattr(frame, "text", None) or getattr(frame, "surface_form", None)
+
+            intent = (intent or "").lower()
+            payload_text = text or ctx.get("reason") or ""
+            mapping = {
+                "ask": "message_user",
+                "request": "message_user",
+                "summarize": "plan",
+                "plan": "plan",
+                "inform": "write_memory",
+                "reflect": "reflect",
+            }
+            action_type = mapping.get(intent, "reflect")
+            if action_type == "message_user":
+                action = {
+                    "type": "message_user",
+                    "payload": {"text": payload_text or "Peux-tu préciser ?"},
+                }
+            elif action_type == "write_memory":
+                action = {
+                    "type": "write_memory",
+                    "payload": {"kind": "note", "text": payload_text},
+                }
+            elif action_type == "plan":
+                action = {
+                    "type": "plan",
+                    "payload": {"frame": frame if isinstance(frame, dict) else getattr(frame, "__dict__", {})},
+                }
+            else:
+                action = {"type": "reflect", "payload": {"focus": payload_text}}
+
+        elif isinstance(ctx.get("reason"), str):
+            action = {"type": "reflect", "payload": {"reason": ctx["reason"]}}
+
+        return action
 
     def decide_with_bids(
         self,
@@ -600,3 +734,12 @@ class PolicyEngine:
 
         self.last_decision = decision_bundle
         return decision_bundle
+
+    def update_outcome(self, mode: str, ok: bool) -> None:
+        mode_key = (mode or "").lower()
+        if ok:
+            self.stats["success"] += 1
+        else:
+            self.stats["fail"] += 1
+        if mode_key in self.stats["by_mode"]:
+            self.stats["by_mode"][mode_key] += 1

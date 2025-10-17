@@ -28,6 +28,8 @@ def _rag_signals(rag_out: Dict[str, Any]) -> Dict[str, float]:
 
 _PLANS = cfg()["PLANS_PATH"]
 
+DEFAULT_STOP_RULES: Dict[str, Any] = {"max_options": 3, "max_seconds": 900}
+
 
 def _get_field(obj: Any, key: str, default: Any = None) -> Any:
     if isinstance(obj, dict):
@@ -140,6 +142,122 @@ class Planner:
                 self._save()
             return plan
 
+    def _normalise_stop_rules(self, stop_rules: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        rules = dict(DEFAULT_STOP_RULES)
+        if isinstance(stop_rules, dict):
+            for key, value in stop_rules.items():
+                if value is None:
+                    continue
+                if isinstance(value, (int, float)):
+                    rules[key] = value
+                else:
+                    rules[key] = value
+        return rules
+
+    def frame(
+        self,
+        goal: Any,
+        stop_rules: Optional[Dict[str, Any]] = None,
+        architecture: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """Construit un cadre de planification pour un goal donné.
+
+        Le ``goal`` peut être un ``GoalNode``, un dict ou simplement un identifiant.
+        ``stop_rules`` est merge avec :data:`DEFAULT_STOP_RULES`.
+        """
+
+        rules = self._normalise_stop_rules(stop_rules)
+        goal_id: Optional[str] = None
+        description: Optional[str] = None
+        context: Dict[str, Any] = {}
+
+        if isinstance(goal, dict):
+            goal_id = goal.get("id") or goal.get("goal_id") or goal.get("name")
+            description = goal.get("description") or goal.get("desc")
+            context = dict(goal.get("context", {})) if isinstance(goal.get("context"), dict) else {}
+        elif hasattr(goal, "id"):
+            goal_id = getattr(goal, "id", None)
+            description = getattr(goal, "description", None)
+        elif isinstance(goal, str):
+            goal_id = goal
+
+        plan: Optional[Dict[str, Any]] = None
+        with self._lock:
+            if goal_id:
+                plan = self.state["plans"].get(goal_id)
+        if goal_id and plan is None:
+            desc = description or (goal_id.replace("_", " ") if isinstance(goal_id, str) else "")
+            plan = self.plan_for_goal(goal_id, desc)
+
+        frame: Dict[str, Any] = {
+            "goal_id": goal_id,
+            "description": description or (plan.get("description") if isinstance(plan, dict) else None),
+            "stop_rules": rules,
+        }
+        if context:
+            frame["context"] = context
+        if plan:
+            frame["plan"] = plan
+
+        if architecture is not None:
+            try:
+                rag_bundle = self._maybe_preplan_with_rag(goal, architecture)
+                if isinstance(rag_bundle, dict):
+                    signals = rag_bundle.get("rag_signals") or {}
+                    if signals:
+                        frame.setdefault("signals", {}).update(signals)
+                    grounded = rag_bundle.get("grounded_context")
+                    if grounded:
+                        frame.setdefault("context", {})["grounded_evidence"] = grounded
+            except Exception:
+                pass
+
+        return frame
+
+    def _infer_action_type(self, desc: str) -> str:
+        text = (desc or "").lower()
+        if any(token in text for token in ("question", "ask", "demande", "poser")):
+            return "message_user"
+        if any(token in text for token in ("observer", "observe", "regarder")):
+            return "simulate"
+        if any(token in text for token in ("écrire", "note", "consigner", "journaliser")):
+            return "write_memory"
+        if any(token in text for token in ("plan", "structurer", "organiser")):
+            return "plan"
+        if any(token in text for token in ("analyser", "analyze", "analyser")):
+            return "reflect"
+        return "reflect"
+
+    def _step_to_action(self, goal_id: str, step: Dict[str, Any]) -> Dict[str, Any]:
+        desc = step.get("desc", "")
+        action_spec = step.get("action") if isinstance(step.get("action"), dict) else {}
+        payload = dict(action_spec.get("payload", {}))
+        payload.setdefault("goal_id", goal_id)
+        payload.setdefault("step_id", step.get("id"))
+        if "context" in step and isinstance(step["context"], dict):
+            payload.setdefault("context", step["context"])
+
+        act_type = action_spec.get("type") or step.get("type") or self._infer_action_type(desc)
+        action = {
+            "type": act_type,
+            "payload": payload,
+        }
+        if "mode" in action_spec:
+            action["mode"] = action_spec["mode"]
+
+        priority = step.get("priority")
+        if not isinstance(priority, (int, float)):
+            priority = payload.get("priority", 0.5)
+
+        return {
+            "id": step.get("id"),
+            "goal_id": goal_id,
+            "desc": desc,
+            "status": step.get("status", "doing"),
+            "priority": float(priority) if isinstance(priority, (int, float)) else 0.5,
+            "action": action,
+        }
+
     def plan(self, frame: Any, architecture: Optional[Any] = None) -> Dict[str, Any]:
         if architecture is not None:
             self.architecture = architecture
@@ -187,8 +305,10 @@ class Planner:
             for step in plan["steps"]:
                 if step["status"] == "todo":
                     step["status"] = "doing"
+                    step["last_emitted_at"] = time.time()
+                    action = self._step_to_action(goal_id, step)
                     self._save()
-                    return step
+                    return action
             return None
 
     def mark_action_done(self, goal_id: str, step_id: str, success: bool = True):
