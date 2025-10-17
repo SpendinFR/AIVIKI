@@ -22,9 +22,10 @@ import os
 import threading
 import time
 import traceback
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, List
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.core.global_workspace import GlobalWorkspace
 
 
 def _now() -> float:
@@ -51,6 +52,9 @@ def _append_jsonl(path: str, obj: Dict[str, Any]):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(json_sanitize(obj), ensure_ascii=False) + "\n")
+
+
+EVOLUTION_PERIOD = 12
 
 
 class Scheduler:
@@ -88,6 +92,49 @@ class Scheduler:
         # registre des tâches (nom -> dict)
         self.tasks: Dict[str, Dict[str, Any]] = {}
         self._register_default_tasks()
+        self._tick_counter = 0
+
+    # ---------- helpers ----------
+    def _build_state_snapshot(self) -> Dict[str, Any]:
+        arch = self.arch
+        language = getattr(arch, "language", None)
+        dialogue = None
+        if language is not None:
+            dialogue = getattr(language, "state", None)
+            dialogue = getattr(language, "dialogue_state", dialogue)
+        world = getattr(arch, "world_model", None)
+        return {
+            "beliefs": getattr(arch, "beliefs", None),
+            "self_model": getattr(arch, "self_model", None),
+            "dialogue": dialogue,
+            "world": world,
+            "memory": getattr(arch, "memory", None),
+        }
+
+    def _render_and_emit(self, decision: Dict[str, Any], state: Dict[str, Any]) -> None:
+        arch = self.arch
+        language = getattr(arch, "language", None)
+        text = decision.get("decision_text") or decision.get("decision") or "noop"
+        if language is not None and hasattr(language, "renderer"):
+            renderer = getattr(language, "renderer", None)
+            if renderer and hasattr(renderer, "render_reply"):
+                try:
+                    semantics = {"text": decision.get("decision_text") or decision.get("decision", ""), "meta": decision}
+                    ctx = {
+                        "last_message": getattr(getattr(language, "state", None), "last_user", ""),
+                        "omitted_content": decision.get("omitted_content", False),
+                        "state_snapshot": state,
+                    }
+                    text = renderer.render_reply(semantics, ctx)
+                except Exception:
+                    text = decision.get("decision_text") or text
+        arch.last_output_text = text
+        logger = getattr(arch, "logger", None)
+        if logger and hasattr(logger, "write"):
+            try:
+                logger.write("gw.decision", decision=decision, rendered=text)
+            except Exception:
+                pass
 
     # ---------- registration ----------
     def register(self, name: str, fn: Callable[[], None], interval_s: float, jitter_s: float = 0.0):
@@ -197,6 +244,29 @@ class Scheduler:
         el = getattr(self.arch, "episodic_linker", None)
         if el and hasattr(el, "step"):
             el.step()
+        gw = getattr(self.arch, "global_workspace", None)
+        policy = getattr(self.arch, "policy", None)
+        if gw is None and policy:
+            gw = GlobalWorkspace(policy=policy, planner=getattr(self.arch, "planner", None))
+            setattr(self.arch, "global_workspace", gw)
+        mechanism_store = getattr(policy, "_mechanisms", None) if policy else None
+        if gw and policy and mechanism_store and hasattr(policy, "build_predicate_registry"):
+            try:
+                state = self._build_state_snapshot()
+                predicate_registry = policy.build_predicate_registry(state)
+                for mai in mechanism_store.scan_applicable(state, predicate_registry):
+                    for bid in mai.propose(state):
+                        try:
+                            gw.submit(bid)
+                        except AttributeError:
+                            gw.submit_bid(
+                                bid.payload.get("origin", "mai"),
+                                bid.action_hint,
+                                max(0.0, min(1.0, bid.expected_info_gain)),
+                                bid.payload,
+                            )
+            except Exception:
+                pass
 
     def _task_planning(self):
         goals = getattr(self.arch, "goals", None)
@@ -210,6 +280,32 @@ class Scheduler:
         if goals and hasattr(goals, "refresh_plans"):
             try:
                 goals.refresh_plans()
+            except Exception:
+                pass
+        gw = getattr(self.arch, "global_workspace", None)
+        policy = getattr(self.arch, "policy", None)
+        if gw is None and policy:
+            gw = GlobalWorkspace(policy=policy, planner=getattr(self.arch, "planner", None))
+            setattr(self.arch, "global_workspace", gw)
+        if gw and policy and hasattr(gw, "step") and hasattr(policy, "decide_with_bids"):
+            try:
+                state = self._build_state_snapshot()
+                gw.step(state, timebox_iters=2)
+                winners = gw.winners()
+            except Exception:
+                winners = []
+                state = self._build_state_snapshot()
+            try:
+                decision = policy.decide_with_bids(
+                    winners,
+                    state,
+                    global_workspace=gw,
+                    proposer=getattr(self.arch, "proposer", None),
+                    homeo=getattr(self.arch, "homeostasis", None) or getattr(self.arch, "emotions", None),
+                    planner=getattr(self.arch, "planner", None),
+                    ctx={"scheduler": True},
+                )
+                self._render_and_emit(decision, state)
             except Exception:
                 pass
 
@@ -238,3 +334,34 @@ class Scheduler:
                 evo.propose_evolution()
             except Exception:
                 pass
+        self._tick_counter += 1
+        if self._tick_counter % EVOLUTION_PERIOD == 0:
+            interaction_miner = getattr(self.arch, "interaction_miner", None)
+            principle_inducer = getattr(self.arch, "principle_inducer", None)
+            metrics = getattr(self.arch, "metrics", None)
+            memory = getattr(self.arch, "memory", None)
+            recent_docs: List[Any] = []
+            recent_dialogues: List[Any] = []
+            if memory and hasattr(memory, "get_recent_memories"):
+                try:
+                    recent_docs = memory.get_recent_memories(n=200)
+                except Exception:
+                    recent_docs = []
+            dialogue_log = getattr(memory, "interactions", None)
+            if dialogue_log and hasattr(dialogue_log, "get_recent"):
+                try:
+                    recent_dialogues = dialogue_log.get_recent(100)
+                except Exception:
+                    recent_dialogues = []
+            if interaction_miner and hasattr(interaction_miner, "extract_normative_patterns") and principle_inducer:
+                try:
+                    patterns = interaction_miner.extract_normative_patterns(recent_docs, recent_dialogues)
+                    if hasattr(principle_inducer, "induce_from_patterns"):
+                        candidates = principle_inducer.induce_from_patterns(patterns)
+                        if hasattr(principle_inducer, "prefilter"):
+                            snapshot = metrics.snapshot() if metrics and hasattr(metrics, "snapshot") else {}
+                            candidates = principle_inducer.prefilter(candidates, history_stats=snapshot)
+                        if hasattr(principle_inducer, "submit_for_evaluation"):
+                            principle_inducer.submit_for_evaluation(candidates)
+                except Exception:
+                    pass
