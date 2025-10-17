@@ -205,6 +205,19 @@ class PolicyEngine:
         def _get_beliefs(st: Dict[str, Any]) -> Any:
             return st.get("beliefs")
 
+        def _belief_confidence_above(st: Dict[str, Any], topic: Any, threshold: Any) -> bool:
+            beliefs = _get_beliefs(st)
+            if beliefs is None:
+                return False
+            confidence_for = getattr(beliefs, "confidence_for", None)
+            if not callable(confidence_for):
+                return False
+            try:
+                confidence = float(confidence_for(topic))
+                return confidence >= float(threshold)
+            except (TypeError, ValueError):
+                return False
+
         predicate_registry: Dict[str, Callable[..., bool]] = {
             "request_is_sensitive": lambda st: getattr(_get_dialogue(st), "is_sensitive", False),
             "audience_is_not_owner": lambda st: getattr(_get_dialogue(st), "audience_id", None)
@@ -221,11 +234,7 @@ class PolicyEngine:
                 if hasattr(_get_beliefs(st), "has_fact")
                 else False
             ),
-            "belief_confidence_above": lambda st, threshold: bool(
-                getattr(_get_beliefs(st), "confidence_for", lambda *_: 0.0)(threshold)
-                if hasattr(_get_beliefs(st), "confidence_for")
-                else False
-            ),
+            "belief_confidence_above": _belief_confidence_above,
         }
         return predicate_registry
 
