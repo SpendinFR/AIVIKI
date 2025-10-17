@@ -5,6 +5,8 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
+from AGI_Evolutive.core.structures.mai import MAI
+from AGI_Evolutive.knowledge.mechanism_store import MechanismStore
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
 
 
@@ -61,6 +63,14 @@ class EvolutionManager:
       - data/evolution/dashboard.json (snapshot consolidé)
     """
 
+    _shared = None
+
+    @classmethod
+    def shared(cls):
+        if cls._shared is None:
+            cls._shared = cls()
+        return cls._shared
+
     def __init__(self, data_dir: str = "data", horizon_cycles: int = 200):
         self.data_dir = data_dir
         self.paths = {
@@ -105,6 +115,69 @@ class EvolutionManager:
         })
         self.horizon = horizon_cycles
         self._state_lock = threading.RLock()
+
+    def evaluate_mechanism(self, mai: MAI) -> bool:
+        """
+        Évalue un MAI via:
+        - world_model social (contrefactuels)
+        - social_critic (trust/harm/cooperation/regret)
+        - self_improver sandbox/ablation
+        - check cohérence identitaire
+        Retourne True si promotion recommandée.
+        """
+
+        ok = False
+        try:
+            from AGI_Evolutive.social.social_critic import SocialCritic
+            from AGI_Evolutive.world_model.social import SocialModel
+            from AGI_Evolutive.self_improver.promote import PromoteManager
+            from AGI_Evolutive.core.self_model import SelfModel
+
+            critic = SocialCritic()
+            sim = SocialModel()
+            promoter = PromoteManager()
+            self_model = SelfModel.shared() if hasattr(SelfModel, "shared") else SelfModel()
+
+            # 1) Générer des cas contrefactuels pertinents pour ce MAI
+            batch = (
+                sim.build_counterfactual_batch_for_mechanism(mai)
+                if hasattr(sim, "build_counterfactual_batch_for_mechanism")
+                else []
+            )
+
+            scores_with, scores_without = [], []
+            for case in batch:
+                s_with = critic.score(sim.run(case, enable_mechanism=mai))
+                s_without = critic.score(sim.run(case, enable_mechanism=None))
+                scores_with.append(s_with)
+                scores_without.append(s_without)
+
+            def agg(slist, key, default=0.0):
+                return sum(float(s.get(key, default)) for s in slist) / max(1, len(slist))
+
+            trust_gain = agg(scores_with, "trust") - agg(scores_without, "trust")
+            harm_diff = agg(scores_with, "harm") - agg(scores_without, "harm")
+            coop_gain = agg(scores_with, "cooperation") - agg(scores_without, "cooperation")
+            regret_diff = agg(scores_with, "regret") - agg(scores_without, "regret")
+
+            # 2) Identité / invariants
+            identity_ok = True
+            if hasattr(self_model, "violates_invariants"):
+                identity_ok = not self_model.violates_invariants(mai.safety_invariants)
+
+            # 3) Sandbox / ablation (preuve causale)
+            sandbox_ok = (
+                promoter.sandbox_mechanism(mai)
+                if hasattr(promoter, "sandbox_mechanism")
+                else True
+            )
+
+            ok = (trust_gain > 0.0) and (harm_diff <= 0.0) and identity_ok and sandbox_ok
+
+        except Exception:
+            ok = False
+
+        return bool(ok)
 
     # ---------- binding ----------
     def bind(self, architecture=None, memory=None, metacog=None,
