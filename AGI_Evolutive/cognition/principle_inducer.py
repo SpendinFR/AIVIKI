@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional
 import random
 
 from AGI_Evolutive.core.structures.mai import MAI, new_mai, EvidenceRef, ImpactHypothesis
@@ -81,12 +81,24 @@ class PrincipleInducer:
         # 1) Essaye d’utiliser l’évaluateur central (si dispo)
         try:
             from AGI_Evolutive.cognition.evolution_manager import EvolutionManager
+            try:
+                from AGI_Evolutive.self_improver.promote import PromoteManager
+
+                promoter: Optional[PromoteManager] = PromoteManager()
+            except Exception:
+                promoter = None
 
             evaluator = EvolutionManager.shared() if hasattr(EvolutionManager, "shared") else EvolutionManager()
             for m in mai_list:
                 ok = evaluator.evaluate_mechanism(m)
                 if ok:
-                    self.store.add(m)
+                    accepted = (
+                        promoter.promote_mechanism(m)
+                        if promoter and hasattr(promoter, "promote_mechanism")
+                        else True
+                    )
+                    if accepted:
+                        self.store.add(m)
             return
         except Exception:
             pass
