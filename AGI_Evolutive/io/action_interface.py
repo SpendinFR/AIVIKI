@@ -57,6 +57,7 @@ class ActionInterface:
         self.queue: List[Action] = []
         self.cooldown_s = 0.0
         self._legacy_handlers: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {}
+        self.current_mode: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Binding helpers
@@ -210,21 +211,31 @@ class ActionInterface:
 
     # ------------------------------------------------------------------
     # Direct execution compatibility
-    def execute(self, action: Dict[str, Any]) -> Dict[str, Any]:
+    def execute(self, action: Dict[str, Any], mode: Optional[str] = None) -> Dict[str, Any]:
         payload = action.get("payload")
         payload = dict(payload) if isinstance(payload, dict) else {}
         for key, value in action.items():
             if key not in {"type", "payload", "priority", "context", "id"}:
                 payload.setdefault(key, value)
 
+        context = dict(action.get("context", {}))
+        if mode is not None and "mode" not in context:
+            context["mode"] = mode
+
         act = Action(
             id=str(action.get("id", str(uuid.uuid4()))),
             type=(action.get("type") or "simulate"),
             payload=payload,
             priority=float(action.get("priority", 0.5)),
-            context=dict(action.get("context", {})),
+            context=context,
         )
-        self._execute(act)
+        previous_mode = self.current_mode
+        try:
+            if act.context.get("mode") is not None:
+                self.current_mode = act.context.get("mode")
+            self._execute(act)
+        finally:
+            self.current_mode = previous_mode
         return act.result or {"ok": False, "reason": "no_result"}
 
     # ------------------------------------------------------------------
@@ -248,11 +259,19 @@ class ActionInterface:
             except Exception:
                 pass
 
+        prev_mode = self.current_mode
+        if act.context.get("mode") is not None:
+            self.current_mode = act.context.get("mode")
+
         if act.type in self._legacy_handlers:
             try:
                 payload = {"type": act.type, **act.payload}
-                result = self._legacy_handlers[act.type](payload)
+                result = self._legacy_handlers[act.type](payload) or {}
                 act.status = "done" if result.get("ok", True) else "failed"
+                if isinstance(result, dict):
+                    mode_hint = act.context.get("mode") or self.current_mode
+                    if mode_hint and "mode" not in result:
+                        result["mode"] = mode_hint
                 act.result = result
             except Exception as e:
                 act.status = "failed"
@@ -308,6 +327,7 @@ class ActionInterface:
                     pass
                 # cool-down minimal pour éviter un spin
                 time.sleep(self.cooldown_s)
+                self.current_mode = prev_mode
                 return
 
             act.status = "running"
@@ -318,11 +338,18 @@ class ActionInterface:
                     result = handler(act)
                 success = not isinstance(result, dict) or result.get("ok", True)
                 act.status = "done" if success else "failed"
-                act.result = result if isinstance(result, dict) else {"ok": True, "data": result}
+                if isinstance(result, dict):
+                    mode_hint = act.context.get("mode") or self.current_mode
+                    if mode_hint and "mode" not in result:
+                        result["mode"] = mode_hint
+                    act.result = result
+                else:
+                    act.result = {"ok": True, "data": result}
             except Exception as e:
                 act.status = "failed"
                 act.result = {"ok": False, "error": str(e)}
 
+        self.current_mode = prev_mode
         reward = self._shape_reward(act)
         if emotions and hasattr(emotions, "register_emotion_event"):
             try:

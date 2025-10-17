@@ -2,7 +2,7 @@ import os
 import json
 import time
 import glob
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
 
@@ -71,6 +71,8 @@ class EpisodicLinker:
         self.period_s = 20.0
         self._last_step = 0.0
         self.window_s = 15 * 60  # 15 minutes pour grouper en épisode
+        self._salient_queue: List[Dict[str, Any]] = []
+        self._salient_seen: Set[str] = set()
 
     def bind(self, memory=None, language=None, metacog=None, emotions=None):
         self.bound.update(
@@ -125,6 +127,7 @@ class EpisodicLinker:
         for episode in episodes:
             ep_id = self._next_episode_id()
             rels = self._link_relations(episode["memories"])
+            self._queue_salient_associations(episode["memories"], rels)
             summary = self._summarize_episode(episode["memories"])
             record = {
                 "episode_id": ep_id,
@@ -216,6 +219,24 @@ class EpisodicLinker:
             episodes.append({"start": cur_start, "end": last_t, "memories": cur[:]})
         return episodes
 
+    def _memory_timestamp(self, memory: Optional[Dict[str, Any]]) -> float:
+        if not isinstance(memory, dict):
+            return _now()
+        metadata = memory.get("metadata") if isinstance(memory.get("metadata"), dict) else {}
+        for key in ("timestamp", "ts", "t"):
+            if key in metadata:
+                try:
+                    return float(metadata[key])
+                except (TypeError, ValueError):
+                    continue
+        for key in ("ts", "t", "timestamp"):
+            if key in memory:
+                try:
+                    return float(memory[key])
+                except (TypeError, ValueError):
+                    continue
+        return _now()
+
     # ---------- linking ----------
     def _link_relations(self, mems: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         rels: List[Dict[str, Any]] = []
@@ -248,6 +269,103 @@ class EpisodicLinker:
                 rels.append({"src": ids[i], "dst": ids[i + 1], "rel": REL_SUPPORTS})
 
         return rels
+
+    def _queue_salient_associations(
+        self, memories: List[Dict[str, Any]], relations: List[Dict[str, Any]]
+    ) -> None:
+        if not relations:
+            return
+
+        emotion_factor = 0.5
+        emotions = self.bound.get("emotions")
+        if emotions and hasattr(emotions, "get_state"):
+            try:
+                state = emotions.get_state() or {}
+                valence = float(state.get("valence", 0.0))
+                emotion_factor = max(0.1, min(1.0, 0.5 + 0.5 * valence))
+            except Exception:
+                emotion_factor = 0.5
+
+        mem_index = {
+            memory.get("id") or memory.get("_id") or memory.get("memory_id"): memory
+            for memory in memories
+            if isinstance(memory, dict)
+        }
+        now = _now()
+
+        weight = {
+            REL_CAUSES: 0.9,
+            REL_SUPPORTS: 0.75,
+            REL_CONTRADICTS: 0.85,
+            REL_REFERS: 0.6,
+            REL_NEXT: 0.5,
+        }
+
+        for rel in relations:
+            src = rel.get("src")
+            dst = rel.get("dst")
+            rel_type = rel.get("rel")
+            if not src or not dst or not rel_type:
+                continue
+            key = f"{src}->{dst}:{rel_type}"
+            if key in self._salient_seen:
+                continue
+
+            src_ts = self._memory_timestamp(mem_index.get(src))
+            dst_ts = self._memory_timestamp(mem_index.get(dst))
+            recency = max(0.1, min(1.0, 1.0 - (now - max(src_ts, dst_ts)) / (6 * 3600)))
+            link_strength = weight.get(rel_type, 0.4)
+            score = max(0.0, min(1.0, recency * emotion_factor * link_strength))
+
+            self._salient_queue.append(
+                {
+                    "source": src,
+                    "target": dst,
+                    "relation": rel_type,
+                    "score": round(score, 3),
+                    "timestamp": max(src_ts, dst_ts),
+                }
+            )
+            self._salient_seen.add(key)
+
+        if len(self._salient_queue) > 40:
+            self._salient_queue.sort(key=lambda item: item.get("score", 0.0), reverse=True)
+            self._salient_queue = self._salient_queue[:40]
+
+    def pop_salient_associations(self, max_n=2) -> Dict[str, Any]:
+        try:
+            limit = max(1, int(max_n))
+        except Exception:
+            limit = 2
+
+        items: List[Dict[str, Any]] = []
+        while self._salient_queue and len(items) < limit:
+            items.append(self._salient_queue.pop(0))
+
+        if items:
+            return {"items": items, "count": len(items), "source": "queue"}
+
+        # fallback: derive from backlinks recency
+        candidates: List[Dict[str, Any]] = []
+        for dst, links in self.backlinks.items():
+            if not isinstance(links, list):
+                continue
+            for link in links[-5:]:
+                if not isinstance(link, dict):
+                    continue
+                candidates.append(
+                    {
+                        "source": link.get("from"),
+                        "target": dst,
+                        "relation": link.get("rel"),
+                        "timestamp": link.get("t", 0.0),
+                        "score": 0.35,
+                    }
+                )
+
+        candidates.sort(key=lambda item: item.get("timestamp", 0.0), reverse=True)
+        fallback = candidates[:limit]
+        return {"items": fallback, "count": len(fallback), "source": "backlinks"}
 
     # ---------- summary ----------
     def _summarize_episode(self, mems: List[Dict[str, Any]]) -> str:

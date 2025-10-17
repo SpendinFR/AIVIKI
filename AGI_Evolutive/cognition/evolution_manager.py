@@ -90,6 +90,8 @@ class EvolutionManager:
         self.emotions = None
         self.language = None
 
+        self.habits_strength: Dict[str, float] = {}
+
         # État persistant
         self.state = _safe_read_json(self.paths["state"], {
             "created_at": _now(),
@@ -178,6 +180,44 @@ class EvolutionManager:
             ok = False
 
         return bool(ok)
+
+    def reinforce(self, ctx: Dict[str, Any]) -> None:
+        """Met à jour une force d'habitude simple à partir d'un contexte de décision."""
+
+        if not isinstance(ctx, dict):
+            return
+
+        decision = ctx.get("decision") if isinstance(ctx.get("decision"), dict) else {}
+        action = decision.get("action") if isinstance(decision.get("action"), dict) else {}
+
+        key_parts: List[str] = []
+        act_type = action.get("type") or decision.get("type")
+        if act_type:
+            key_parts.append(str(act_type))
+        context_hint = action.get("context") or decision.get("context") or ctx.get("context")
+        if isinstance(context_hint, dict):
+            context_key = context_hint.get("id") or context_hint.get("label") or context_hint.get("name")
+            if context_key:
+                key_parts.append(str(context_key))
+        elif isinstance(context_hint, str):
+            key_parts.append(context_hint)
+
+        if not key_parts:
+            key_parts.append("unknown")
+        key = "::".join(key_parts)
+
+        scratch = ctx.get("scratch") if isinstance(ctx.get("scratch"), dict) else {}
+        err = scratch.get("prediction_error", 0.5)
+        try:
+            err_val = float(err)
+        except (TypeError, ValueError):
+            err_val = 0.5
+        success = err_val < 0.2
+
+        current = float(self.habits_strength.get(key, 0.0))
+        delta = 0.08 if success else -0.04
+        updated = max(0.0, min(1.0, current + delta))
+        self.habits_strength[key] = updated
 
     # ---------- binding ----------
     def bind(self, architecture=None, memory=None, metacog=None,
