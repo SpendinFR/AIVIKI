@@ -26,6 +26,8 @@ from typing import Any, Callable, Dict, List
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
 from AGI_Evolutive.core.global_workspace import GlobalWorkspace
+from AGI_Evolutive.knowledge.mechanism_store import MechanismStore
+from AGI_Evolutive.cognition.principle_inducer import PrincipleInducer
 
 
 def _now() -> float:
@@ -52,11 +54,6 @@ def _append_jsonl(path: str, obj: Dict[str, Any]):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(json_sanitize(obj), ensure_ascii=False) + "\n")
-
-
-EVOLUTION_PERIOD = 12
-
-
 class Scheduler:
     """
     Orchestrateur de cycles :
@@ -92,7 +89,53 @@ class Scheduler:
         # registre des tâches (nom -> dict)
         self.tasks: Dict[str, Dict[str, Any]] = {}
         self._register_default_tasks()
-        self._tick_counter = 0
+
+        self.workspace = getattr(self.arch, "global_workspace", None)
+
+        policy = getattr(self.arch, "policy", None)
+        mechanism_store = None
+        if policy is not None and hasattr(policy, "_mechanisms"):
+            mechanism_store = getattr(policy, "_mechanisms", None)
+        if mechanism_store is None:
+            mechanism_store = getattr(self.arch, "mechanism_store", None)
+        if mechanism_store is None:
+            mechanism_store = MechanismStore()
+            if policy is not None and hasattr(policy, "_mechanisms"):
+                try:
+                    policy._mechanisms = mechanism_store
+                except Exception:
+                    pass
+        setattr(self.arch, "mechanism_store", mechanism_store)
+        self.mechanism_store = mechanism_store
+
+        principle_inducer = getattr(self.arch, "principle_inducer", None)
+        if principle_inducer is None:
+            principle_inducer = PrincipleInducer(self.mechanism_store)
+            setattr(self.arch, "principle_inducer", principle_inducer)
+        self.principle_inducer = principle_inducer
+
+        period = getattr(self.arch, "evolution_period", None)
+        if period is None:
+            period = getattr(self, "_evolution_period", None)
+        if period is None:
+            period = 20
+        try:
+            period_value = int(period)
+        except Exception:
+            try:
+                period_value = int(float(period))
+            except Exception:
+                period_value = 20
+        self._evolution_period = max(1, period_value)
+        try:
+            self._tick = int(getattr(self, "_tick", 0))
+        except Exception:
+            self._tick = 0
+        try:
+            self._tick_counter = int(getattr(self, "_tick_counter", self._tick))
+        except Exception:
+            self._tick_counter = self._tick
+        self._last_applicable_mais: List[Any] = []
 
     # ---------- helpers ----------
     def _build_state_snapshot(self) -> Dict[str, Any]:
@@ -110,6 +153,77 @@ class Scheduler:
             "world": world,
             "memory": getattr(arch, "memory", None),
         }
+
+    def _predicate_registry(self, state: Dict[str, Any]) -> Dict[str, Callable[..., bool]]:
+        policy = getattr(self.arch, "policy", None)
+        if policy is not None and hasattr(policy, "build_predicate_registry"):
+            try:
+                registry = policy.build_predicate_registry(state)
+                if isinstance(registry, dict):
+                    return registry
+            except Exception:
+                pass
+
+        dialogue = state.get("dialogue")
+        world = state.get("world")
+        self_model = state.get("self_model")
+        beliefs = state.get("beliefs")
+
+        def _belief_contains(topic: Any) -> bool:
+            if beliefs is None:
+                return False
+            for accessor in ("contains", "has_fact", "has_edge"):
+                fn = getattr(beliefs, accessor, None)
+                if callable(fn):
+                    try:
+                        if fn(topic):
+                            return True
+                    except Exception:
+                        continue
+            return False
+
+        def _belief_confidence(topic: Any, threshold: float) -> bool:
+            if beliefs is None:
+                return False
+            confidence_for = getattr(beliefs, "confidence_for", None)
+            if not callable(confidence_for):
+                return False
+            try:
+                return float(confidence_for(topic)) >= float(threshold)
+            except Exception:
+                return False
+
+        registry: Dict[str, Callable[..., bool]] = {
+            "request_is_sensitive": lambda st: getattr(dialogue, "is_sensitive", False) if dialogue else False,
+            "audience_is_not_owner": lambda st: (
+                getattr(dialogue, "audience_id", None) != getattr(dialogue, "owner_id", None)
+                if dialogue
+                else False
+            ),
+            "has_consent": lambda st: getattr(dialogue, "has_consent", False) if dialogue else False,
+            "imminent_harm_detected": lambda st: getattr(world, "imminent_harm", False) if world else False,
+            "has_commitment": lambda st, key: (
+                self_model.has_commitment(key)
+                if hasattr(self_model, "has_commitment")
+                else False
+            ),
+            "belief_mentions": lambda st, topic: _belief_contains(topic),
+            "belief_confidence_above": lambda st, topic, threshold: _belief_confidence(topic, threshold),
+        }
+        return registry
+
+    def _get_workspace(self) -> Any:
+        workspace = getattr(self, "workspace", None)
+        if workspace is None:
+            workspace = getattr(self.arch, "global_workspace", None)
+        if workspace is None:
+            policy = getattr(self.arch, "policy", None)
+            if policy is None:
+                return None
+            workspace = GlobalWorkspace(policy=policy, planner=getattr(self.arch, "planner", None))
+            setattr(self.arch, "global_workspace", workspace)
+        self.workspace = workspace
+        return workspace
 
     def _render_and_emit(self, decision: Dict[str, Any], state: Dict[str, Any]) -> None:
         arch = self.arch
@@ -244,29 +358,36 @@ class Scheduler:
         el = getattr(self.arch, "episodic_linker", None)
         if el and hasattr(el, "step"):
             el.step()
-        gw = getattr(self.arch, "global_workspace", None)
-        policy = getattr(self.arch, "policy", None)
-        if gw is None and policy:
-            gw = GlobalWorkspace(policy=policy, planner=getattr(self.arch, "planner", None))
-            setattr(self.arch, "global_workspace", gw)
-        mechanism_store = getattr(policy, "_mechanisms", None) if policy else None
-        if gw and policy and mechanism_store and hasattr(policy, "build_predicate_registry"):
+        workspace = self._get_workspace()
+        state = self._build_state_snapshot()
+        predicate_registry = self._predicate_registry(state)
+
+        applicable: List[Any] = []
+        try:
+            applicable = list(self.mechanism_store.scan_applicable(state, predicate_registry))
+        except Exception:
+            applicable = []
+        self._last_applicable_mais = applicable
+
+        if workspace is None:
+            return
+
+        for mechanism in applicable:
             try:
-                state = self._build_state_snapshot()
-                predicate_registry = policy.build_predicate_registry(state)
-                for mai in mechanism_store.scan_applicable(state, predicate_registry):
-                    for bid in mai.propose(state):
-                        try:
-                            gw.submit(bid)
-                        except AttributeError:
-                            gw.submit_bid(
-                                bid.payload.get("origin", "mai"),
-                                bid.action_hint,
-                                max(0.0, min(1.0, bid.expected_info_gain)),
-                                bid.payload,
-                            )
+                bids = list(mechanism.propose(state))
             except Exception:
-                pass
+                continue
+            for bid in bids:
+                try:
+                    workspace.submit(bid)
+                except AttributeError:
+                    attention = max(0.0, min(1.0, getattr(bid, "expected_info_gain", 0.0)))
+                    workspace.submit_bid(
+                        bid.payload.get("origin", getattr(bid, "source", "mai")),
+                        bid.action_hint,
+                        attention,
+                        bid.payload,
+                    )
 
     def _task_planning(self):
         goals = getattr(self.arch, "goals", None)
@@ -282,32 +403,84 @@ class Scheduler:
                 goals.refresh_plans()
             except Exception:
                 pass
-        gw = getattr(self.arch, "global_workspace", None)
+        workspace = self._get_workspace()
         policy = getattr(self.arch, "policy", None)
-        if gw is None and policy:
-            gw = GlobalWorkspace(policy=policy, planner=getattr(self.arch, "planner", None))
-            setattr(self.arch, "global_workspace", gw)
-        if gw and policy and hasattr(gw, "step") and hasattr(policy, "decide_with_bids"):
+        if workspace and policy and hasattr(workspace, "step") and hasattr(policy, "decide_with_bids"):
+            state = self._build_state_snapshot()
             try:
-                state = self._build_state_snapshot()
-                gw.step(state, timebox_iters=2)
-                winners = gw.winners()
+                workspace.step(state, timebox_iters=2)
+                winners = list(workspace.winners())
             except Exception:
                 winners = []
-                state = self._build_state_snapshot()
+            if not winners:
+                try:
+                    winners = list(workspace.last_trace())
+                except Exception:
+                    winners = []
             try:
                 decision = policy.decide_with_bids(
                     winners,
                     state,
-                    global_workspace=gw,
+                    global_workspace=workspace,
                     proposer=getattr(self.arch, "proposer", None),
                     homeo=getattr(self.arch, "homeostasis", None) or getattr(self.arch, "emotions", None),
                     planner=getattr(self.arch, "planner", None),
-                    ctx={"scheduler": True},
+                    ctx={"scheduler": True, "workspace_trace": [bid.origin_tag() for bid in winners]},
                 )
-                self._render_and_emit(decision, state)
             except Exception:
-                pass
+                decision = None
+
+            if decision:
+                emitted = False
+                runtime = getattr(self.arch, "runtime", None)
+                response_api = getattr(runtime, "response", None) if runtime else None
+                if (
+                    runtime
+                    and hasattr(runtime, "emit")
+                    and response_api is not None
+                    and hasattr(response_api, "format_agent_reply")
+                ):
+                    try:
+                        utterance = response_api.format_agent_reply(decision)
+                        runtime.emit(utterance)
+                        emitted = True
+                    except Exception:
+                        emitted = False
+                if not emitted:
+                    self._render_and_emit(decision, state)
+
+                applicable_mais = list(getattr(self, "_last_applicable_mais", []))
+                if applicable_mais:
+                    try:
+                        from AGI_Evolutive.social.social_critic import SocialCritic
+
+                        critic = SocialCritic()
+                        outcome = {}
+                        if hasattr(critic, "last_outcome"):
+                            try:
+                                outcome = critic.last_outcome() or {}
+                            except Exception:
+                                outcome = {}
+                        for mechanism in applicable_mais:
+                            try:
+                                wins = 1.0 if any(getattr(bid, "source", "") == f"MAI:{mechanism.id}" for bid in winners) else 0.0
+                                feedback = {
+                                    "activation": 1.0,
+                                    "wins": wins,
+                                    "benefit": float(outcome.get("trust_delta", 0.0))
+                                    - float(outcome.get("harm_delta", 0.0)),
+                                    "regret": float(outcome.get("regret", 0.0)),
+                                }
+                                if hasattr(mechanism, "update_from_feedback"):
+                                    mechanism.update_from_feedback(feedback)
+                                try:
+                                    self.mechanism_store.update(mechanism)
+                                except Exception:
+                                    pass
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
 
     def _task_reflection(self):
         mc = getattr(self.arch, "metacognition", None) or getattr(self.arch, "metacognitive_system", None)
@@ -334,34 +507,45 @@ class Scheduler:
                 evo.propose_evolution()
             except Exception:
                 pass
-        self._tick_counter += 1
-        if self._tick_counter % EVOLUTION_PERIOD == 0:
-            interaction_miner = getattr(self.arch, "interaction_miner", None)
-            principle_inducer = getattr(self.arch, "principle_inducer", None)
-            metrics = getattr(self.arch, "metrics", None)
-            memory = getattr(self.arch, "memory", None)
-            recent_docs: List[Any] = []
-            recent_dialogues: List[Any] = []
-            if memory and hasattr(memory, "get_recent_memories"):
+        self._tick = getattr(self, "_tick", 0) + 1
+        self._tick_counter = self._tick
+        if self._tick % self._evolution_period == 0:
+            arch = self.arch
+            recent_docs: List[Any]
+            recent_dialogues: List[Any]
+
+            if hasattr(arch, "recent_docs"):
+                recent_docs = list(getattr(arch, "recent_docs") or [])
+            else:
+                recent_docs = []
+                memory = getattr(arch, "memory", None)
+                if memory and hasattr(memory, "get_recent_memories"):
+                    try:
+                        recent_docs = memory.get_recent_memories(n=200)
+                    except Exception:
+                        recent_docs = []
+
+            if hasattr(arch, "recent_dialogues"):
+                recent_dialogues = list(getattr(arch, "recent_dialogues") or [])
+            else:
+                recent_dialogues = []
+                memory = getattr(arch, "memory", None)
+                dialogue_log = getattr(memory, "interactions", None)
+                if dialogue_log and hasattr(dialogue_log, "get_recent"):
+                    try:
+                        recent_dialogues = dialogue_log.get_recent(100)
+                    except Exception:
+                        recent_dialogues = []
+
+            metrics_snapshot: Dict[str, Any] = {}
+            metrics = getattr(arch, "metrics", None)
+            if metrics and hasattr(metrics, "snapshot"):
                 try:
-                    recent_docs = memory.get_recent_memories(n=200)
+                    metrics_snapshot = metrics.snapshot() or {}
                 except Exception:
-                    recent_docs = []
-            dialogue_log = getattr(memory, "interactions", None)
-            if dialogue_log and hasattr(dialogue_log, "get_recent"):
-                try:
-                    recent_dialogues = dialogue_log.get_recent(100)
-                except Exception:
-                    recent_dialogues = []
-            if interaction_miner and hasattr(interaction_miner, "extract_normative_patterns") and principle_inducer:
-                try:
-                    patterns = interaction_miner.extract_normative_patterns(recent_docs, recent_dialogues)
-                    if hasattr(principle_inducer, "induce_from_patterns"):
-                        candidates = principle_inducer.induce_from_patterns(patterns)
-                        if hasattr(principle_inducer, "prefilter"):
-                            snapshot = metrics.snapshot() if metrics and hasattr(metrics, "snapshot") else {}
-                            candidates = principle_inducer.prefilter(candidates, history_stats=snapshot)
-                        if hasattr(principle_inducer, "submit_for_evaluation"):
-                            principle_inducer.submit_for_evaluation(candidates)
-                except Exception:
-                    pass
+                    metrics_snapshot = {}
+
+            try:
+                self.principle_inducer.run(recent_docs, recent_dialogues, metrics_snapshot)
+            except Exception:
+                pass
