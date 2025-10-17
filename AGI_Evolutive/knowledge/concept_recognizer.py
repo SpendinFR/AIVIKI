@@ -239,6 +239,13 @@ class ConceptRecognizer:
                 self.patterns[fam]["w"] = clamp(w + 0.05 * reward, 0.05, 0.8)
         self.save_patterns()
 
+    def learn_from_rejection(self, kind: str, label: str, evidence: Dict[str, Any], penalty: float = 0.5):
+        for fam in list(evidence.keys() or []):
+            if fam in self.patterns:
+                w = float(self.patterns[fam].get("w", 0.2))
+                self.patterns[fam]["w"] = max(0.05, w - 0.05 * penalty)
+        self.save_patterns()
+
     # --- helpers d'intégration (faciles à appeler) ---
     def commit_candidates_to_memory(self, source: str, items: List[ItemCandidate], arch=None):
         arch = arch or self.arch
