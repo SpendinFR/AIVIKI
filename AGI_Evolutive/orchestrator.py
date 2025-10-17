@@ -223,7 +223,21 @@ class _MetaAdapter:
         if not self._buffer:
             try:
                 proposed = self._meta.propose_learning_goals(max_goals=max_n)
-                self._buffer.extend(proposed or [])
+                structured: List[Dict[str, Any]] = []
+                for raw in proposed or []:
+                    goal = dict(raw)
+                    text = (
+                        goal.get("text")
+                        or goal.get("desc")
+                        or goal.get("description")
+                        or ""
+                    )
+                    if text:
+                        goal.setdefault("text", text)
+                    goal.setdefault("goal_kind", "CuriosityLearning")
+                    goal.setdefault("priority", 0.6)
+                    structured.append(goal)
+                self._buffer.extend(structured)
             except Exception:
                 return []
         goals = self._buffer[:max_n]
@@ -497,19 +511,30 @@ class Orchestrator:
         goals = self.cognition.meta.pop_new_learning_goals(max_n=4)
         if not goals:
             return []
-        return [
-            Trigger(
-                TriggerType.GOAL,
-                {
-                    "source": "curiosity",
-                    "importance": 0.8,
-                    "probability": 0.6,
-                    "reversibility": 1.0,
-                },
-                payload={"goal": g},
+        triggers: List[Trigger] = []
+        for goal in goals:
+            text = goal.get("text") or goal.get("desc") or goal.get("description") or "objectif"
+            importance = float(goal.get("priority", 0.7))
+            triggers.append(
+                Trigger(
+                    TriggerType.GOAL,
+                    {
+                        "source": "curiosity",
+                        "importance": max(0.3, min(1.0, importance)),
+                        "probability": float(goal.get("probability", 0.6)),
+                        "reversibility": float(goal.get("reversibility", 1.0)),
+                        "effort": float(goal.get("effort", 0.4)),
+                        "uncertainty": float(goal.get("uncertainty", 0.3)),
+                    },
+                    payload={
+                        "goal_kind": goal.get("goal_kind", "CuriosityLearning"),
+                        "goal_id": goal.get("id"),
+                        "text": text,
+                        "goal": goal,
+                    },
+                )
             )
-            for g in goals
-        ]
+        return triggers
 
     def _homeostasis_collector(self) -> List[Trigger]:
         need = self.cognition.homeostasis.poll_need()
