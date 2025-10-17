@@ -208,6 +208,16 @@ class TacticSelector:
         x = self._phi(ctx, rule)
         ucb = blin.score(x)
 
+        # Malus si même tactique utilisée très récemment
+        last_used = float(rule.get("last_used_ts", 0.0))
+        recency = max(0.0, 1.0 - ((now - last_used) / 60.0))
+        diversity_penalty = 0.08 * recency
+        ucb -= diversity_penalty
+
+        # Coût optionnel si défini dans la règle
+        cost = float(rule.get("cost", 0.0))
+        ucb -= 0.10 * cost
+
         # e) pénalité de récence
         last_ts = float(rule.get("last_used_ts", 0.0))
         recent_pen = 0.0

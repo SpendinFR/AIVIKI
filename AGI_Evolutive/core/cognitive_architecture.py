@@ -622,6 +622,73 @@ class CognitiveArchitecture:
                             break
                 if concept:
                     self._record_skill(concept)
+            else:
+                refusal_markers = (
+                    "pas correct",
+                    "incorrect",
+                    "c'est faux",
+                    "ce n'est pas correct",
+                    "je ne suis pas d'accord",
+                    "pas vrai",
+                    "mauvais",
+                )
+                refuse_short = low.strip() in {"non", "nope", "pas vraiment", "absolument pas"}
+                refusal_hit = refuse_short or any(m in low for m in refusal_markers)
+                if refusal_hit and hasattr(self, "memory"):
+                    recents = self.memory.get_recent_memories(50)
+                    concept = None
+                    last_request = None
+                    for item in reversed(recents):
+                        if item.get("kind") == "validation_request":
+                            last_request = item
+                            concept = (item.get("metadata") or {}).get("concept")
+                            if concept:
+                                break
+                    if concept:
+                        try:
+                            self.memory.add_memory(
+                                {
+                                    "kind": "validation_request:refusé",
+                                    "content": f"Validation refusée pour {concept}",
+                                    "metadata": {
+                                        "concept": concept,
+                                        "source": "user_feedback",
+                                        "raw": user_msg[:160],
+                                        "request_id": (last_request or {}).get("id"),
+                                    },
+                                    "ts": time.time(),
+                                }
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            if not getattr(self, "concept_recognizer", None):
+                                from AGI_Evolutive.knowledge.concept_recognizer import ConceptRecognizer
+
+                                self.concept_recognizer = ConceptRecognizer(self)
+                            evidence_payload = {}
+                            mem = getattr(self, "memory", None)
+                            if mem and hasattr(mem, "find_recent"):
+                                ev = mem.find_recent(
+                                    kind="concept_candidate",
+                                    since_sec=3600 * 24,
+                                    where={"label": concept},
+                                ) or {}
+                                if isinstance(ev, dict):
+                                    evidence_payload = ev.get("evidence", {}) or {}
+                                elif isinstance(ev, list) and ev:
+                                    first = ev[0]
+                                    if isinstance(first, dict):
+                                        evidence_payload = first.get("evidence", {}) or {}
+                            if getattr(self, "concept_recognizer", None):
+                                self.concept_recognizer.learn_from_rejection(
+                                    kind="concept",
+                                    label=concept,
+                                    evidence=evidence_payload,
+                                    penalty=0.6,
+                                )
+                        except Exception:
+                            pass
         except Exception:
             pass
 

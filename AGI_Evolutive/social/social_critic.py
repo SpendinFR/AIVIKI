@@ -101,6 +101,10 @@ class SocialCritic:
             self.lex = AdaptiveLexicon(self.arch)
             setattr(self.arch, "lexicon", self.lex)
 
+        self._reward_history: List[float] = []
+        self._reward_perf_baseline: float = 0.6
+        self._last_calibration_ts: float = 0.0
+
     def _load_cfg(self) -> Dict[str, Any]:
         path = getattr(self.arch, "social_critic_cfg_path", "data/social_critic_config.json")
         try:
@@ -293,6 +297,39 @@ class SocialCritic:
                 })
             except Exception:
                 pass
+
+            try:
+                reward_val = float((outcome or {}).get("reward", 0.5))
+            except Exception:
+                reward_val = 0.5
+            self._reward_history.append(reward_val)
+            window = int(getattr(self.arch, "social_calibration_window", 30))
+            if window > 0 and len(self._reward_history) > window:
+                self._reward_history = self._reward_history[-window:]
+            alpha = float(getattr(self.arch, "social_calibration_alpha", 0.2))
+            alpha = max(0.05, min(0.5, alpha))
+            ema = None
+            for r in self._reward_history:
+                ema = r if ema is None else (alpha * r + (1.0 - alpha) * ema)
+            if ema is not None:
+                baseline = getattr(self, "_reward_perf_baseline", ema)
+                self._reward_perf_baseline = (0.98 * baseline) + (0.02 * ema)
+                drift = baseline - ema
+                cooldown = max(10.0, float(getattr(self.arch, "social_calibration_cooldown", 30.0)))
+                if drift > 0.04 and (_now() - getattr(self, "_last_calibration_ts", 0.0)) > cooldown:
+                    weights = self.cfg.setdefault("weights", {})
+                    adjust = min(0.02, drift * 0.1)
+                    if adjust > 0.0:
+                        weights["explicit_feedback"] = max(
+                            0.25, float(weights.get("explicit_feedback", 0.45)) - adjust
+                        )
+                        weights["continue_dialogue"] = min(
+                            0.22, float(weights.get("continue_dialogue", 0.10)) + adjust * 0.5
+                        )
+                        weights["valence"] = min(
+                            0.22, float(weights.get("valence", 0.15)) + adjust * 0.5
+                        )
+                        self._last_calibration_ts = _now()
             return newd
         except Exception:
             return None
