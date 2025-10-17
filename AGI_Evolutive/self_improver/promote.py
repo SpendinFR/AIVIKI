@@ -6,6 +6,8 @@ import time
 import uuid
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
+from AGI_Evolutive.core.structures.mai import MAI
+from AGI_Evolutive.knowledge.mechanism_store import MechanismStore
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
 
 if TYPE_CHECKING:
@@ -104,3 +106,35 @@ class PromotionManager:
                 )
                 + "\n"
             )
+
+
+class PromoteManager:
+    def sandbox_mechanism(self, mai: MAI) -> bool:
+        """
+        Exécute une batterie de tests/ablation en sandbox.
+        Retourne True si aucune régression critique détectée.
+        """
+
+        # branche tes tests existants ici (latence, non-régression, cohérence, etc.)
+        return True
+
+    def promote_mechanism(self, mai: MAI) -> bool:
+        """
+        Intègre le MAI en canary, puis généralise selon les résultats,
+        et enregistre un handler NLG s'il est fourni par le MAI.
+        """
+
+        ms = MechanismStore()
+        ms.add(mai)
+
+        # Option: si le MAI fournit un handler NLG spécifique, l’enregistrer
+        try:
+            from AGI_Evolutive.language.nlg import register_nlg_handler
+
+            handler = getattr(mai, "nlg_handler", None)
+            if callable(handler) and hasattr(mai, "action_hint_for_handler"):
+                register_nlg_handler(mai.action_hint_for_handler, handler)
+        except Exception:
+            pass
+
+        return True

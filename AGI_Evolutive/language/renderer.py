@@ -8,7 +8,8 @@ import time
 
 from AGI_Evolutive.social.tactic_selector import TacticSelector
 from AGI_Evolutive.social.interaction_rule import ContextBuilder
-from AGI_Evolutive.core.structures.mai import Bid, MAI
+from AGI_Evolutive.core.structures.mai import MAI
+from AGI_Evolutive.language.nlg import NLGContext, apply_mai_bids_to_nlg
 
 
 def _tokens(s: str) -> set:
@@ -141,28 +142,26 @@ class LanguageRenderer:
         base = (semantics.get("text") or "").strip() or "Je te réponds en tenant compte de notre historique."
         arch = getattr(getattr(self.voice, "self_model", None), "arch", None)
         policy = getattr(arch, "policy", None) if arch else None
-        mechanism_store = getattr(policy, "_mechanisms", None) if policy else None
-        applicable_mais: List[MAI] = []
-        hints: List[Bid] = []
         state_snapshot: Dict[str, Any] = {}
-        if arch and policy and mechanism_store and hasattr(policy, "build_predicate_registry"):
+        predicate_registry: Dict[str, Any] = {}
+        applicable_mais: List[MAI] = []
+        if arch and policy and hasattr(policy, "build_predicate_registry"):
             try:
                 state_snapshot = ctx.get("state_snapshot") or _build_language_state_snapshot(arch, ctx)
                 predicate_registry = policy.build_predicate_registry(state_snapshot)
-                applicable_mais = list(mechanism_store.scan_applicable(state_snapshot, predicate_registry))
-                for mai in applicable_mais:
-                    for bid in mai.propose(state_snapshot):
-                        if bid.action_hint in {"AskConsent", "RefusePolitely", "PartialReveal", "RephraseRespectfully"}:
-                            hints.append(bid)
             except Exception:
-                applicable_mais = []
-                hints = []
-        for bid in hints:
-            base = _apply_action_hint(base, bid.action_hint)
-        if hints:
-            ctx.setdefault("applied_action_hints", []).extend(
-                {"origin": bid.origin_tag(), "hint": bid.action_hint} for bid in hints
-            )
+                state_snapshot = {}
+                predicate_registry = {}
+
+        nlg_context = NLGContext(base, _apply_action_hint)
+        try:
+            applicable_mais = apply_mai_bids_to_nlg(nlg_context, state_snapshot, predicate_registry)
+        except Exception:
+            applicable_mais = []
+        base = nlg_context.text
+        applied_hints = nlg_context.applied_hints()
+        if applied_hints:
+            ctx.setdefault("applied_action_hints", []).extend(applied_hints)
         conf = self._confidence()
         budget = self._budget_chars(ctx)
 

@@ -72,12 +72,72 @@ class PrincipleInducer:
     # ---- 3) Remise au pipeline d’évaluation existant ----
     def submit_for_evaluation(self, mai_list: List[MAI]) -> None:
         """
-        Ici, on NE ré-implémente PAS critic/world_model/self_improver.
-        On les appelle : contrefactuels + social_critic + ablation + promote → store.add/update.
-        Esquisse d’intégration (à adapter à tes signatures internes):
+        Passe chaque MAI au pipeline d'évaluation existant :
+        - contrefactuels via world_model social
+        - scoring via social_critic
+        - ablation/sandbox via self_improver
+        - promotion → mechanism_store.add/update
         """
-        # PSEUDOCODE (à mapper à ton evolution_manager / self_improver)
-        # for m in mai_list:
-        #   ok = evolution_manager.evaluate_mechanism(m)
-        #   if ok: self.store.add(m)
-        pass
+        # 1) Essaye d’utiliser l’évaluateur central (si dispo)
+        try:
+            from AGI_Evolutive.cognition.evolution_manager import EvolutionManager
+
+            evaluator = EvolutionManager.shared() if hasattr(EvolutionManager, "shared") else EvolutionManager()
+            for m in mai_list:
+                ok = evaluator.evaluate_mechanism(m)
+                if ok:
+                    self.store.add(m)
+            return
+        except Exception:
+            pass
+
+        # 2) Fallback direct (robuste si pas de singleton ou API différente)
+        try:
+            from AGI_Evolutive.social.social_critic import SocialCritic
+            from AGI_Evolutive.world_model.social import SocialModel
+            from AGI_Evolutive.self_improver.promote import PromoteManager
+
+            critic = SocialCritic()
+            sim = SocialModel()
+            promoter = PromoteManager()
+
+            for m in mai_list:
+                # (a) Simuler quelques cas contrefactuels avec/sans MAI
+                batch = (
+                    sim.build_counterfactual_batch_for_mechanism(m)
+                    if hasattr(sim, "build_counterfactual_batch_for_mechanism")
+                    else []
+                )
+
+                scores_with, scores_without = [], []
+                for case in batch:
+                    s_with = critic.score(sim.run(case, enable_mechanism=m))
+                    s_without = critic.score(sim.run(case, enable_mechanism=None))
+                    scores_with.append(s_with)
+                    scores_without.append(s_without)
+
+                # (b) Décision : bénéfice social net + pas de régression critique
+                def agg(slist, key, default=0.0):
+                    return sum(float(s.get(key, default)) for s in slist) / max(1, len(slist))
+
+                trust_gain = agg(scores_with, "trust") - agg(scores_without, "trust")
+                harm_diff = agg(scores_with, "harm") - agg(scores_without, "harm")
+
+                ok = (trust_gain > 0.0) and (harm_diff <= 0.0)
+                # (c) Sandbox / ablation (si dispo)
+                if hasattr(promoter, "sandbox_mechanism"):
+                    ok = ok and promoter.sandbox_mechanism(m)
+
+                # (d) Promotion
+                if ok:
+                    accepted = (
+                        promoter.promote_mechanism(m)
+                        if hasattr(promoter, "promote_mechanism")
+                        else True
+                    )
+                    if accepted:
+                        self.store.add(m)
+
+        except Exception:
+            # En dernier recours: ne rien faire (pas de promotion silencieuse)
+            return
