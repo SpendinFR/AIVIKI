@@ -528,7 +528,10 @@ class Orchestrator:
             "threat": "THREAT",
         }
 
-        is_question = txt.strip().endswith("?")
+        QUESTION_LABELS = {"ask_info"}
+        COMMAND_LABELS = {"request", "create", "send", "summarize", "classify", "plan", "set_goal"}
+
+        is_question = txt.strip().endswith("?") or label in QUESTION_LABELS
         tname = MAP.get(label, "GOAL" if is_question else "SIGNAL")
         ttype = TriggerType[tname]
 
@@ -543,7 +546,12 @@ class Orchestrator:
 
         payload = {"text": txt, "label": label, "conf": conf}
         if tname == "GOAL":
-            payload["goal_kind"] = "AnswerUserQuestion" if is_question else label
+            if is_question:
+                payload["goal_kind"] = "AnswerUserQuestion"
+            elif label in COMMAND_LABELS:
+                payload["goal_kind"] = "ExecuteUserCommand"
+            else:
+                payload["goal_kind"] = label
 
         return [Trigger(ttype, meta, payload)]
 
