@@ -1,5 +1,7 @@
-from typing import List, Callable, Dict, Any
+from typing import List, Callable, Dict, Any, Optional
 from dataclasses import dataclass
+import hashlib
+import json
 import time
 
 from AGI_Evolutive.core.trigger_types import Trigger, TriggerType
@@ -25,10 +27,25 @@ class TriggerBus:
     def register(self, fn: Collector):
         self.collectors.append(fn)
 
-    def _key(self, t: Trigger) -> str:
+    def _payload_fingerprint(self, payload: Any) -> str:
+        try:
+            serialized = json.dumps(payload, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            serialized = repr(payload)
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _key(self, t: Trigger) -> Optional[str]:
         # build a stable key per (type, salient meta/payload)
         src = t.meta.get("source", "unknown")
-        base = t.meta.get("hash") or (t.payload.get("id") if t.payload else "")
+        base_info: Any = t.meta.get("hash")
+        if not base_info and isinstance(t.payload, dict):
+            base_info = t.payload.get("id")
+        if base_info:
+            base = str(base_info)
+        elif t.payload is not None:
+            base = self._payload_fingerprint(t.payload)
+        else:
+            return None
         return f"{src}:{t.type.name}:{base}:{t.meta.get('immediacy','')}:{t.meta.get('importance','')}"
 
     def _normalize(self, t: Trigger, valence: float = 0.0) -> Trigger:
@@ -66,9 +83,10 @@ class TriggerBus:
                         )
                     key = self._key(t)
                     # cooldown 1.5s to avoid storms
-                    if self.cooldown_cache.get(key, 0) + 1.5 > now:
-                        continue
-                    self.cooldown_cache[key] = now
+                    if key is not None:
+                        if self.cooldown_cache.get(key, 0) + 1.5 > now:
+                            continue
+                        self.cooldown_cache[key] = now
                     scored.append(ScoredTrigger(trigger=t, priority=pr))
             except Exception:
                 continue
