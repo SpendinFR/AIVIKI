@@ -22,6 +22,7 @@ from AGI_Evolutive.core.trigger_types import Trigger, TriggerType
 from AGI_Evolutive.emotions.emotion_engine import EmotionEngine
 from AGI_Evolutive.goals.curiosity import CuriosityEngine
 from AGI_Evolutive.io.action_interface import ActionInterface
+from AGI_Evolutive.io.intent_classifier import classify
 from AGI_Evolutive.io.perception_interface import PerceptionInterface
 from AGI_Evolutive.memory.concept_extractor import ConceptExtractor
 from AGI_Evolutive.memory.consolidator import Consolidator
