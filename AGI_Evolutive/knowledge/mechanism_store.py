@@ -1,75 +1,59 @@
 """Persistence layer for Mechanistic Actionable Insights (MAIs).
 
-This module provides lightweight dataclasses representing MAIs and a
-`MechanismStore` class responsible for persisting them to disk.  Entries
-are stored as JSON lines with a simple change-log format so that the store
-can be replayed at start-up.  The JSON payloads are produced via
-``dataclasses.asdict`` which flattens nested dataclasses.  When reading the
-log back we therefore need to rehydrate those nested structures to recover
-the original dataclass instances.
-
-The ``MechanismStore`` implements that rehydration step in
-:meth:`MechanismStore._load_all` by converting dictionaries into
-``ImpactHypothesis`` and ``EvidenceRef`` objects before instantiating
-``MAI``.
+Entries are stored as JSON lines with a simple change-log format so that the
+store can be replayed at start-up.  The JSON payloads are produced via
+``dataclasses.asdict`` which flattens nested dataclasses.  When reading the log
+back we therefore need to rehydrate those nested structures to recover the
+original dataclass instances.
 """
 
 from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, field, fields, asdict
+from dataclasses import fields, asdict
 from pathlib import Path
-from typing import Dict, Iterator, List, Mapping, Optional
+from typing import Dict, Iterable, Iterator, List, Mapping, Optional
 
-
-@dataclass
-class EvidenceRef:
-    """Reference to an external document supporting an MAI."""
-
-    source: Optional[str] = None
-    url: Optional[str] = None
-    title: Optional[str] = None
-    snippet: Optional[str] = None
-    kind: Optional[str] = None
-
-
-@dataclass
-class ImpactHypothesis:
-    """Hypothesis describing the impact expected from applying an MAI."""
-
-    trust_delta: float = 0.0
-    confidence: float = 0.0
-    rationale: Optional[str] = None
-    caveats: Optional[str] = None
-
-
-@dataclass
-class MAI:
-    """Mechanistic Actionable Insight representation."""
-
-    id: str
-    title: str = ""
-    summary: str = ""
-    status: str = "draft"
-    expected_impact: ImpactHypothesis = field(default_factory=ImpactHypothesis)
-    provenance_docs: List[EvidenceRef] = field(default_factory=list)
-    tags: List[str] = field(default_factory=list)
-    metadata: Dict[str, object] = field(default_factory=dict)
-    owner: Optional[str] = None
-    created_at: float = field(default_factory=lambda: time.time())
-    updated_at: float = field(default_factory=lambda: time.time())
-
+from AGI_Evolutive.core.structures.mai import (
+    EvidenceRef,
+    ImpactHypothesis,
+    MAI,
+)
 
 class MechanismStore:
     """Append-only JSONL store for :class:`MAI` objects."""
 
-    def __init__(self, path: Path | str):
-        self.path = Path(path)
+    DEFAULT_PATH = Path("data/runtime/mai_store.jsonl")
+
+    def __init__(self, path: Path | str | None = None):
+        resolved = Path(path) if path is not None else self.DEFAULT_PATH
+        self.path = resolved
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._cache: Dict[str, MAI] = {}
         if self.path.exists():
             self._load_all()
+
+    # ------------------------------------------------------------------
+    # Discovery helpers
+    def scan_applicable(
+        self,
+        state: Mapping[str, object],
+        predicate_registry: Mapping[str, object],
+        *,
+        include_status: Optional[Iterable[str]] = None,
+    ) -> List[MAI]:
+        allowed_status = set(include_status or {"draft", "active", "ready"})
+        applicable: List[MAI] = []
+        for mai in self._cache.values():
+            if mai.status not in allowed_status:
+                continue
+            try:
+                if mai.is_applicable(state, predicate_registry):
+                    applicable.append(mai)
+            except Exception:
+                continue
+        return applicable
 
     # ------------------------------------------------------------------
     # Persistence helpers

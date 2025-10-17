@@ -4,6 +4,8 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from AGI_Evolutive.core.structures.mai import Bid
+
 
 def _info_gain_from_rag(signals: Dict[str, float]) -> float:
     """Estimate information gain produced by RAG signals."""
@@ -40,6 +42,8 @@ class GlobalWorkspace:
         self._bids: List[Tuple[str, str, float, Dict[str, Any]]] = []
         self.policy = policy
         self.planner = planner
+        self._pending_bids: List[Bid] = []
+        self._trace_last_winners: List[Bid] = []
 
     def broadcast(self, item: Any) -> None:
         self.broadcasts.append(item)
@@ -88,6 +92,39 @@ class GlobalWorkspace:
             "grounded_context": (getattr(frame, "context", {}) or {}).get("grounded_evidence", []),
         }
         self.submit_bid("evidence", "RAGEvidence", attention, payload)
+
+    # ------------------------------------------------------------------
+    # MAI integration helpers
+    def submit(self, bid: Bid) -> None:
+        self._pending_bids.append(bid)
+
+    def step(self, state: Dict, timebox_iters: int = 2) -> None:
+        groups: Dict[str, List[Bid]] = {}
+        now = time.time()
+        self._pending_bids = [
+            b for b in self._pending_bids if (b.expires_at or now + 1e9) > now
+        ]
+        for bid in self._pending_bids:
+            groups.setdefault(bid.action_hint, []).append(bid)
+
+        scored: List[Tuple[float, Bid]] = []
+        for hint, bids in groups.items():
+            avg_gain = sum(max(0.0, x.expected_info_gain) for x in bids) / max(1, len(bids))
+            avg_urg = sum(max(0.0, x.urgency) for x in bids) / max(1, len(bids))
+            avg_aff = sum(max(0.0, x.affect_value) for x in bids) / max(1, len(bids))
+            avg_cost = sum(max(0.0, x.cost) for x in bids) / max(1, len(bids))
+            score = (avg_gain + 0.5 * avg_urg + 0.2 * avg_aff) - 0.3 * avg_cost
+            scored.append((score, bids[0]))
+
+        scored.sort(key=lambda t: t[0], reverse=True)
+        K = min(5, len(scored))
+        self._trace_last_winners = [bid for _, bid in scored[:K]]
+
+    def winners(self) -> List[Bid]:
+        return list(self._trace_last_winners)
+
+    def last_trace(self) -> List[Bid]:
+        return list(self._trace_last_winners)
 
     def process_frame(self, frame: Any) -> None:
         """Run planner/policy pipeline for a frame and publish RAG evidence bids."""

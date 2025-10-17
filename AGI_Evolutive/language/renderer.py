@@ -1,16 +1,52 @@
 from __future__ import annotations
 
-from typing import Dict, Any, List, Tuple
+from dataclasses import asdict
+from typing import Dict, Any, List, Tuple, Optional
 import random
 import re
 import time
 
 from AGI_Evolutive.social.tactic_selector import TacticSelector
 from AGI_Evolutive.social.interaction_rule import ContextBuilder
+from AGI_Evolutive.core.structures.mai import Bid, MAI
 
 
 def _tokens(s: str) -> set:
     return set(re.findall(r"[A-Za-zÀ-ÿ]{3,}", (s or "").lower()))
+
+
+def _build_language_state_snapshot(arch, ctx: Dict[str, Any]) -> Dict[str, Any]:
+    dialogue_ctx = ctx.get("dialogue") or ctx.get("dialogue_state")
+    if dialogue_ctx is None:
+        dialogue_ctx = getattr(getattr(arch, "language", None), "state", None)
+    return {
+        "beliefs": getattr(arch, "beliefs", None),
+        "self_model": getattr(arch, "self_model", None),
+        "dialogue": dialogue_ctx,
+        "world": getattr(arch, "world_model", None),
+    }
+
+
+def _apply_action_hint(text: str, hint: str) -> str:
+    hint = (hint or "").strip()
+    lower = text.lower()
+    if hint == "AskConsent":
+        prefix = "Avant de poursuivre, pourrais-tu confirmer que je peux partager ces informations ? "
+        if not lower.startswith(prefix.lower()):
+            return prefix + text
+    elif hint == "RefusePolitely":
+        apology = "Je suis désolé, je ne peux pas partager cette information."
+        if apology.lower() not in lower:
+            return f"{apology} {text}".strip()
+    elif hint == "PartialReveal":
+        note = "(Je partage uniquement ce qui est approprié pour protéger la confidentialité.)"
+        if note.lower() not in lower:
+            return f"{text}\n\n{note}"
+    elif hint == "RephraseRespectfully":
+        marker = "Je vais reformuler avec plus de délicatesse :"
+        if marker.lower() not in lower:
+            return f"{marker} {text}"
+    return text
 
 
 class LanguageRenderer:
@@ -103,6 +139,30 @@ class LanguageRenderer:
         """
         self._decrease_cooldowns()
         base = (semantics.get("text") or "").strip() or "Je te réponds en tenant compte de notre historique."
+        arch = getattr(getattr(self.voice, "self_model", None), "arch", None)
+        policy = getattr(arch, "policy", None) if arch else None
+        mechanism_store = getattr(policy, "_mechanisms", None) if policy else None
+        applicable_mais: List[MAI] = []
+        hints: List[Bid] = []
+        state_snapshot: Dict[str, Any] = {}
+        if arch and policy and mechanism_store and hasattr(policy, "build_predicate_registry"):
+            try:
+                state_snapshot = ctx.get("state_snapshot") or _build_language_state_snapshot(arch, ctx)
+                predicate_registry = policy.build_predicate_registry(state_snapshot)
+                applicable_mais = list(mechanism_store.scan_applicable(state_snapshot, predicate_registry))
+                for mai in applicable_mais:
+                    for bid in mai.propose(state_snapshot):
+                        if bid.action_hint in {"AskConsent", "RefusePolitely", "PartialReveal", "RephraseRespectfully"}:
+                            hints.append(bid)
+            except Exception:
+                applicable_mais = []
+                hints = []
+        for bid in hints:
+            base = _apply_action_hint(base, bid.action_hint)
+        if hints:
+            ctx.setdefault("applied_action_hints", []).extend(
+                {"origin": bid.origin_tag(), "hint": bid.action_hint} for bid in hints
+            )
         conf = self._confidence()
         budget = self._budget_chars(ctx)
 
@@ -133,7 +193,6 @@ class LanguageRenderer:
         )
 
         # Toujours max 1 ornement, priorité au passé s’il est pertinent
-        arch = getattr(getattr(self.voice, "self_model", None), "arch", None)
         if arch and getattr(arch, "memory", None):
             try:
                 arch.tactic_selector = getattr(arch, "tactic_selector", TacticSelector(arch))
@@ -193,5 +252,29 @@ class LanguageRenderer:
                 out += snippet
                 self._cooldown["colloc"] = 2.0
                 self._last_used["colloc"] = colloc_txt
+
+        if ctx.get("omitted_content") and arch:
+            payload = {
+                "reason": "MAI-driven",
+                "mai_ids": [mai.id for mai in applicable_mais],
+                "evidence": [
+                    asdict(doc)
+                    for mai in applicable_mais
+                    for doc in getattr(mai, "provenance_docs", [])
+                ],
+            }
+            audit = getattr(arch, "audit", None)
+            if audit and hasattr(audit, "log_omission_justifiee"):
+                try:
+                    audit.log_omission_justifiee(**payload)
+                except Exception:
+                    pass
+            else:
+                logger = getattr(arch, "logger", None)
+                if logger and hasattr(logger, "write"):
+                    try:
+                        logger.write("nlg.omission", **payload)
+                    except Exception:
+                        pass
 
         return out

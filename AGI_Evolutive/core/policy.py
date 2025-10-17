@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import asdict
 from math import sqrt
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Callable, Dict, Any, List, Optional, Tuple
 
 import random, copy, json, os, time
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.knowledge.mechanism_store import MechanismStore
+from AGI_Evolutive.core.structures.mai import MAI, Bid
 
 
 def rag_quality_signal(signals: dict) -> float:
@@ -17,6 +20,20 @@ def rag_quality_signal(signals: dict) -> float:
     div  = float(signals.get("rag_diversity", 0.0))
     n    = float(signals.get("rag_docs", 0.0))
     return max(0.0, min(1.0, 0.45*top1 + 0.35*mean + 0.15*div + 0.05*min(n/5.0,1.0)))
+
+
+class _SimpleBanditSelector:
+    """Minimal epsilon-greedy selector for bid arbitration."""
+
+    def __init__(self, epsilon: float = 0.15) -> None:
+        self.epsilon = max(0.0, min(1.0, float(epsilon)))
+
+    def choose(self, bids: List[Bid]) -> Bid:
+        if not bids:
+            raise ValueError("bids list cannot be empty")
+        if random.random() < self.epsilon:
+            return random.choice(bids)
+        return max(bids, key=lambda b: (b.expected_info_gain - 0.3 * b.cost, b.urgency, b.affect_value))
 
 
 class PolicyEngine:
@@ -34,6 +51,8 @@ class PolicyEngine:
         self._stats = defaultdict(lambda: {"s": 0, "n": 0})  # succès/essais par type de proposition
         self._last_confidence = 0.55
         self.last_decision: Optional[Dict[str, Any]] = None
+        self._mechanisms = MechanismStore()
+        self._bandit_selector = _SimpleBanditSelector()
 
         # charge si existe (best-effort)
         try:
@@ -173,6 +192,73 @@ class PolicyEngine:
         vals.sort()
         median = vals[len(vals) // 2]
         return float(0.5 * median + 0.5 * self._last_confidence)
+
+    # ------------------------------------------------------------------
+    # MAI helpers
+    def build_predicate_registry(self, state: Dict[str, Any]) -> Dict[str, Callable[..., bool]]:
+        def _get_dialogue(st: Dict[str, Any]) -> Any:
+            return st.get("dialogue")
+
+        def _get_self_model(st: Dict[str, Any]) -> Any:
+            return st.get("self_model")
+
+        def _get_beliefs(st: Dict[str, Any]) -> Any:
+            return st.get("beliefs")
+
+        predicate_registry: Dict[str, Callable[..., bool]] = {
+            "request_is_sensitive": lambda st: getattr(_get_dialogue(st), "is_sensitive", False),
+            "audience_is_not_owner": lambda st: getattr(_get_dialogue(st), "audience_id", None)
+            != getattr(_get_dialogue(st), "owner_id", None),
+            "has_consent": lambda st: getattr(_get_dialogue(st), "has_consent", False),
+            "imminent_harm_detected": lambda st: getattr(st.get("world"), "imminent_harm", False),
+            "has_commitment": lambda st, key: _get_self_model(st).has_commitment(key)
+            if hasattr(_get_self_model(st), "has_commitment")
+            else False,
+            "belief_mentions": lambda st, topic: bool(
+                getattr(_get_beliefs(st), "contains", lambda _: False)(topic)
+                if hasattr(_get_beliefs(st), "contains")
+                else getattr(_get_beliefs(st), "has_fact", lambda _: False)(topic)
+                if hasattr(_get_beliefs(st), "has_fact")
+                else False
+            ),
+            "belief_confidence_above": lambda st, threshold: bool(
+                getattr(_get_beliefs(st), "confidence_for", lambda *_: 0.0)(threshold)
+                if hasattr(_get_beliefs(st), "confidence_for")
+                else False
+            ),
+        }
+        return predicate_registry
+
+    def ingest_mechanism_bids(
+        self,
+        global_workspace: Any,
+        state: Dict[str, Any],
+        predicate_registry: Optional[Dict[str, Callable[..., bool]]] = None,
+    ) -> List[MAI]:
+        predicate_registry = predicate_registry or self.build_predicate_registry(state)
+        emitted: List[MAI] = []
+        if global_workspace is None or not hasattr(global_workspace, "submit"):
+            return emitted
+        try:
+            mechanisms = list(self._mechanisms.scan_applicable(state, predicate_registry))
+        except Exception:
+            mechanisms = []
+        for mechanism in mechanisms:
+            try:
+                for bid in mechanism.propose(state):
+                    try:
+                        global_workspace.submit(bid)
+                    except AttributeError:
+                        global_workspace.submit_bid(
+                            bid.payload.get("origin", "mai"),
+                            bid.action_hint,
+                            max(0.0, min(1.0, bid.expected_info_gain)),
+                            bid.payload,
+                        )
+                emitted.append(mechanism)
+            except Exception:
+                continue
+        return emitted
 
     def explain(self, proposal: Optional[Dict[str, Any]] = None, **kw) -> Dict[str, Any]:
         """Renvoie les composantes (freq/stab/val/risk/belief/novelty) + score final."""
@@ -408,3 +494,100 @@ class PolicyEngine:
             "meta": meta,
         }
         return self.last_decision
+
+    def decide_with_bids(
+        self,
+        winners: Optional[List[Bid]],
+        state: Dict[str, Any],
+        *,
+        global_workspace: Any = None,
+        proposals: Optional[List[Dict[str, Any]]] = None,
+        proposer=None,
+        homeo=None,
+        planner=None,
+        ctx: Optional[Dict[str, Any]] = None,
+        bandit_selector=None,
+    ) -> Dict[str, Any]:
+        ctx = ctx or {}
+        predicate_registry = self.build_predicate_registry(state)
+        emitted = []
+        if global_workspace is not None:
+            emitted = self.ingest_mechanism_bids(global_workspace, state, predicate_registry)
+            if winners is None:
+                try:
+                    winners = list(global_workspace.winners())
+                except Exception:
+                    winners = []
+        winners = list(winners or [])
+
+        def violates_hard_invariant(bid: Bid) -> bool:
+            return False
+
+        feasible = [bid for bid in winners if not violates_hard_invariant(bid)]
+
+        def dominates(a: Bid, b: Bid) -> bool:
+            score_a = (a.expected_info_gain - 0.3 * a.cost, a.urgency, a.affect_value)
+            score_b = (b.expected_info_gain - 0.3 * b.cost, b.urgency, b.affect_value)
+            return score_a > score_b
+
+        chosen: Optional[Bid] = None
+        bandit_applied = False
+        for candidate in feasible:
+            if all(dominates(candidate, other) for other in feasible if other is not candidate):
+                chosen = candidate
+                break
+
+        selector = bandit_selector or self._bandit_selector
+        if chosen is None and feasible:
+            try:
+                chosen = selector.choose(feasible)
+                bandit_applied = True
+            except Exception:
+                chosen = random.choice(feasible)
+
+        decision_bundle: Dict[str, Any] = {
+            "decision": "noop",
+            "originating_bids": [bid.origin_tag() for bid in winners],
+            "alternatives_rejetees": [asdict(bid) for bid in winners if bid is not chosen],
+            "mai_emitted": [mai.id for mai in emitted],
+            "evidence_refs": [
+                asdict(ref)
+                for mai in emitted
+                for ref in getattr(mai, "provenance_docs", [])
+            ],
+        }
+
+        if chosen is not None:
+            decision_bundle.update(
+                {
+                    "decision": chosen.action_hint,
+                    "chosen_bid": chosen.serialise(),
+                    "confidence": max(0.0, min(1.0, chosen.expected_info_gain)),
+                }
+            )
+        else:
+            decision_bundle["chosen_bid"] = None
+
+        decision_bundle["justification"] = {
+            "dominance_checked": bool(feasible),
+            "bandit_used": bandit_applied,
+            "ctx": dict(ctx),
+            "feasible_count": len(feasible),
+        }
+
+        if chosen is None and proposals is not None:
+            try:
+                fallback = self.decide(
+                    proposals,
+                    self_state=state.get("self_state"),
+                    proposer=proposer,
+                    homeo=homeo,
+                    planner=planner,
+                    ctx=ctx,
+                )
+                decision_bundle.setdefault("fallback_decision", fallback)
+            except Exception:
+                pass
+
+        self.last_decision = decision_bundle
+        return decision_bundle
