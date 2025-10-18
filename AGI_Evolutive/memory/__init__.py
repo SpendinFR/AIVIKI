@@ -16,6 +16,11 @@ import json
 import hashlib
 from .retrieval import MemoryRetrieval
 
+try:  # configuration optionnelle
+    from config import memory_flags as _mem_flags
+except Exception:  # pragma: no cover - robuste si config absente
+    _mem_flags = None  # type: ignore
+
 class MemoryType(Enum):
     """Types de mémoire dans le système"""
     SENSORY = "sensorielle"
@@ -81,6 +86,30 @@ class MemorySystem:
         except Exception:
             self.retrieval = None
 
+        self.prefs_bridge = None
+        self.salience_scorer = None
+        if getattr(_mem_flags, "ENABLE_PREFS_BRIDGE", False):
+            try:
+                from .prefs_bridge import PrefsBridge
+
+                self.prefs_bridge = PrefsBridge()
+            except Exception:
+                self.prefs_bridge = None
+        if getattr(_mem_flags, "ENABLE_SALIENCE_SCORER", False):
+            try:
+                from .salience_scorer import SalienceScorer
+
+                reward_module = None
+                if self.cognitive_architecture is not None:
+                    reward_module = getattr(self.cognitive_architecture, "reward_engine", None)
+                self.salience_scorer = SalienceScorer(
+                    reward=reward_module,
+                    goals=getattr(self, "goals", None),
+                    prefs=self.prefs_bridge,
+                )
+            except Exception:
+                self.salience_scorer = None
+
         # --- LIAISONS INTER-MODULES ---
         if self.cognitive_architecture is not None:
             self.reasoning = getattr(self.cognitive_architecture, "reasoning", None)
@@ -88,6 +117,17 @@ class MemorySystem:
             self.emotions = getattr(self.cognitive_architecture, "emotions", None)
             self.goals = getattr(self.cognitive_architecture, "goals", None)
             self.metacognition = getattr(self.cognitive_architecture, "metacognition", None)
+        else:
+            self.reasoning = None
+            self.perception = None
+            self.emotions = None
+            self.goals = None
+            self.metacognition = None
+
+        if self.salience_scorer is not None:
+            self.salience_scorer.goals = getattr(self, "goals", None)
+            if self.prefs_bridge and not self.salience_scorer.prefs:
+                self.salience_scorer.prefs = self.prefs_bridge
 
         
         # === MÉMOIRE SENSORIELLE ===
