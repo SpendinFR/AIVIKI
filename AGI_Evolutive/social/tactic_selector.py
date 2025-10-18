@@ -4,6 +4,7 @@
 # anti-répétition (récence), garde-fous Policy, et incertitude (terme UCB).
 from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
+from collections import defaultdict
 import time, math, random
 
 from AGI_Evolutive.social.interaction_rule import (
@@ -330,3 +331,49 @@ class TacticSelector:
         else:
             self.arch.memory.add_memory(rule)
         return rule
+
+
+# ---------------------------------------------------------------------------
+# Lightweight style bandit helper (for macro selection, optional usage)
+
+
+class _ThompsonBandit:
+    def __init__(self) -> None:
+        self.alpha = defaultdict(lambda: 1.0)
+        self.beta = defaultdict(lambda: 1.0)
+
+    def sample(self, arm: str) -> float:
+        a = self.alpha[arm]
+        b = self.beta[arm]
+        x = random.gammavariate(a, 1.0)
+        y = random.gammavariate(b, 1.0)
+        return x / (x + y) if (x + y) else 0.5
+
+    def update(self, arm: str, reward: float) -> None:
+        if reward > 0:
+            self.alpha[arm] += reward
+        elif reward < 0:
+            self.beta[arm] += -reward
+
+
+class StyleMacroBandit:
+    """Petit bandit Thompson-sampling pour choisir un macro style."""
+
+    DEFAULT_ARMS = ["sobre", "taquin", "coach", "deadpan"]
+
+    def __init__(self, arms: Optional[List[str]] = None) -> None:
+        self.arms = arms or list(self.DEFAULT_ARMS)
+        self._bandit = _ThompsonBandit()
+        self._last_arm: Optional[str] = None
+
+    def pick(self, context: Optional[Dict[str, Any]] = None) -> str:
+        scored = [(self._bandit.sample(arm), arm) for arm in self.arms]
+        scored.sort(key=lambda item: item[0], reverse=True)
+        self._last_arm = scored[0][1]
+        return self._last_arm
+
+    def feedback(self, reward: float, arm: Optional[str] = None) -> None:
+        choice = arm or self._last_arm
+        if not choice:
+            return
+        self._bandit.update(choice, float(reward))

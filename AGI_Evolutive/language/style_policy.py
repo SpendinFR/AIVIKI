@@ -62,6 +62,13 @@ class StylePolicy:
         "audit": ("mode audit", "challenge-moi", "questionne", "fais un audit"),
     }
 
+    STYLE_MACROS: ClassVar[Dict[str, Dict[str, float]]] = {
+        "taquin": {"warmth": +0.10, "directness": +0.10, "hedging": -0.10},
+        "coach": {"warmth": +0.10, "asking_rate": +0.15},
+        "sobre": {"structure": +0.10, "hedging": -0.05},
+        "deadpan": {"warmth": -0.15, "structure": +0.10},
+    }
+
     def set_mode(self, mode: str, persona_tone: Optional[str] = None) -> None:
         mode = (mode or "").lower()
         if mode not in self.MODE_PRESETS:
@@ -162,6 +169,11 @@ class StylePolicy:
         for overrides in (persona_overrides, mode_overrides):
             for key, value in overrides.items():
                 self.params[key] = self._clip(value)
+
+    def apply_macro(self, name: str) -> None:
+        for key, delta in self.STYLE_MACROS.get(name, {}).items():
+            base = self.params.get(key, 0.5)
+            self.params[key] = self._clip(base + delta)
 
     @staticmethod
     def _clip(val: float, lo: float = 0.0, hi: float = 1.0) -> float:
