@@ -121,3 +121,30 @@ REGISTRY: Dict[str, List[Dict[str, Any]]] = {
         {"stage": Stage.UPDATE},
     ],
 }
+
+
+REGISTRY_UPDATE: Dict[str, List[Dict[str, Any]]] = {
+    "SELF_JUDGMENT": [
+        {"stage": Stage.PERCEIVE},
+        {"stage": Stage.INTERPRET},
+        {"stage": Stage.EVALUATE},
+        {"stage": Stage.DECIDE},
+        _ACT(ActMode.HABIT),
+        {"stage": Stage.FEEDBACK},
+        {"stage": Stage.LEARN},
+        {"stage": Stage.UPDATE},
+    ],
+    "INTROSPECTION": [
+        {"stage": Stage.PERCEIVE},
+        {"stage": Stage.INTERPRET},
+        {"stage": Stage.REFLECT},
+        {"stage": Stage.REASON},
+        {"stage": Stage.DECIDE},
+        _ACT(ActMode.DELIBERATE),
+        {"stage": Stage.FEEDBACK},
+        {"stage": Stage.UPDATE},
+    ],
+}
+
+
+REGISTRY.update(REGISTRY_UPDATE)

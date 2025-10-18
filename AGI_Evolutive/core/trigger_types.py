@@ -12,6 +12,7 @@ class TriggerType(Enum):
     HABIT = auto()         # context-cued routine
     EMOTION = auto()       # affective peak drives priority
     MEMORY_ASSOC = auto()  # spontaneous recall/association
+    SELF_JUDGMENT = auto()  # self-reflection on performance/behavior
 
 
 @dataclass
