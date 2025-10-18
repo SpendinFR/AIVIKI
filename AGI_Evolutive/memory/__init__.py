@@ -8,7 +8,7 @@ import numpy as np
 import time
 from collections import deque
 from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
 import heapq
@@ -34,6 +34,15 @@ except Exception:  # pragma: no cover
 
 
 from .retrieval import MemoryRetrieval
+from .semantic_memory_manager import SemanticMemoryManager
+from .summarizer import ProgressiveSummarizer, SummarizerConfig
+
+__all__ = [
+    "MemorySystem",
+    "SemanticMemoryManager",
+    "ProgressiveSummarizer",
+    "SummarizerConfig",
+]
 
 try:  # configuration optionnelle
     from config import memory_flags as _mem_flags
@@ -87,9 +96,34 @@ class MemorySystem:
     Implémente les systèmes de mémoire multiples avec consolidation
     """
     
-    def __init__(self, cognitive_architecture=None):
+    def __init__(
+        self,
+        cognitive_architecture=None,
+        *,
+        memory_store: Optional[Any] = None,
+        concept_store: Optional[Any] = None,
+        episodic_linker: Optional[Any] = None,
+        consolidator: Optional[Any] = None,
+        summarize_period_s: int = 10 * 60,
+        summarizer_config: Optional[SummarizerConfig] = None,
+        llm_summarize_fn: Optional[Callable[..., str]] = None,
+    ):
         self.cognitive_architecture = cognitive_architecture
         self.creation_time = time.time()
+
+        # --- MÉMOIRE SÉMANTIQUE EXTERNE ---
+        self.store = memory_store
+        self.manager: Optional[SemanticMemoryManager] = None
+        if self.store is not None:
+            self.manager = SemanticMemoryManager(
+                memory_store=self.store,
+                concept_store=concept_store,
+                episodic_linker=episodic_linker,
+                consolidator=consolidator,
+                summarize_period_s=summarize_period_s,
+                summarizer_config=summarizer_config,
+                llm_summarize_fn=llm_summarize_fn,
+            )
 
         # Buffer circulaire des interactions les plus récentes pour les modules
         # comme le SemanticConceptExtractor ou l'EmotionEngine qui ont besoin
@@ -261,6 +295,29 @@ class MemorySystem:
 
         print("💾 Système de mémoire initialisé")
 
+    def add(self, item: Dict[str, Any]) -> str:
+        """Ajoute un item dans le store sémantique externe et déclenche la consolidation."""
+
+        if self.store is None:
+            raise RuntimeError("Aucun memory_store n'est configuré pour ce MemorySystem")
+
+        item_id = self.store.add_item(item)
+        if self.manager is not None:
+            try:
+                self.manager.on_new_items()
+            except Exception:
+                pass
+        return item_id
+
+    def tick(self) -> Dict[str, Any]:
+        """Déclenche un cycle de maintenance pour la mémoire sémantique externe."""
+
+        if self.manager is None:
+            return {}
+        try:
+            return self.manager.tick()
+        except Exception:
+            return {}
     def _score_item_salience(self, item: Dict[str, Any]) -> Optional[float]:
         if not self._salience_scorer:
             return None
