@@ -10,14 +10,20 @@ from AGI_Evolutive.cognition.meta_cognition import MetaCognition
 from AGI_Evolutive.cognition.planner import Planner
 from AGI_Evolutive.cognition.proposer import Proposer
 from AGI_Evolutive.cognition.reflection_loop import ReflectionLoop
+from AGI_Evolutive.cognition.thinking_monitor import ThinkingMonitor
 from AGI_Evolutive.cognition.trigger_bus import TriggerBus
 from AGI_Evolutive.cognition.trigger_router import TriggerRouter
+from AGI_Evolutive.cognition.understanding_aggregator import UnderstandingAggregator
 from AGI_Evolutive.cognition.pipelines_registry import REGISTRY, Stage, ActMode
 from AGI_Evolutive.core.config import load_config
+from AGI_Evolutive.core.decision_journal import DecisionJournal
 from AGI_Evolutive.core.evaluation import unified_priority
+from AGI_Evolutive.core.reasoning_ledger import ReasoningLedger
 from AGI_Evolutive.core.policy import PolicyEngine
+from AGI_Evolutive.core.selfhood_engine import SelfhoodEngine
 from AGI_Evolutive.core.self_model import SelfModel
 from AGI_Evolutive.core.telemetry import Telemetry
+from AGI_Evolutive.core.timeline_manager import TimelineManager
 from AGI_Evolutive.core.trigger_types import Trigger, TriggerType
 from AGI_Evolutive.emotions.emotion_engine import EmotionEngine
 from AGI_Evolutive.goals.curiosity import CuriosityEngine
@@ -425,6 +431,19 @@ class Orchestrator:
             concepts=_ConceptAdapter(self._concepts, self._memory_store),
             episodic=_EpisodicAdapter(self._episodic, self._memory_store),
         )
+
+        self.thinking_monitor = getattr(self, "thinking_monitor", None) or ThinkingMonitor()
+        self.understanding_agg = getattr(self, "understanding_agg", None) or UnderstandingAggregator()
+        self.selfhood = getattr(self, "selfhood", None) or SelfhoodEngine()
+        self.reasoning_ledger = getattr(self, "reasoning_ledger", None) or ReasoningLedger(
+            memory_store=self.memory.store if hasattr(self.memory, "store") else None
+        )
+        self.decision_journal = getattr(self, "decision_journal", None) or DecisionJournal(
+            memory_store=self.memory.store if hasattr(self.memory, "store") else None
+        )
+        self.timeline = getattr(self, "timeline", None) or TimelineManager(
+            memory_store=self.memory.store if hasattr(self.memory, "store") else None
+        )
         self.io = SimpleNamespace(
             perception=_PerceptionAdapter(self._perception_interface),
             action=_ActionAdapter(self._action_interface),
@@ -440,6 +459,12 @@ class Orchestrator:
             habits=_HabitSystem(),
         )
         self.core = SimpleNamespace(policy=_PolicyAdapter(self._policy_engine))
+
+        self._pending_triggers: List[Trigger] = []
+        self._current_trigger: Optional[Trigger] = None
+        self._current_topic: Optional[str] = None
+        self._current_decision_id: Optional[str] = None
+        self._current_trace_id: Optional[str] = None
 
         self.telemetry.log("orchestrator", "init", {"status": "ok"})
 
@@ -465,6 +490,7 @@ class Orchestrator:
         self.trigger_bus.register(self._memory_assoc_collector)
         self.trigger_bus.register(self._signal_collector)
         self.trigger_bus.register(self._habit_collector)
+        self.trigger_bus.register(self._followup_collector)
 
         self.memory.store.add({"kind": "system", "text": "Orchestrator initialized", "ts": time.time()})
 
@@ -476,6 +502,13 @@ class Orchestrator:
         self.scheduler.register_job("episodic_links", 120, lambda: self._episodic.link_recent(80))
 
     # --- Trigger collectors -------------------------------------------------
+    def _followup_collector(self) -> List[Trigger]:
+        if not self._pending_triggers:
+            return []
+        pending = list(self._pending_triggers)
+        self._pending_triggers = []
+        return pending
+
     def _user_collector(self) -> List[Trigger]:
         txt = getattr(self, "last_user_msg", None)
         if not txt:
@@ -860,6 +893,23 @@ class Orchestrator:
             "mode": None,
         }
 
+        self._current_trigger = trigger
+        payload = trigger.payload or {}
+        self._current_topic = (
+            payload.get("topic")
+            or (trigger.meta or {}).get("topic")
+            or payload.get("text")
+        )
+        self._current_decision_id = None
+        self._current_trace_id = None
+
+        monitor = getattr(self, "thinking_monitor", None)
+        decision_journal = getattr(self, "decision_journal", None)
+        reasoning_ledger = getattr(self, "reasoning_ledger", None)
+        understanding_agg = getattr(self, "understanding_agg", None)
+        selfhood = getattr(self, "selfhood", None)
+        policy_engine = getattr(self.core, "policy", None)
+
         for step in steps:
             stg = step["stage"]
             if step.get("skip_if") and step["skip_if"](ctx):
@@ -873,6 +923,32 @@ class Orchestrator:
                 ctx["scratch"]["concepts"] = self.memory.concepts.extract(ctx["obs"])
                 ctx["scratch"]["episodic_links"] = self.memory.episodic.link(ctx["obs"])
             elif stg is Stage.EVALUATE:
+                if monitor:
+                    monitor.begin_cycle()
+                decision_ctx = {"trigger": getattr(self, "_current_trigger", None), "mode": None}
+                if decision_journal:
+                    try:
+                        self._current_decision_id = decision_journal.new(decision_ctx)
+                    except Exception:
+                        self._current_decision_id = None
+                current_topic = getattr(self, "_current_topic", None)
+                if reasoning_ledger:
+                    try:
+                        self._current_trace_id = reasoning_ledger.start_trace(topic=current_topic)
+                    except Exception:
+                        self._current_trace_id = None
+                if (
+                    decision_journal
+                    and reasoning_ledger
+                    and self._current_decision_id
+                    and self._current_trace_id
+                ):
+                    try:
+                        decision_journal.attach_trace(
+                            self._current_decision_id, self._current_trace_id
+                        )
+                    except Exception:
+                        pass
                 emo = self.emotions.read()
                 prio = unified_priority(
                     impact=trigger.meta.get("importance", 0.6),
@@ -884,31 +960,111 @@ class Orchestrator:
                 )
                 ctx["scratch"]["priority"] = prio
             elif stg is Stage.REFLECT:
-                ctx["scratch"]["frame"] = self.cognition.planner.frame(
-                    trigger, stop_rules={"max_options": 3, "max_seconds": 900}
-                )
+                if monitor:
+                    monitor.on_reflect_start()
+                try:
+                    ctx["scratch"]["frame"] = self.cognition.planner.frame(
+                        trigger, stop_rules={"max_options": 3, "max_seconds": 900}
+                    )
+                finally:
+                    if monitor:
+                        monitor.on_reflect_end()
             elif stg is Stage.REASON:
-                ctx["scratch"]["reason"] = self.cognition.reflection_loop.test_hypotheses(
-                    ctx["scratch"], max_tests=3
-                )
+                if monitor:
+                    monitor.on_reason_start()
+                try:
+                    tested = self.cognition.reflection_loop.test_hypotheses(
+                        ctx.get("scratch", {}), max_tests=3
+                    )
+                    n_tested = (
+                        int(tested.get("tested", 0))
+                        if isinstance(tested, dict)
+                        else 0
+                    )
+                    if monitor:
+                        monitor.on_hypothesis_tested(n_tested)
+                    ctx.setdefault("scratch", {})["reason"] = tested
+                except Exception:
+                    pass
+                finally:
+                    if monitor:
+                        monitor.on_reason_end()
             elif stg is Stage.DECIDE:
-                ctx["decision"] = self.core.policy.decide(ctx)
-                ctx["expected"] = ctx["decision"].get("expected", {"score": 1.0})
+                ctx_depth = len(list(ctx.keys())) if isinstance(ctx, dict) else 0
+                if monitor:
+                    monitor.set_depth(ctx_depth)
+                decision = policy_engine.decide(ctx) if policy_engine else {}
+                ctx["decision"] = decision
+                ctx["expected"] = decision.get("expected", {"score": 1.0})
+                if (
+                    decision_journal
+                    and self._current_decision_id
+                    and isinstance(decision, dict)
+                ):
+                    try:
+                        decision_journal.commit_action(
+                            self._current_decision_id,
+                            decision.get("action", {}),
+                            (decision.get("expected") or {}).get("score", 1.0),
+                        )
+                    except Exception:
+                        pass
+                if (
+                    reasoning_ledger
+                    and self._current_trace_id
+                    and isinstance(decision, dict)
+                ):
+                    try:
+                        reasoning_ledger.select_option(
+                            self._current_trace_id,
+                            chosen_id=(decision.get("action", {}) or {}).get("type", "act"),
+                            justification_text=(decision.get("action", {}) or {}).get("desc", ""),
+                            stop_rules_hit=False,
+                        )
+                    except Exception:
+                        pass
             elif stg is Stage.ACT:
                 mode = step["mode"](ctx) if callable(step.get("mode")) else step.get("mode")
                 ctx["mode"] = mode
+                action = (ctx.get("decision") or {}).get("action")
+                if not action:
+                    continue
                 jid = self._submit_for_mode(
                     mode,
-                    ctx["decision"]["action"],
+                    action,
                     trigger.meta,
                     ctx["scratch"].get("priority", 0.6),
                 )
                 events = self.job_manager.poll_completed(32)
+                result: Optional[Dict[str, Any]] = None
                 for ev in events:
                     job = ev.get("job", {})
                     if job.get("id") == jid:
-                        ctx["obtained"] = {"score": 1.0 if ev.get("event") == "done" else 0.0}
+                        ctx["obtained"] = {
+                            "score": 1.0 if ev.get("event") == "done" else 0.0
+                        }
+                        result = ev.get("result") if isinstance(ev, dict) else None
                         break
+                decision = ctx.get("decision") or {}
+                obtained_score = (
+                    1.0
+                    if (result and result.get("status") in ("ok", "done", "success"))
+                    else float((ctx.get("obtained") or {"score": 0.0}).get("score", 0.0))
+                )
+                if decision_journal and self._current_decision_id:
+                    try:
+                        decision_journal.close(self._current_decision_id, obtained_score)
+                    except Exception:
+                        pass
+                if reasoning_ledger and self._current_trace_id:
+                    try:
+                        reasoning_ledger.end_trace(
+                            self._current_trace_id,
+                            expected=(decision.get("expected") or {}).get("score", 1.0),
+                            obtained=obtained_score,
+                        )
+                    except Exception:
+                        pass
             elif stg is Stage.FEEDBACK:
                 exp = float(ctx["expected"].get("score", 1.0))
                 obt = float((ctx.get("obtained") or {"score": 0.0}).get("score", 0.0))
@@ -923,10 +1079,136 @@ class Orchestrator:
                     }
                 )
                 mode_name = ctx["mode"].name if ctx.get("mode") else "unknown"
-                self.core.policy.update_outcome(mode_name, ok=(obt >= exp))
+                if policy_engine and hasattr(policy_engine, "update_outcome"):
+                    try:
+                        policy_engine.update_outcome(mode_name, ok=(obt >= exp))
+                    except Exception:
+                        pass
             elif stg is Stage.LEARN:
                 self.cognition.evolution.reinforce(ctx)
             elif stg is Stage.UPDATE:
                 self.memory.consolidator.maybe_consolidate()
+                prediction_error = float(ctx.get("scratch", {}).get("prediction_error", 0.0))
+                memory_consistency = float(ctx.get("scratch", {}).get("memory_consistency", 0.5))
+                transfer_success = float(ctx.get("scratch", {}).get("transfer_success", 0.5))
+                explanatory_adequacy = float(ctx.get("scratch", {}).get("explanatory_adequacy", 0.5))
+                social_appraisal = float(ctx.get("scratch", {}).get("social_appraisal", 0.5))
+                clarification_penalty = (
+                    1.0
+                    if (ctx.get("decision", {}).get("action", {}).get("type") == "clarify")
+                    else 0.0
+                )
+                if policy_engine and hasattr(policy_engine, "get_last_confidence"):
+                    try:
+                        last_conf = float(policy_engine.get_last_confidence() or 0.7)
+                    except Exception:
+                        last_conf = 0.7
+                    calibration_gap = abs(last_conf - float(1.0 - prediction_error))
+                else:
+                    calibration_gap = 0.3
+
+                current_topic = (
+                    ctx.get("topic")
+                    or getattr(self, "_current_topic", None)
+                    or "__generic__"
+                )
+
+                if understanding_agg:
+                    try:
+                        U = understanding_agg.compute(
+                            topic=current_topic,
+                            prediction_error=prediction_error,
+                            memory_consistency=memory_consistency,
+                            transfer_success=transfer_success,
+                            explanatory_adequacy=explanatory_adequacy,
+                            social_appraisal=social_appraisal,
+                            clarification_penalty=clarification_penalty,
+                            calibration_gap=calibration_gap,
+                        )
+                    except Exception:
+                        U = SimpleNamespace(U_topic=0.5, U_global=0.5)
+                else:
+                    U = SimpleNamespace(U_topic=0.5, U_global=0.5)
+
+                snap = monitor.snapshot() if monitor else SimpleNamespace(thinking_score=0.5)
+
+                if hasattr(self.memory, "store") and hasattr(self.memory.store, "add"):
+                    self.memory.store.add(
+                        {
+                            "kind": "self_judgment",
+                            "topic": current_topic,
+                            "scores": {
+                                "U_topic": U.U_topic,
+                                "U_global": U.U_global,
+                                "thinking": getattr(snap, "thinking_score", 0.5),
+                                "calibration_gap": calibration_gap,
+                                "consistency": memory_consistency,
+                                "transfer": transfer_success,
+                                "social_appraisal": social_appraisal,
+                            },
+                            "flags": {
+                                "asked_clarification": bool(clarification_penalty > 0.0),
+                                "contradiction_detected": bool(
+                                    ctx.get("scratch", {}).get("contradiction", False)
+                                ),
+                            },
+                            "evidence_refs": ctx.get("scratch", {}).get("evidence_refs", []),
+                        }
+                    )
+
+                if selfhood:
+                    try:
+                        selfhood.update_from_cycle(
+                            U_global=U.U_global,
+                            thinking_score=getattr(snap, "thinking_score", 0.5),
+                            social_appraisal=social_appraisal,
+                            calibration_gap=calibration_gap,
+                            consistency_signal=memory_consistency,
+                            evidence_refs=ctx.get("scratch", {}).get("evidence_refs", []),
+                        )
+                    except Exception:
+                        pass
+
+                if (
+                    policy_engine
+                    and hasattr(policy_engine, "update_meta")
+                    and selfhood
+                    and hasattr(selfhood, "policy_hints")
+                ):
+                    try:
+                        policy_engine.update_meta(selfhood.policy_hints())
+                    except Exception:
+                        pass
+
+                followups: List[Trigger] = []
+                if U.U_topic < 0.4 and ctx.get("meta", {}).get("immediacy", 0.5) > 0.7:
+                    followups.append(
+                        Trigger(
+                            TriggerType.GOAL,
+                            {"source": "self_judgment", "importance": 0.9, "immediacy": 0.9},
+                            {"goal_kind": "ClarifyUserIntent", "topic": current_topic},
+                        )
+                    )
+
+                self_trust = (
+                    getattr(getattr(selfhood, "traits", SimpleNamespace()), "self_trust", 1.0)
+                    if selfhood
+                    else 1.0
+                )
+                if (
+                    self_trust < 0.45
+                    and policy_engine
+                    and hasattr(policy_engine, "set_uncertainty_disclosure")
+                ):
+                    try:
+                        policy_engine.set_uncertainty_disclosure(True)
+                    except Exception:
+                        pass
+
+                for t in followups:
+                    try:
+                        self._pending_triggers.append(t)
+                    except Exception:
+                        pass
 
         return ctx
