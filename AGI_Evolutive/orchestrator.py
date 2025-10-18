@@ -414,6 +414,10 @@ class Orchestrator:
 
         self.self_model = SelfModel()
         self._policy_engine = PolicyEngine()
+        try:
+            self._policy_engine.self_model = self.self_model
+        except Exception:
+            pass
         self._memory_store = MemoryStore()
         self._consolidator = Consolidator(self._memory_store)
         self._concepts = ConceptExtractor(self._memory_store)
@@ -1060,8 +1064,11 @@ class Orchestrator:
         return {
             "snapshot_id": snap_id,
             "delta_written": bool(delta_event),
+            "delta_event": delta_event,
             "projected_goals": [t.payload for t in followups],
+            "projected_plan": projected,
             "gaps": gaps,
+            "beliefs": beliefs_now,
         }
 
     def _run_action(self, ctx: Any, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -1094,6 +1101,21 @@ class Orchestrator:
             or payload.get("text")
         )
         ctx["topic"] = self._current_topic
+        ctx["from"] = (
+            payload.get("from")
+            or payload.get("speaker")
+            or payload.get("author")
+            or (trigger.meta or {}).get("from")
+            or "user"
+        )
+        raw_text = payload.get("text") or payload.get("content")
+        if isinstance(raw_text, bytes):
+            try:
+                raw_text = raw_text.decode("utf-8", errors="ignore")
+            except Exception:
+                raw_text = str(raw_text)
+        ctx["text"] = str(raw_text) if raw_text is not None else ""
+        ctx["msg_ref"] = payload.get("msg_ref") or (trigger.meta or {}).get("msg_ref")
         self._current_decision_id = None
         self._current_trace_id = None
 
@@ -1111,6 +1133,23 @@ class Orchestrator:
 
             if stg is Stage.PERCEIVE:
                 ctx["obs"] = self.io.perception.observe(trigger)
+                if isinstance(ctx["obs"], dict):
+                    obs_text = ctx["obs"].get("text") or ctx["obs"].get("content")
+                    if obs_text and not ctx.get("text"):
+                        ctx["text"] = str(obs_text)
+                try:
+                    self.self_model.record_interaction(
+                        {
+                            "with": ctx.get("from", "user"),
+                            "when": time.time(),
+                            "topic": ctx.get("topic") or "__generic__",
+                            "summary": ctx.get("summary")
+                            or (ctx.get("text", "")[:120] if ctx.get("text") else ""),
+                            "ref": ctx.get("msg_ref"),
+                        }
+                    )
+                except Exception:
+                    pass
             elif stg is Stage.ATTEND:
                 pass
             elif stg is Stage.INTERPRET:
@@ -1259,6 +1298,30 @@ class Orchestrator:
                         )
                     except Exception:
                         pass
+                try:
+                    self.self_model.register_decision(
+                        {
+                            "decision_id": self._current_decision_id,
+                            "topic": ctx.get("topic") or "__generic__",
+                            "action": (decision.get("action", {}) or {}).get("type"),
+                            "expected": float((decision.get("expected") or {}).get("score", 1.0)),
+                            "obtained": float(obtained_score),
+                            "trace_id": self._current_trace_id,
+                            "ts": time.time(),
+                        }
+                    )
+                except Exception:
+                    pass
+                try:
+                    jm = getattr(self, "job_manager", None)
+                    if jm and hasattr(jm, "snapshot_identity_view"):
+                        view = jm.snapshot_identity_view() or {}
+                        self.self_model.update_work(
+                            current=view.get("current"),
+                            recent=view.get("recent"),
+                        )
+                except Exception:
+                    pass
             elif stg is Stage.FEEDBACK:
                 exp = float(ctx["expected"].get("score", 1.0))
                 obt = float((ctx.get("obtained") or {"score": 0.0}).get("score", 0.0))
@@ -1340,7 +1403,11 @@ class Orchestrator:
                 else:
                     U = SimpleNamespace(U_topic=0.5, U_global=0.5)
 
-                snap = monitor.snapshot() if monitor else SimpleNamespace(thinking_score=0.5)
+                snap = (
+                    monitor.snapshot()
+                    if monitor
+                    else SimpleNamespace(thinking_score=0.5, depth=0)
+                )
 
                 if hasattr(self.memory, "store") and hasattr(self.memory.store, "add"):
                     self.memory.store.add(
@@ -1392,7 +1459,121 @@ class Orchestrator:
 
                 try:
                     topic = ctx.get("topic") or getattr(self, "_current_topic", "__generic__")
-                    self.record_knowledge_milestone(topic=topic, ctx=ctx)
+                    milestone_info = self.record_knowledge_milestone(topic=topic, ctx=ctx)
+                except Exception:
+                    milestone_info = None
+
+                if not isinstance(ctx.get("gaps"), list):
+                    ctx["gaps"] = []
+                else:
+                    ctx.setdefault("gaps", [])
+                if isinstance(milestone_info, dict):
+                    for gap in milestone_info.get("gaps", []) or []:
+                        if gap not in ctx["gaps"]:
+                            ctx["gaps"].append(gap)
+
+                # --- SelfIdentity : auto-jugement & état interne ---
+                try:
+                    traits_growth = 0.0
+                    phase = "novice"
+                    if hasattr(self, "selfhood") and hasattr(self.selfhood, "traits"):
+                        traits_growth = float(
+                            getattr(self.selfhood.traits, "growth_rate", 0.0)
+                        )
+                        phase = str(getattr(self.selfhood.traits, "phase", "novice"))
+                    self.self_model.attach_selfhood(
+                        traits={
+                            "self_efficacy": float(U.U_global),
+                            "self_trust": float(1.0 - calibration_gap),
+                            "self_consistency": float(memory_consistency),
+                            "social_acceptance": float(social_appraisal),
+                            "growth_rate": traits_growth,
+                        },
+                        phase=phase,
+                        claims={
+                            "thinking": {
+                                "text": "I think when I explore, hypothesize and reason.",
+                                "confidence": float(getattr(snap, "thinking_score", 0.5)),
+                            },
+                            "understanding": {
+                                "text": "I understand when I can predict, explain and transfer.",
+                                "confidence": float(U.U_global),
+                            },
+                        },
+                        evidence_refs=ctx.get("scratch", {}).get("evidence_refs", []),
+                    )
+                except Exception:
+                    pass
+
+                try:
+                    self.self_model.update_state(
+                        emotions=ctx.get("emotions"),
+                        doubts=ctx.get("doubts"),
+                        cognition={
+                            "thinking": float(getattr(snap, "thinking_score", 0.5)),
+                            "reason_depth": int(getattr(snap, "depth", 0)),
+                            "uncertainty": float(calibration_gap),
+                            "load": float(ctx.get("load", 0.0)),
+                        },
+                    )
+                except Exception:
+                    pass
+
+                try:
+                    self.self_model.set_identity_patch(
+                        {
+                            "self_judgment": {
+                                "understanding": {
+                                    "global": float(U.U_global),
+                                    "topics": ctx.get("U_topics", {}),
+                                    "calibration_gap": float(calibration_gap),
+                                }
+                            }
+                        }
+                    )
+                except Exception:
+                    pass
+
+                try:
+                    topic = ctx.get("topic") or getattr(self, "_current_topic", "__generic__")
+                    beliefs_now: List[Dict[str, Any]] = []
+                    if isinstance(milestone_info, dict):
+                        beliefs_now = milestone_info.get("beliefs", []) or []
+                    elif hasattr(self.memory, "semantic") and hasattr(
+                        self.memory.semantic, "export_topic_beliefs"
+                    ):
+                        beliefs_now = list(
+                            self.memory.semantic.export_topic_beliefs(topic=topic)
+                        )
+                    snap_id = None
+                    if isinstance(milestone_info, dict):
+                        snap_id = milestone_info.get("snapshot_id")
+                    delta = None
+                    if isinstance(milestone_info, dict):
+                        delta = milestone_info.get("delta_event")
+                    if (
+                        hasattr(self, "_last_beliefs_by_topic")
+                        and isinstance(self._last_beliefs_by_topic, dict)
+                        and beliefs_now
+                    ):
+                        self._last_beliefs_by_topic[topic] = beliefs_now
+                    related = ctx.get("related_topics", []) or []
+                    topics = [topic, *related]
+                    topics = [t for t in dict.fromkeys([t for t in topics if t])]
+                    self.self_model.update_timeline(
+                        last_topics=topics,
+                        last_snapshot_id=snap_id,
+                        last_delta_id=(delta.get("id") if isinstance(delta, dict) else None),
+                    )
+                    gaps = ctx.get("gaps", [])
+                    projected = None
+                    if isinstance(milestone_info, dict):
+                        projected = milestone_info.get("projected_plan")
+                    if projected is None and hasattr(self, "timeline") and hasattr(
+                        self.timeline, "project"
+                    ):
+                        projected = self.timeline.project(topic, gaps=gaps) if gaps else []
+                    self.self_model.set_learning_plan(projected or [])
                 except Exception:
                     pass
 
