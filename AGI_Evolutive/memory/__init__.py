@@ -14,6 +14,25 @@ from enum import Enum
 import heapq
 import json
 import hashlib
+
+try:
+    from config.memory_flags import ENABLE_SALIENCE_SCORER, ENABLE_SUMMARIZER  # type: ignore
+except Exception:
+    ENABLE_SALIENCE_SCORER, ENABLE_SUMMARIZER = True, True
+
+
+try:  # pragma: no cover - optional integration
+    from memory.salience_scorer import SalienceScorer  # type: ignore
+except Exception:  # pragma: no cover
+    SalienceScorer = None
+
+
+try:  # pragma: no cover - optional integration
+    from memory.semantic_memory_manager import SemanticMemoryManager  # type: ignore
+except Exception:  # pragma: no cover
+    SemanticMemoryManager = None
+
+
 from .retrieval import MemoryRetrieval
 
 class MemoryType(Enum):
@@ -76,8 +95,33 @@ class MemorySystem:
         # l'attribut `memories`.
         self.memories = self._recent_memories
 
+        architecture = self.cognitive_architecture
+        self._preferences = getattr(architecture, "preferences", None) if architecture else None
+
+        self._salience_scorer = None
+        if ENABLE_SALIENCE_SCORER and SalienceScorer:
+            try:
+                self._salience_scorer = SalienceScorer(
+                    emotion_engine=getattr(architecture, "emotions", None) if architecture else None,
+                    reward_engine=getattr(architecture, "reward_engine", None) if architecture else None,
+                    goals=getattr(architecture, "goals", None) if architecture else None,
+                    preferences=self._preferences,
+                )
+            except Exception:
+                self._salience_scorer = None
+
+        self.manager = None
+        if ENABLE_SUMMARIZER and SemanticMemoryManager:
+            try:
+                self.manager = SemanticMemoryManager(self, architecture=architecture)
+            except Exception:
+                self.manager = None
+
         try:
-            self.retrieval = MemoryRetrieval()
+            self.retrieval = MemoryRetrieval(
+                salience_scorer=self._salience_scorer,
+                preferences=self._preferences,
+            )
         except Exception:
             self.retrieval = None
 
@@ -174,8 +218,33 @@ class MemorySystem:
         
         # === CONNAISSANCES INNÉES ===
         self._initialize_innate_memories()
-        
+
         print("💾 Système de mémoire initialisé")
+
+    def _score_item_salience(self, item: Dict[str, Any]) -> Optional[float]:
+        if not self._salience_scorer:
+            return None
+        try:
+            return float(self._salience_scorer.score(item))
+        except Exception:
+            return None
+
+    def _notify_semantic_manager(self, item: Dict[str, Any]) -> None:
+        if not self.manager:
+            return
+        for handler_name in (
+            "notify_add",
+            "notify_added",
+            "on_memory_added",
+            "handle_new_memory",
+        ):
+            handler = getattr(self.manager, handler_name, None)
+            if callable(handler):
+                try:
+                    handler(item)
+                except Exception:
+                    pass
+                break
 
     def store_interaction(self, record: Dict[str, Any]):
         """
@@ -187,8 +256,31 @@ class MemorySystem:
         try:
             user = str(record.get("user", ""))
             agent = str(record.get("agent", ""))
+            timestamp = float(record.get("timestamp", time.time()))
             extra = {k: v for k, v in record.items() if k not in ("user", "agent")}
+            extra.setdefault("ts", timestamp)
+            conversation_text = record.get("text") or f"[USER] {user}\n[AGENT] {agent}"
+            payload = {
+                "type": "interaction",
+                "user": user,
+                "agent": agent,
+                "text": conversation_text,
+                "ts": timestamp,
+                "meta": dict(extra),
+            }
+            for key, value in record.items():
+                if key in {"user", "agent"}:
+                    continue
+                payload.setdefault(key, value)
+
+            salience = self._score_item_salience(payload)
+            if salience is not None:
+                extra.setdefault("salience", salience)
+                payload["salience"] = salience
             interaction_id = self.retrieval.add_interaction(user=user, agent=agent, extra=extra)
+            payload["id"] = interaction_id
+            payload.setdefault("meta", {}).update(extra)
+            self._notify_semantic_manager(payload)
             semantic = getattr(self, "semantic", None)
             if semantic and hasattr(semantic, "index_document"):
                 meta = {"type": "interaction", **extra}
@@ -205,10 +297,27 @@ class MemorySystem:
         if not getattr(self, "retrieval", None):
             return
         try:
+            timestamp = time.time()
+            payload = {
+                "type": "document",
+                "title": title,
+                "source": source,
+                "text": text,
+                "ts": timestamp,
+                "meta": {k: v for k, v in (("title", title), ("source", source)) if v},
+            }
+            salience = self._score_item_salience(payload)
+            if salience is not None:
+                payload["salience"] = salience
+                payload.setdefault("meta", {})["salience"] = salience
             doc_id = self.retrieval.add_document(text=text, title=title, source=source)
+            payload["id"] = doc_id
+            self._notify_semantic_manager(payload)
             semantic = getattr(self, "semantic", None)
             if semantic and hasattr(semantic, "index_document"):
                 meta = {"type": "document", "title": title, "source": source}
+                if salience is not None:
+                    meta["salience"] = salience
                 semantic.index_document(
                     f"doc::{doc_id}",
                     text,
