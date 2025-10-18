@@ -53,6 +53,7 @@ class PolicyEngine:
         self.last_decision: Optional[Dict[str, Any]] = None
         self._mechanisms = MechanismStore()
         self._bandit_selector = _SimpleBanditSelector()
+        self.self_model: Optional[Any] = None
 
         # Stats légères pour la policy (modes d'action)
         self.stats = {
@@ -189,7 +190,14 @@ class PolicyEngine:
         freq = self._freq_conf(proposal)                    # 0..1
         stab = self._stability_probe(proposer, homeo)       # 0..1
         val, risk = self._value_and_risk(planner, proposal) # 0..1, 0..1
-        belief = float(ctx.get("belief_confidence", 0.6))   # 0..1 (exposé par SelfModel si tu l’as)
+        try:
+            model = getattr(self, "self_model", None)
+            if model and hasattr(model, "belief_confidence"):
+                belief = float(model.belief_confidence(ctx))
+            else:
+                belief = float(ctx.get("belief_confidence", 0.6))
+        except Exception:
+            belief = float(ctx.get("belief_confidence", 0.6))
         novelty_fam = float(ctx.get("novelty_familiarity", 0.7))  # 0..1 (1 = familier, 0 = inédit)
 
         w = {"freq": 0.35, "stab": 0.25, "val": 0.25, "belief": 0.15}
@@ -233,15 +241,24 @@ class PolicyEngine:
             except (TypeError, ValueError):
                 return False
 
+        def _has_commitment(st: Dict[str, Any], key: Any) -> bool:
+            model = getattr(self, "self_model", None)
+            if model is None:
+                model = _get_self_model(st)
+            if not hasattr(model, "has_commitment"):
+                return False
+            try:
+                return bool(model.has_commitment(str(key)))
+            except Exception:
+                return False
+
         predicate_registry: Dict[str, Callable[..., bool]] = {
             "request_is_sensitive": lambda st: getattr(_get_dialogue(st), "is_sensitive", False),
             "audience_is_not_owner": lambda st: getattr(_get_dialogue(st), "audience_id", None)
             != getattr(_get_dialogue(st), "owner_id", None),
             "has_consent": lambda st: getattr(_get_dialogue(st), "has_consent", False),
             "imminent_harm_detected": lambda st: getattr(st.get("world"), "imminent_harm", False),
-            "has_commitment": lambda st, key: _get_self_model(st).has_commitment(key)
-            if hasattr(_get_self_model(st), "has_commitment")
-            else False,
+            "has_commitment": _has_commitment,
             "belief_mentions": lambda st, topic: bool(
                 getattr(_get_beliefs(st), "contains", lambda _: False)(topic)
                 if hasattr(_get_beliefs(st), "contains")
