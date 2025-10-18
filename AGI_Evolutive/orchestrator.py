@@ -38,6 +38,18 @@ from AGI_Evolutive.light_scheduler import LightScheduler
 from AGI_Evolutive.runtime.job_manager import JobManager
 
 
+# --- seuils / cadence (tunable) ---
+_SJ_CONF = {
+    "surprise_threshold": 0.50,
+    "contradiction_boost": 0.10,
+    "heartbeat_every": 10,
+    "heartbeat_importance": 0.40,
+    "heartbeat_immediacy": 0.20,
+    "surprise_importance": 0.70,
+    "surprise_immediacy": 0.60,
+}
+
+
 class _MemoryStoreAdapter:
     def __init__(self, store: MemoryStore):
         self._store = store
@@ -465,6 +477,11 @@ class Orchestrator:
         self._current_topic: Optional[str] = None
         self._current_decision_id: Optional[str] = None
         self._current_trace_id: Optional[str] = None
+        self._idle_beat = 0
+        self._last_prediction_error = 0.0
+        self._last_contradiction = False
+        self._sj_new_items_queue: List[Dict[str, Any]] = []
+        self._last_beliefs_by_topic: Dict[str, List[Dict[str, Any]]] = {}
 
         self.telemetry.log("orchestrator", "init", {"status": "ok"})
 
@@ -491,6 +508,7 @@ class Orchestrator:
         self.trigger_bus.register(self._signal_collector)
         self.trigger_bus.register(self._habit_collector)
         self.trigger_bus.register(self._followup_collector)
+        self._register_self_judgment_collectors()
 
         self.memory.store.add({"kind": "system", "text": "Orchestrator initialized", "ts": time.time()})
 
@@ -500,6 +518,77 @@ class Orchestrator:
             "concepts", 180, lambda: self._concepts.extract_from_recent(200)
         )
         self.scheduler.register_job("episodic_links", 120, lambda: self._episodic.link_recent(80))
+
+    def _register_self_judgment_collectors(self):
+
+        def _sj_from_feedback() -> List[Trigger]:
+            items: List[Trigger] = []
+            pe = float(getattr(self, "_last_prediction_error", 0.0))
+            if pe >= _SJ_CONF["surprise_threshold"]:
+                importance = _SJ_CONF["surprise_importance"]
+                if getattr(self, "_last_contradiction", False):
+                    importance += _SJ_CONF["contradiction_boost"]
+                items.append(
+                    Trigger(
+                        TriggerType.SELF_JUDGMENT,
+                        {
+                            "source": "feedback",
+                            "importance": min(1.0, importance),
+                            "immediacy": _SJ_CONF["surprise_immediacy"],
+                        },
+                        {
+                            "kind": "standard",
+                            "reason": "surprise",
+                            "prediction_error": pe,
+                        },
+                    )
+                )
+            self._last_contradiction = False
+            return items
+
+        def _sj_heartbeat() -> List[Trigger]:
+            items: List[Trigger] = []
+            self._idle_beat = int(getattr(self, "_idle_beat", 0)) + 1
+            every = int(_SJ_CONF["heartbeat_every"])
+            low_load = True
+            if hasattr(self, "job_manager") and hasattr(self.job_manager, "is_low_load"):
+                try:
+                    low_load = bool(self.job_manager.is_low_load())
+                except Exception:
+                    low_load = True
+            if low_load and self._idle_beat % max(1, every) == 0:
+                items.append(
+                    Trigger(
+                        TriggerType.SELF_JUDGMENT,
+                        {
+                            "source": "heartbeat",
+                            "importance": _SJ_CONF["heartbeat_importance"],
+                            "immediacy": _SJ_CONF["heartbeat_immediacy"],
+                        },
+                        {"kind": "light", "reason": "periodic"},
+                    )
+                )
+            return items
+
+        def _sj_on_new_items() -> List[Trigger]:
+            items: List[Trigger] = []
+            queue: List[Dict[str, Any]] = list(getattr(self, "_sj_new_items_queue", []))
+            K = 2
+            drained = queue[:K]
+            self._sj_new_items_queue = queue[K:]
+            for item in drained:
+                meta = {"source": "consolidation", "importance": 0.6, "immediacy": 0.5}
+                payload = {"kind": "standard", "reason": "new_item", "target": item}
+                items.append(Trigger(TriggerType.SELF_JUDGMENT, meta, payload))
+            return items
+
+        if hasattr(self, "trigger_bus") and hasattr(self.trigger_bus, "register"):
+            self.trigger_bus.register(_sj_from_feedback)
+            self.trigger_bus.register(_sj_heartbeat)
+            self.trigger_bus.register(_sj_on_new_items)
+        else:
+            self._collectors = getattr(self, "_collectors", [])
+            self._collectors += [_sj_from_feedback, _sj_heartbeat, _sj_on_new_items]
 
     # --- Trigger collectors -------------------------------------------------
     def _followup_collector(self) -> List[Trigger]:
@@ -872,6 +961,108 @@ class Orchestrator:
             timeout_s=300.0,
         )
 
+    def record_knowledge_milestone(self, topic: str, ctx: Optional[Dict[str, Any]] = None):
+        """Capture l'état courant des croyances et projette des follow-ups d'apprentissage."""
+
+        ctx = ctx or {}
+
+        beliefs_now: List[Dict[str, Any]] = []
+        if hasattr(self.memory, "semantic") and hasattr(self.memory.semantic, "export_topic_beliefs"):
+            try:
+                beliefs_now = list(self.memory.semantic.export_topic_beliefs(topic=topic)) or []
+            except Exception:
+                beliefs_now = []
+
+        snap_id = None
+        if hasattr(self, "timeline") and hasattr(self.timeline, "snapshot"):
+            try:
+                snap_id = self.timeline.snapshot(topic, beliefs_now)
+            except Exception:
+                snap_id = None
+
+        delta_event = None
+        prev = self._last_beliefs_by_topic.get(topic)
+        if prev is not None and hasattr(self.timeline, "delta"):
+            try:
+                delta_event = self.timeline.delta(topic, prev, beliefs_now)
+                if hasattr(self.memory, "store") and hasattr(self.memory.store, "add") and delta_event:
+                    self.memory.store.add(delta_event)
+            except Exception:
+                delta_event = None
+
+        self._last_beliefs_by_topic[topic] = beliefs_now
+
+        gaps: List[str] = []
+        if isinstance(ctx.get("gaps"), list):
+            gaps.extend([str(g) for g in ctx["gaps"]])
+
+        if delta_event:
+            low_conf = [
+                b.get("stmt")
+                for b in delta_event.get("updated", [])
+                if float(b.get("conf", 0.0)) < 0.5
+            ]
+            gaps.extend([g for g in low_conf if g])
+
+        try:
+            if hasattr(self.memory, "concepts") and hasattr(self.memory.concepts, "recent_gaps"):
+                recent = self.memory.concepts.recent_gaps() or []
+                gaps.extend([str(g) for g in recent])
+        except Exception:
+            pass
+
+        gaps = [g for g in {g.strip() for g in gaps} if g]
+
+        projected = []
+        if hasattr(self, "timeline") and hasattr(self.timeline, "project") and gaps:
+            try:
+                projected = self.timeline.project(topic, gaps=gaps)
+            except Exception:
+                projected = [
+                    {"goal_kind": "LearnConcept", "topic": topic, "concept": g}
+                    for g in gaps
+                ]
+        elif gaps:
+            projected = [
+                {"goal_kind": "LearnConcept", "topic": topic, "concept": g}
+                for g in gaps
+            ]
+
+        followups: List[Trigger] = []
+        for payload in projected[:3]:
+            followups.append(
+                Trigger(
+                    TriggerType.GOAL,
+                    {
+                        "source": "timeline",
+                        "importance": 0.6,
+                        "immediacy": 0.3,
+                        "reversibility": 1.0,
+                    },
+                    {
+                        "goal_kind": payload.get("goal_kind", "LearnConcept"),
+                        "topic": payload.get("topic", topic),
+                        "concept": payload.get("concept"),
+                    },
+                )
+            )
+
+        for trig in followups:
+            try:
+                if hasattr(self, "trigger_bus") and hasattr(self.trigger_bus, "push"):
+                    self.trigger_bus.push(trig)
+                else:
+                    self._pending_triggers.append(trig)
+            except Exception:
+                pass
+
+        return {
+            "snapshot_id": snap_id,
+            "delta_written": bool(delta_event),
+            "projected_goals": [t.payload for t in followups],
+            "gaps": gaps,
+        }
+
     def _run_action(self, ctx: Any, args: Dict[str, Any]) -> Dict[str, Any]:
         result = self.io.action.execute(args.get("action"))
         result = result or {}
@@ -893,6 +1084,7 @@ class Orchestrator:
             "mode": None,
         }
 
+        self._idle_beat = 0
         self._current_trigger = trigger
         payload = trigger.payload or {}
         self._current_topic = (
@@ -900,6 +1092,7 @@ class Orchestrator:
             or (trigger.meta or {}).get("topic")
             or payload.get("text")
         )
+        ctx["topic"] = self._current_topic
         self._current_decision_id = None
         self._current_trace_id = None
 
@@ -1070,6 +1263,10 @@ class Orchestrator:
                 obt = float((ctx.get("obtained") or {"score": 0.0}).get("score", 0.0))
                 err = abs(obt - exp)
                 ctx["scratch"]["prediction_error"] = err
+                self._last_prediction_error = err
+                self._last_contradiction = bool(
+                    ctx.get("scratch", {}).get("contradiction", False)
+                )
                 self.memory.store.add(
                     {
                         "kind": "feedback",
@@ -1087,7 +1284,19 @@ class Orchestrator:
             elif stg is Stage.LEARN:
                 self.cognition.evolution.reinforce(ctx)
             elif stg is Stage.UPDATE:
-                self.memory.consolidator.maybe_consolidate()
+                consolidation = self.memory.consolidator.maybe_consolidate()
+                if isinstance(consolidation, dict):
+                    new_items: List[Dict[str, Any]] = []
+                    for lesson in consolidation.get("lessons", []) or []:
+                        new_items.append({"kind": "lesson", "text": lesson})
+                    for proposal in consolidation.get("proposals", []) or []:
+                        if isinstance(proposal, dict):
+                            new_items.append({"kind": proposal.get("kind", "proposal"), "data": proposal})
+                    for item in new_items:
+                        try:
+                            self._sj_new_items_queue.append(item)
+                        except Exception:
+                            break
                 prediction_error = float(ctx.get("scratch", {}).get("prediction_error", 0.0))
                 memory_consistency = float(ctx.get("scratch", {}).get("memory_consistency", 0.5))
                 transfer_success = float(ctx.get("scratch", {}).get("transfer_success", 0.5))
@@ -1179,6 +1388,12 @@ class Orchestrator:
                         policy_engine.update_meta(selfhood.policy_hints())
                     except Exception:
                         pass
+
+                try:
+                    topic = ctx.get("topic") or getattr(self, "_current_topic", "__generic__")
+                    self.record_knowledge_milestone(topic=topic, ctx=ctx)
+                except Exception:
+                    pass
 
                 followups: List[Trigger] = []
                 if U.U_topic < 0.4 and ctx.get("meta", {}).get("immediacy", 0.5) > 0.7:

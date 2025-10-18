@@ -19,4 +19,6 @@ class TriggerRouter:
             return "EMOTION"
         if t.type is TriggerType.MEMORY_ASSOC:
             return "MEMORY_ASSOC"
+        if t.type is TriggerType.SELF_JUDGMENT:
+            return "SELF_JUDGMENT"
         return t.type.name
