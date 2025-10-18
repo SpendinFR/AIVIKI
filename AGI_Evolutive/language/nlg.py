@@ -3,6 +3,7 @@ from __future__ import annotations
 import random
 import re
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from AGI_Evolutive.core.structures.mai import Bid, MAI
 from AGI_Evolutive.knowledge.mechanism_store import MechanismStore
@@ -147,3 +148,62 @@ def paraphrase_light(text: str, prob: float = 0.2) -> str:
 
     rebuilt = "".join(parts)
     return re.sub(r"\s+\n", "\n", rebuilt).strip()
+# ---------------------------------------------------------------------------
+# Helpers: micro-surfaceur FR + paraphrase légère
+
+ELIDE_MAP = {"le": "l’", "la": "l’", "de": "d’", "que": "qu’"}
+
+
+def _starts_vowel(word: str) -> bool:
+    return bool(re.match(r"^[aàâæeéèêëiîïoôœuùûühH]", (word or "").lower()))
+
+
+def elide_token(prev: str, next_word: str) -> str:
+    base = prev.lower()
+    if base in ELIDE_MAP and _starts_vowel(next_word):
+        out = ELIDE_MAP[base]
+        return out if prev.islower() else out.capitalize()
+    return prev
+
+
+def join_tokens(tokens: Iterable[str]) -> str:
+    tokens = list(tokens)
+    if not tokens:
+        return ""
+    out: List[str] = []
+    for idx, token in enumerate(tokens):
+        if idx > 0 and out[-1].lower() in ELIDE_MAP:
+            out[-1] = elide_token(out[-1], token)
+        out.append(token)
+    text = " ".join(out)
+    text = text.replace(" ’", "’").replace(" l’ ", " l’").replace(" d’ ", " d’").replace(" qu’ ", " qu’")
+    text = re.sub(r"\s+([!?;:])", r"\1", text)
+    text = re.sub(r"([!?;:])(?=\S)", r"\1 ", text)
+    return text
+
+
+DEFAULT_PARAPHRASES = {
+    "par défaut": ["d’ordinaire", "en général"],
+    "vraiment": ["franchement", "réellement"],
+    "rapide": ["vite", "prompt"],
+    "simple": ["basique", "élémentaire"],
+    "important": ["clé", "central", "majeur"],
+    "idée": ["intuition", "piste"],
+}
+
+
+def paraphrase_light(text: str, prob: float = 0.35) -> str:
+    if not text:
+        return ""
+
+    pattern = r"\b(" + "|".join(map(re.escape, DEFAULT_PARAPHRASES.keys())) + r")\b"
+
+    def repl(match: re.Match[str]) -> str:
+        key = match.group(0)
+        alts = DEFAULT_PARAPHRASES.get(key.lower(), [])
+        if alts and random.random() < prob:
+            alt = random.choice(alts)
+            return alt.capitalize() if key[0].isupper() else alt
+        return key
+
+    return re.sub(pattern, repl, text, flags=re.I)

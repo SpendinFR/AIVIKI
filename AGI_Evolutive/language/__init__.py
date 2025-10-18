@@ -19,6 +19,15 @@ avec des implémentations compactes et robustes (pas de verbiage inutile).
 
 from __future__ import annotations
 import os, re, time, math, random, json
+
+import importlib
+import json
+import math
+import os
+import random
+import re
+import sys
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -30,6 +39,30 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 
 def _json_load(path: str, default: Any):
+# --- Compat: alias éventuels d'anciens namespaces ---
+ALIASES = {
+    "AGI_Evolutive.models.intent": "language.models.intent",
+    "AGI_Evolutive.models.user": "language.models.user",
+    "AGI_Evolutive.language.nlg": "language.nlg",
+    "AGI_Evolutive.language.renderer": "language.renderer",
+    "AGI_Evolutive.language.style_profiler": "language.style_policy",
+    "AGI_Evolutive.social.tactic_selector": "language.social.tactic_selector",
+    "AGI_Evolutive.social.social_critic": "language.style_critic",
+    "AGI_Evolutive.core.structures.mai": "language.structures.mai",
+}
+for old, new in ALIASES.items():
+    try:
+        sys.modules.setdefault(old, importlib.import_module(new))
+    except Exception:
+        pass
+
+
+# --- Utilitaires communs ---
+DATA_DIR = os.path.join(os.getcwd(), "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+
+def _json_load(path, default):
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -44,6 +77,11 @@ def _json_save(path: str, obj: Any) -> None:
             json.dump(obj, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
+def _json_save(path, obj):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
 
 
 # ============================================================
