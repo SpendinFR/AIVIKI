@@ -4,11 +4,15 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
+from AGI_Evolutive.cognition.context_inference import infer_where_and_apply
 from AGI_Evolutive.cognition.evolution_manager import EvolutionManager
 from AGI_Evolutive.cognition.homeostasis import Homeostasis
+from AGI_Evolutive.cognition.identity_mission import recommend_and_apply_mission
+from AGI_Evolutive.cognition.identity_principles import run_and_apply_principles
 from AGI_Evolutive.cognition.meta_cognition import MetaCognition
 from AGI_Evolutive.cognition.planner import Planner
 from AGI_Evolutive.cognition.proposer import Proposer
+from AGI_Evolutive.cognition.preferences_inference import apply_preferences_if_confident
 from AGI_Evolutive.cognition.reflection_loop import ReflectionLoop
 from AGI_Evolutive.cognition.thinking_monitor import ThinkingMonitor
 from AGI_Evolutive.cognition.trigger_bus import TriggerBus
@@ -516,6 +520,10 @@ class Orchestrator:
 
         self.memory.store.add({"kind": "system", "text": "Orchestrator initialized", "ts": time.time()})
 
+        self._mission_tick = 0
+        self._principles_tick = 0
+        self._preferences_tick = 0
+
     def _register_jobs(self):
         self.scheduler.register_job("scan_inbox", 30, lambda: self.io.perception.scan_inbox())
         self.scheduler.register_job(
@@ -934,6 +942,34 @@ class Orchestrator:
                 self.memory.store.add(
                     {"kind": "strategy", "text": " | ".join(notes), "ts": time.time()}
                 )
+
+        try:
+            infer_where_and_apply(self, threshold=0.70, stable_cycles=2)
+        except Exception:
+            pass
+
+        self._mission_tick = getattr(self, "_mission_tick", 0) + 1
+        if self._mission_tick % 5 == 0:
+            try:
+                res = recommend_and_apply_mission(self, threshold=0.75, delta_gate=0.10)
+                if res.get("status") == "needs_confirmation":
+                    pass
+            except Exception:
+                pass
+
+        self._principles_tick = getattr(self, "_principles_tick", 0) + 1
+        if self._principles_tick == 1 or self._principles_tick % 10 == 0:
+            try:
+                run_and_apply_principles(self, require_confirmation=True)
+            except Exception:
+                pass
+
+        self._preferences_tick = getattr(self, "_preferences_tick", 0) + 1
+        if self._preferences_tick % 6 == 0:
+            try:
+                apply_preferences_if_confident(self, threshold=0.75)
+            except Exception:
+                pass
 
         return contexts
 
