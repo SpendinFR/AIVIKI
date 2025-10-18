@@ -295,3 +295,110 @@ class JobManager:
                 json.dump(state, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
+
+    def snapshot_identity_view(self) -> Dict[str, Any]:
+        """Small summary of running and recent jobs for the SelfModel."""
+        now = time.time()
+        view: Dict[str, Any] = {
+            "current": {
+                "focus_topic": None,
+                "jobs_running": [],
+                "loads": {"interactive": 0, "background": 0},
+            },
+            "recent": [],
+        }
+        try:
+            with self._lock:
+                jobs = list(self._jobs.values())
+                pq_inter = len(self._pq_inter)
+                pq_back = len(self._pq_back)
+                running_inter = self._running_inter
+                running_back = self._running_back
+
+            arch = getattr(self, "arch", None)
+            focus_topic = None
+            if arch is not None:
+                focus_topic = (
+                    getattr(arch, "_current_topic", None)
+                    or getattr(arch, "current_topic", None)
+                )
+            view["current"]["focus_topic"] = focus_topic
+
+            running_jobs = [j for j in jobs if j.status == "running"]
+            view["current"]["jobs_running"] = [
+                {
+                    "id": j.id,
+                    "kind": j.kind,
+                    "since": j.started_ts or j.created_ts,
+                }
+                for j in running_jobs
+            ]
+
+            view["current"]["loads"]["interactive"] = running_inter + pq_inter
+            view["current"]["loads"]["background"] = running_back + pq_back
+
+            completed = [
+                j
+                for j in jobs
+                if j.status in {"done", "error", "cancelled"}
+            ]
+            completed.sort(
+                key=lambda j: j.finished_ts or j.created_ts,
+                reverse=True,
+            )
+            for job in completed[:50]:
+                finished_ts = job.finished_ts or job.created_ts or now
+                created_ts = job.created_ts or finished_ts
+                latency_ms = int(max(0.0, (finished_ts - created_ts)) * 1000.0)
+                status = job.status
+                if status == "cancelled":
+                    status = "error"
+                view["recent"].append(
+                    {
+                        "job_id": job.id,
+                        "kind": job.kind,
+                        "status": status,
+                        "ts": finished_ts,
+                        "latency_ms": latency_ms,
+                    }
+                )
+
+            log_path = self.paths.get("log")
+            if log_path and os.path.exists(log_path):
+                added = {
+                    (entry.get("job_id"), entry.get("ts"))
+                    for entry in view["recent"]
+                    if entry.get("job_id") is not None
+                }
+                with open(log_path, "r", encoding="utf-8") as handle:
+                    tail = handle.readlines()[-500:]
+                for line in tail:
+                    try:
+                        event = json.loads(line)
+                    except Exception:
+                        continue
+                    if event.get("event") not in {"job_done", "job_error"}:
+                        continue
+                    job_id = event.get("job_id")
+                    ts = float(event.get("ts", now))
+                    key = (job_id, ts)
+                    if key in added:
+                        continue
+                    status = "done" if event.get("event") == "job_done" else "error"
+                    latency_ms = int(float(event.get("latency", 0.0)) * 1000.0)
+                    view["recent"].append(
+                        {
+                            "job_id": job_id,
+                            "kind": event.get("kind"),
+                            "status": status,
+                            "ts": ts,
+                            "latency_ms": latency_ms,
+                        }
+                    )
+                    added.add(key)
+
+            view["recent"].sort(key=lambda entry: entry.get("ts", 0.0), reverse=True)
+            view["recent"] = view["recent"][:200]
+        except Exception:
+            pass
+        return view
