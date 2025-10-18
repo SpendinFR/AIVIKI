@@ -8,22 +8,22 @@ import traceback
 from typing import Any, Dict, List, Optional
 
 try:
-    from language.quote_memory import QuoteMemory  # type: ignore
+    from AGI_Evolutive.language.quote_memory import QuoteMemory  # type: ignore
 except ImportError:  # pragma: no cover - module optionnel
     QuoteMemory = None  # type: ignore
 
 try:
-    from language.social.tactic_selector import TacticSelector  # type: ignore
+    from AGI_Evolutive.language.social.tactic_selector import TacticSelector  # type: ignore
 except ImportError:  # pragma: no cover - module optionnel
     TacticSelector = None  # type: ignore
 
 try:
-    from language.ranker import RankerModel  # type: ignore
+    from AGI_Evolutive.language.ranker import RankerModel  # type: ignore
 except ImportError:  # pragma: no cover - module optionnel
     RankerModel = None  # type: ignore
 
 try:
-    from language.inbox_ingest import ingest_inbox_paths  # type: ignore
+    from AGI_Evolutive.language.inbox_ingest import ingest_inbox_paths  # type: ignore
 except ImportError:  # pragma: no cover - module optionnel
     ingest_inbox_paths = None  # type: ignore
 
