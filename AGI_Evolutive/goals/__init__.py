@@ -126,7 +126,7 @@ class GoalSystem:
         if self.store.nodes:
             return
         root = self.add_goal(
-            description="Maintenir et améliorer les capacités cognitives de l'agent.",
+            description="ÉVOLUER",
             goal_type=GoalType.GROWTH,
             criteria=["Rapporter des progrès réguliers"],
             created_by="system",
