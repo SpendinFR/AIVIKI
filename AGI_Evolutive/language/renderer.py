@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from typing import Dict, Any, List, Tuple, Optional
+
 import random
 import re
 import time
@@ -9,7 +10,9 @@ import time
 from AGI_Evolutive.social.tactic_selector import TacticSelector
 from AGI_Evolutive.social.interaction_rule import ContextBuilder
 from AGI_Evolutive.core.structures.mai import MAI
-from AGI_Evolutive.language.nlg import NLGContext, apply_mai_bids_to_nlg
+
+from .nlg import NLGContext, apply_mai_bids_to_nlg, paraphrase_light, join_tokens
+from .style_critic import StyleCritic
 
 
 def _tokens(s: str) -> set:
@@ -51,9 +54,10 @@ def _apply_action_hint(text: str, hint: str) -> str:
 
 
 class LanguageRenderer:
-    def __init__(self, voice_profile, lexicon):
+    def __init__(self, voice_profile, lexicon, ranker=None):
         self.voice = voice_profile
         self.lex = lexicon
+        self.ranker = ranker
         # anti-spam / fréquence
         self._cooldown = {"past": 0.0, "colloc": 0.0}
         self._last_used = {"past": "", "colloc": ""}
@@ -64,7 +68,14 @@ class LanguageRenderer:
             "colloc_relevance": 0.20, # pertinence mini collocation
             "conf_min": 0.55,         # confiance mini pour ornement
             "chance_colloc": 0.35,    # proba de tenter une collocation (modulée)
+            "quote_prob": 0.35,
         }
+
+        self.critic = StyleCritic(max_chars=1200)
+        self._rand = random.Random()
+
+    def rand(self) -> float:
+        return self._rand.random()
 
     # ---------- utilitaires ----------
     def apply_action_hint(self, text: str, hint: str) -> str:
@@ -93,10 +104,11 @@ class LanguageRenderer:
             base -= 60
         return max(0, base)
 
-    def _decrease_cooldowns(self) -> None:
+    def _decrease_cooldowns(self, store: Optional[Dict[str, float]] = None) -> None:
         # refroidit un peu à chaque appel
-        for k in self._cooldown:
-            self._cooldown[k] = max(0.0, self._cooldown[k] - 0.34)
+        target = store if store is not None else self._cooldown
+        for k in target:
+            target[k] = max(0.0, target[k] - 0.34)
 
     # ---------- sélection “lien au passé” ----------
     def _pick_relevant_moment(self, user_msg: str, ctx: Dict[str, Any]) -> Tuple[str, float]:
@@ -134,7 +146,7 @@ class LanguageRenderer:
             text = "🙂 " + text
         return text
 
-    def render_reply(self, semantics: Dict[str, Any], ctx: Dict[str, Any]) -> str:
+    def render_reply(self, semantics: Dict[str, Any], ctx: Dict[str, Any], *, dry_run: bool = False) -> str:
         """
         Règle : on n’ajoute un lien au passé / une collocation QUE si :
         - confiance >= conf_min
@@ -143,7 +155,14 @@ class LanguageRenderer:
         - cooldown OK et pas de doublon
         Et au plus 1 ornement par réponse (priorité au lien passé).
         """
-        self._decrease_cooldowns()
+        ctx = ctx or {}
+        if dry_run:
+            ctx = dict(ctx)
+
+        cooldown = dict(self._cooldown)
+        last_used = dict(self._last_used)
+
+        self._decrease_cooldowns(cooldown)
         base = (semantics.get("text") or "").strip() or "Je te réponds en tenant compte de notre historique."
         arch = getattr(getattr(self.voice, "self_model", None), "arch", None)
         policy = getattr(arch, "policy", None) if arch else None
@@ -165,7 +184,7 @@ class LanguageRenderer:
             applicable_mais = []
         base = nlg_context.text
         applied_hints = nlg_context.applied_hints()
-        if applied_hints:
+        if applied_hints and not dry_run:
             ctx.setdefault("applied_action_hints", []).extend(applied_hints)
         conf = self._confidence()
         budget = self._budget_chars(ctx)
@@ -180,8 +199,8 @@ class LanguageRenderer:
         use_past = (
             past_txt
             and past_rel >= self.THRESH["past_relevance"]
-            and self._cooldown["past"] <= 0.0
-            and past_txt != self._last_used["past"]
+            and cooldown["past"] <= 0.0
+            and past_txt != last_used["past"]
             and not is_direct_question  # on évite de détourner une question courte
         )
 
@@ -192,8 +211,8 @@ class LanguageRenderer:
             colloc_txt
             and random.random() < p_try
             and colloc_rel >= self.THRESH["colloc_relevance"]
-            and self._cooldown["colloc"] <= 0.0
-            and colloc_txt != self._last_used["colloc"]
+            and cooldown["colloc"] <= 0.0
+            and colloc_txt != last_used["colloc"]
         )
 
         # Toujours max 1 ornement, priorité au passé s’il est pertinent
@@ -213,23 +232,24 @@ class LanguageRenderer:
             except Exception:
                 rule, why = (None, None)
             if rule:
-                rule["last_used_ts"] = time.time()
-                rule["usage_count"] = int(rule.get("usage_count", 0)) + 1
-                if hasattr(arch.memory, "update_memory"):
-                    arch.memory.update_memory(rule)
-                else:
-                    arch.memory.add_memory(rule)
+                if not dry_run:
+                    rule["last_used_ts"] = time.time()
+                    rule["usage_count"] = int(rule.get("usage_count", 0)) + 1
+                    if hasattr(arch.memory, "update_memory"):
+                        arch.memory.update_memory(rule)
+                    else:
+                        arch.memory.add_memory(rule)
 
-                arch.memory.add_memory(
-                    {
-                        "kind": "decision_trace",
-                        "rule_id": rule["id"],
-                        "tactic": (rule.get("tactic") or {}).get("name"),
-                        "ctx_snapshot": selector_ctx,
-                        "why": why,
-                        "ts": time.time(),
-                    }
-                )
+                    arch.memory.add_memory(
+                        {
+                            "kind": "decision_trace",
+                            "rule_id": rule["id"],
+                            "tactic": (rule.get("tactic") or {}).get("name"),
+                            "ctx_snapshot": selector_ctx,
+                            "why": why,
+                            "ts": time.time(),
+                        }
+                    )
 
                 tac = (rule.get("tactic") or {}).get("name", "")
                 if tac == "banter_leger" and "?" not in base:
@@ -246,18 +266,24 @@ class LanguageRenderer:
             snippet = f"\n\n↪ En lien : {past_txt}"
             if len(snippet) <= budget:
                 out += snippet
-                self._cooldown["past"] = 2.0
-                self._last_used["past"] = past_txt
+                cooldown["past"] = 2.0
+                last_used["past"] = past_txt
+                if not dry_run:
+                    self._cooldown = cooldown
+                    self._last_used = last_used
                 return out  # on s’arrête ici
 
         if use_colloc:
             snippet = f"\n\n({colloc_txt})"
             if len(snippet) <= budget:
                 out += snippet
-                self._cooldown["colloc"] = 2.0
-                self._last_used["colloc"] = colloc_txt
+                cooldown["colloc"] = 2.0
+                last_used["colloc"] = colloc_txt
+                if not dry_run:
+                    self._cooldown = cooldown
+                    self._last_used = last_used
 
-        if ctx.get("omitted_content") and arch:
+        if not dry_run and ctx.get("omitted_content") and arch:
             payload = {
                 "reason": "MAI-driven",
                 "mai_ids": [mai.id for mai in applicable_mais],
@@ -281,4 +307,154 @@ class LanguageRenderer:
                     except Exception:
                         pass
 
+        if not dry_run:
+            self._cooldown = cooldown
+            self._last_used = last_used
         return out
+
+    # --- Génère K variantes (macros + paraphrases légères) ---
+    def render_reply_candidates(self, ctx: Dict[str, Any], base_plan: Dict[str, Any], K: int = 4) -> List[str]:
+        plan = dict(base_plan or {})
+        ctx = dict(ctx or {})
+
+        neutral = self._render_once(ctx, plan, macro=None)
+        candidates: List[str] = [neutral]
+
+        macros = ["taquin", "coach", "sobre", "deadpan"]
+        self._rand.shuffle(macros)
+        for macro in macros:
+            if len(candidates) >= max(1, K):
+                break
+            variant = self._render_once(ctx, plan, macro=macro)
+            if variant and variant not in candidates:
+                candidates.append(variant)
+
+        out: List[str] = []
+        for i, cand in enumerate(candidates):
+            if i == 0:
+                out.append(cand)
+            else:
+                out.append(paraphrase_light(cand, prob=0.30))
+        return out[: max(1, K)]
+
+    def _render_once(self, ctx: Dict[str, Any], plan: Dict[str, Any], macro: Optional[str] = None) -> str:
+        sp = getattr(self.voice, "style_policy", None)
+        snapshot = None
+        mode_snapshot = None
+        macro = (macro or "").lower() or None
+        if sp and macro and hasattr(sp, "apply_macro"):
+            try:
+                snapshot = dict(getattr(sp, "params", {}))
+                mode_snapshot = getattr(sp, "current_mode", None)
+                sp.apply_macro(macro)
+            except Exception:
+                snapshot = None
+                mode_snapshot = None
+
+        try:
+            text = self.render_reply(plan, ctx, dry_run=True)
+        finally:
+            if sp and snapshot is not None:
+                try:
+                    sp.params.update(snapshot)
+                    if mode_snapshot is not None:
+                        sp.current_mode = mode_snapshot
+                except Exception:
+                    pass
+
+        macro_text = text
+        if macro:
+            if macro == "taquin" and "😉" not in macro_text:
+                macro_text = macro_text.strip() + " 😉"
+            elif macro == "coach":
+                prefix = "Coach mode ▶ "
+                if not macro_text.lower().startswith(prefix.lower()):
+                    macro_text = f"{prefix}{macro_text}" if macro_text else prefix.rstrip()
+            elif macro == "sobre":
+                macro_text = re.sub(r"[🙂😉😊]+\s*", "", macro_text).strip()
+            elif macro == "deadpan":
+                lines: List[str] = []
+                for line in macro_text.splitlines():
+                    normalized = line.replace("!", ".").replace("…", ".")
+                    tokens = normalized.split()
+                    lines.append(join_tokens(tokens))
+                macro_text = "\n".join(lines).strip()
+
+        return macro_text.strip()
+
+    def render_final(self, ctx: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
+        ctx_local = dict(ctx or {})
+        plan_local = dict(plan or {})
+        candidates = self.render_reply_candidates(ctx_local, plan_local, K=4)
+
+        local_ctx = {
+            "style": dict(getattr(getattr(self.voice, "style_policy", None), "params", {}))
+        }
+        scored: List[Tuple[float, int, str]] = []
+        for idx, candidate in enumerate(candidates):
+            try:
+                score = (
+                    float(self.ranker.score(local_ctx, candidate))
+                    if self.ranker is not None
+                    else 0.5
+                )
+            except Exception:
+                score = 0.5
+            scored.append((score, idx, candidate))
+
+        if not scored:
+            return {"text": "", "chosen": None, "alts": []}
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        best_score, chosen_idx, best_text = scored[0]
+
+        analysis = self.critic.analyze(best_text)
+        rewritten = self.critic.rewrite(best_text)
+        best_text = rewritten
+
+        final_text, quote_meta = self._maybe_add_quote(best_text, ctx_local)
+
+        return {
+            "text": final_text,
+            "chosen": {
+                "idx": chosen_idx,
+                "score": best_score,
+                "text": final_text,
+                "analysis": analysis,
+                "quote": quote_meta,
+            },
+            "alts": [
+                {"idx": idx, "score": score, "text": text}
+                for score, idx, text in scored[1:]
+            ],
+        }
+
+    def _ctx_is_safe_for_aside(self, ctx: Dict[str, Any]) -> bool:
+        user_msg = (ctx.get("last_user_msg") or ctx.get("last_message") or "").lower()
+        for bad in ["décès", "urgence", "mauvaise nouvelle", "licenciement", "plainte"]:
+            if bad in user_msg:
+                return False
+        return True
+
+    def _maybe_add_quote(self, text: str, ctx: Dict[str, Any]):
+        quote_meta = None
+        qm = getattr(self.voice, "quote_memory", None) or getattr(self, "quote_memory", None)
+        if not qm:
+            return text, quote_meta
+        if (
+            len(text) < 900
+            and self._ctx_is_safe_for_aside(ctx)
+            and self.rand() < self.THRESH["quote_prob"]
+        ):
+            try:
+                context_seed = text + " " + (ctx.get("last_user_msg") or "")
+                quote = qm.sample(context=context_seed)
+            except Exception:
+                quote = None
+            if quote:
+                quote_used = quote
+                if len(quote.split()) > 20:
+                    quote_used = paraphrase_light(quote, prob=0.45)
+                text = f"{text}\n\n(Clin d’œil) {quote_used}".strip()
+                quote_meta = {"len": len(quote_used), "raw_len": len(quote)}
+        return text, quote_meta
