@@ -543,6 +543,7 @@ class Orchestrator:
                         },
                     )
                 )
+                self._last_prediction_error = 0.0
             self._last_contradiction = False
             return items
 
