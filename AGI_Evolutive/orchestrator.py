@@ -1573,26 +1573,53 @@ class Orchestrator:
                 try:
                     topic = ctx.get("topic") or getattr(self, "_current_topic", "__generic__")
                     beliefs_now: List[Dict[str, Any]] = []
+                    milestone_beliefs: List[Dict[str, Any]] = []
                     if isinstance(milestone_info, dict):
-                        beliefs_now = milestone_info.get("beliefs", []) or []
+                        milestone_beliefs = list(milestone_info.get("beliefs", []) or [])
+                    if milestone_beliefs:
+                        beliefs_now = milestone_beliefs
                     elif hasattr(self.memory, "semantic") and hasattr(
                         self.memory.semantic, "export_topic_beliefs"
                     ):
                         beliefs_now = list(
                             self.memory.semantic.export_topic_beliefs(topic=topic)
                         )
+
                     snap_id = None
                     if isinstance(milestone_info, dict):
                         snap_id = milestone_info.get("snapshot_id")
-                    delta = None
+                    if snap_id is None and hasattr(self, "timeline"):
+                        try:
+                            snap_id = (
+                                self.timeline.snapshot(topic, beliefs_now)
+                                if hasattr(self.timeline, "snapshot")
+                                else None
+                            )
+                        except Exception:
+                            snap_id = None
+
+                    delta: Optional[Dict[str, Any]] = None
                     if isinstance(milestone_info, dict):
                         delta = milestone_info.get("delta_event")
-                    if (
-                        hasattr(self, "_last_beliefs_by_topic")
-                        and isinstance(self._last_beliefs_by_topic, dict)
-                        and beliefs_now
-                    ):
-                        self._last_beliefs_by_topic[topic] = beliefs_now
+                    if delta is None and hasattr(self, "timeline"):
+                        last_beliefs = getattr(self, "_last_beliefs_by_topic", {}).get(topic, [])
+                        try:
+                            delta = (
+                                self.timeline.delta(topic, last_beliefs, beliefs_now)
+                                if hasattr(self.timeline, "delta")
+                                else None
+                            )
+                        except Exception:
+                            delta = None
+                    if delta and hasattr(self.memory, "store") and hasattr(self.memory.store, "add"):
+                        try:
+                            self.memory.store.add(delta)
+                        except Exception:
+                            pass
+
+                    self._last_beliefs_by_topic = getattr(self, "_last_beliefs_by_topic", {})
+                    self._last_beliefs_by_topic[topic] = beliefs_now
+
                     related = ctx.get("related_topics", []) or []
                     topics = [topic, *related]
                     topics = [t for t in dict.fromkeys([t for t in topics if t])]
@@ -1601,6 +1628,7 @@ class Orchestrator:
                         last_snapshot_id=snap_id,
                         last_delta_id=(delta.get("id") if isinstance(delta, dict) else None),
                     )
+
                     gaps = ctx.get("gaps", [])
                     projected = None
                     if isinstance(milestone_info, dict):
