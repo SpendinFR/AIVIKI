@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 import re
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from AGI_Evolutive.core.structures.mai import Bid, MAI
@@ -107,6 +108,46 @@ def apply_mai_bids_to_nlg(
     return applied
 
 
+def join_tokens(tokens: Sequence[str]) -> str:
+    text = " ".join(t for t in tokens if t)
+    text = re.sub(r"\s+([,.!?;:])", r"\1", text)
+    text = re.sub(r"([\(\[{])\s+", r"\1", text)
+    text = re.sub(r"\s+([\)\]\}])", r"\1", text)
+    return text.strip()
+
+
+def paraphrase_light(text: str, prob: float = 0.2) -> str:
+    """Applique de petites variations lexicales pour diversifier un rendu."""
+
+    if not text:
+        return ""
+
+    synonyms = {
+        "bien": "au top",
+        "rapide": "vite fait",
+        "guide": "fil conducteur",
+        "plan": "feuille de route",
+        "astuce": "petit conseil",
+        "idée": "piste",
+        "important": "clé",
+        "note": "remarque",
+    }
+
+    rng = random.random
+    parts = re.split(r"(\s+)", text)
+    for i, part in enumerate(parts):
+        token = part.strip()
+        key = token.lower()
+        if not token or key not in synonyms:
+            continue
+        if rng() <= prob:
+            replacement = synonyms[key]
+            if token[0].isupper():
+                replacement = replacement.capitalize()
+            parts[i] = parts[i].replace(token, replacement, 1)
+
+    rebuilt = "".join(parts)
+    return re.sub(r"\s+\n", "\n", rebuilt).strip()
 # ---------------------------------------------------------------------------
 # Helpers: micro-surfaceur FR + paraphrase légère
 

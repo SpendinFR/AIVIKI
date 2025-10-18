@@ -62,6 +62,11 @@ class StylePolicy:
         "audit": ("mode audit", "challenge-moi", "questionne", "fais un audit"),
     }
 
+    MACRO_DELTAS: ClassVar[Dict[str, Dict[str, float]]] = {
+        "taquin": {"warmth": 0.12, "politeness": -0.05, "hedging": -0.05},
+        "coach": {"warmth": 0.15, "directness": 0.08, "verbosity": 0.1},
+        "sobre": {"emoji": -0.2, "warmth": -0.08, "structure": 0.05},
+        "deadpan": {"hedging": -0.08, "politeness": -0.04},
     STYLE_MACROS: ClassVar[Dict[str, Dict[str, float]]] = {
         "taquin": {"warmth": +0.10, "directness": +0.10, "hedging": -0.10},
         "coach": {"warmth": +0.10, "asking_rate": +0.15},
@@ -82,6 +87,14 @@ class StylePolicy:
         if tone:
             self.persona_tone = tone.lower()
             self._apply_presets()
+
+    def apply_macro(self, macro: str) -> None:
+        deltas = self.MACRO_DELTAS.get((macro or "").lower())
+        if not deltas:
+            return
+        for key, delta in deltas.items():
+            base = self.params.get(key, 0.5)
+            self.params[key] = self._clip(base + delta)
 
     def adapt_from_instruction(self, text: str) -> Dict[str, float]:
         """Infère des deltas de style depuis des instructions libres."""
