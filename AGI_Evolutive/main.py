@@ -7,6 +7,26 @@ import time
 import traceback
 from typing import Any, Dict, List, Optional
 
+try:
+    from language.quote_memory import QuoteMemory  # type: ignore
+except ImportError:  # pragma: no cover - module optionnel
+    QuoteMemory = None  # type: ignore
+
+try:
+    from language.social.tactic_selector import TacticSelector  # type: ignore
+except ImportError:  # pragma: no cover - module optionnel
+    TacticSelector = None  # type: ignore
+
+try:
+    from language.ranker import RankerModel  # type: ignore
+except ImportError:  # pragma: no cover - module optionnel
+    RankerModel = None  # type: ignore
+
+try:
+    from language.inbox_ingest import ingest_inbox_paths  # type: ignore
+except ImportError:  # pragma: no cover - module optionnel
+    ingest_inbox_paths = None  # type: ignore
+
 # --- Questions CLI helpers ---
 def _get_qm(auto) -> Any:
     # Essaie plusieurs emplacements possibles
@@ -119,6 +139,45 @@ def run_cli():
         if getattr(arch.renderer, "lex", None) is not arch.lexicon:
             arch.renderer.lex = arch.lexicon
         # --- fin bootstrap ---
+
+        # 10.1 — rattache les modules langue avancés si disponibles
+        qm = None
+        if QuoteMemory:
+            try:
+                qm = QuoteMemory()
+            except Exception:
+                qm = None
+        if qm:
+            if hasattr(arch, "voice_profile"):
+                arch.voice_profile.quote_memory = qm
+            else:
+                arch.quote_memory = qm
+
+        if TacticSelector and not hasattr(arch, "tactic_selector"):
+            try:
+                arch.tactic_selector = TacticSelector()
+            except Exception:
+                arch.tactic_selector = None
+
+        if RankerModel and not hasattr(arch, "ranker"):
+            try:
+                arch.ranker = RankerModel()
+            except Exception:
+                arch.ranker = None
+
+        if getattr(arch, "renderer", None) and getattr(arch, "ranker", None):
+            try:
+                arch.renderer.ranker = arch.ranker
+                if hasattr(arch, "voice_profile"):
+                    arch.renderer.voice = arch.voice_profile
+                if hasattr(arch, "lexicon"):
+                    arch.renderer.lex = arch.lexicon
+            except Exception:
+                pass
+
+        # Optionnel : ingestion ciblée de l'inbox au démarrage
+        # if ingest_inbox_paths:
+        #     ingest_inbox_paths(["inbox/foo.txt", "inbox/bar.md"], arch=arch)
 
         orc = Orchestrator(arch)
         auto = Autopilot(arch, orchestrator=orc)
@@ -307,8 +366,65 @@ def run_cli():
                     strength = 1.0 if sign > 0 else 0.8
                     for c in targets:
                         prefs.observe_feedback(concept=c, sign=sign, evidence_id=evidence_id, strength=strength)
+
+                selector = getattr(arch, "tactic_selector", None)
+                if selector and hasattr(selector, "feedback"):
+                    try:
+                        arm = getattr(arch, "_last_macro", None)
+                        if pos and not neg:
+                            selector.feedback(+1.0, arm=arm)
+                        elif neg and not pos:
+                            selector.feedback(-1.0, arm=arm)
+                    except Exception:
+                        pass
+
+                qm_for_feedback = None
+                if hasattr(arch, "voice_profile"):
+                    qm_for_feedback = getattr(arch.voice_profile, "quote_memory", None)
+                if qm_for_feedback is None:
+                    qm_for_feedback = getattr(arch, "quote_memory", None)
+                if qm_for_feedback:
+                    try:
+                        if pos and not neg:
+                            qm_for_feedback.reward_last(+1.0)
+                        if neg and not pos:
+                            qm_for_feedback.reward_last(-1.0)
+                        qm_for_feedback.save()
+                    except Exception:
+                        pass
+
+                pack = getattr(arch, "_last_candidates", None)
+                if pack and isinstance(pack, dict) and pack.get("alts"):
+                    try:
+                        ctx_for_rank = {}
+                        vp = getattr(arch, "voice_profile", None)
+                        style_policy = getattr(vp, "style_policy", None)
+                        if style_policy and hasattr(style_policy, "params"):
+                            ctx_for_rank["style"] = style_policy.params
+                        ranker = getattr(arch, "ranker", None)
+                        if ranker and hasattr(ranker, "update_pair"):
+                            winner = (pack.get("chosen") or {}).get("text") or pack.get("text")
+                            alts = pack.get("alts") or []
+                            loser = None
+                            if alts:
+                                loser = (alts[0] or {}).get("text") if isinstance(alts[0], dict) else None
+                            if winner and loser:
+                                if pos and not neg:
+                                    ranker.update_pair(ctx_for_rank, winner, loser, lr=0.15)
+                                    if hasattr(ranker, "save"):
+                                        ranker.save()
+                                elif neg and not pos:
+                                    ranker.update_pair(ctx_for_rank, loser, winner, lr=0.10)
+                                    if hasattr(ranker, "save"):
+                                        ranker.save()
+                    except Exception:
+                        pass
         except Exception:
             pass
+
+        assistant_text_override: Optional[str] = None
+        final_pack_override: Optional[Dict[str, Any]] = None
+        selected_macro_override = None
 
         if t.startswith("j'aime") and "inbox/" in t:
             import re as _re
@@ -316,29 +432,143 @@ def run_cli():
             if m:
                 voice.update_from_liked_source(m.group(1) or m.group(2))
 
-        try:
-            assistant_text_brut = auto.step(user_msg=msg)
-        except Exception as e:
-            print("⚠️ Erreur durant le cycle :", e)
-            traceback.print_exc()
-            continue
+            paths = _re.findall(r"(inbox\/[^\s]+)", msg)
+            if paths and ingest_inbox_paths:
+                try:
+                    added = ingest_inbox_paths(paths, arch=arch)
+                except Exception:
+                    added = 0
+                assistant_text_override = (
+                    f"Bien reçu : j’ai intégré {added} source(s) de l’inbox et capté des formules réutilisables."
+                )
+                final_pack_override = {
+                    "text": assistant_text_override,
+                    "chosen": {"text": assistant_text_override},
+                    "alts": [],
+                }
+
+        if assistant_text_override is None:
+            try:
+                assistant_text_brut = auto.step(user_msg=msg)
+            except Exception as e:
+                print("⚠️ Erreur durant le cycle :", e)
+                traceback.print_exc()
+                continue
+        else:
+            assistant_text_brut = None
 
         reply = None
+        final_pack: Optional[Dict[str, Any]] = final_pack_override
+        selected_macro = selected_macro_override
         try:
             try:
                 ctx = arch.context_builder.build(msg)
             except Exception:
                 ctx = {"last_message": msg}
 
-            sem = {"text": assistant_text_brut}
-            reply = arch.renderer.render_reply(sem, ctx)
-            print(reply)
+            ctx.setdefault("last_user_msg", msg)
+
+            macro_selector = getattr(arch, "tactic_selector", None)
+            if selected_macro is None and macro_selector and hasattr(macro_selector, "pick"):
+                try:
+                    selected_macro = macro_selector.pick(context=ctx)
+                except Exception:
+                    selected_macro = None
+
+            generated_points: List[str] = []
+            if isinstance(assistant_text_brut, dict):
+                bullets = assistant_text_brut.get("bullets") if isinstance(assistant_text_brut, dict) else None
+                if isinstance(bullets, list):
+                    generated_points = [str(b).strip() for b in bullets if str(b).strip()]
+                else:
+                    text = assistant_text_brut.get("text") or assistant_text_brut.get("raw")
+                    if text:
+                        generated_points = [s.strip() for s in str(text).split("\n") if s.strip()]
+            elif isinstance(assistant_text_brut, list):
+                generated_points = [str(item).strip() for item in assistant_text_brut if str(item).strip()]
+            elif assistant_text_brut is not None:
+                generated_points = [
+                    line.strip()
+                    for line in str(assistant_text_brut or "").split("\n")
+                    if line.strip()
+                ] or [str(assistant_text_brut or "").strip()]
+
+            plan = {"title": "", "bullets": generated_points}
+
+            renderer = getattr(arch, "renderer", None)
+            if assistant_text_override is None and renderer and hasattr(renderer, "render_final"):
+                try:
+                    final_pack = renderer.render_final(ctx, plan)
+                    reply = (final_pack or {}).get("text")
+                except Exception:
+                    final_pack = final_pack_override
+
+            if reply is None and renderer is not None and (
+                assistant_text_override is None or assistant_text_brut is not None
+            ):
+                sem = {"text": assistant_text_brut}
+                reply = arch.renderer.render_reply(sem, ctx)
+                if reply is not None and final_pack is None:
+                    final_pack = {
+                        "text": reply,
+                        "chosen": {"text": reply},
+                        "alts": [],
+                    }
+
+            if reply is None and assistant_text_override is not None:
+                reply = assistant_text_override
+                if final_pack is None:
+                    final_pack = {
+                        "text": reply,
+                        "chosen": {"text": reply},
+                        "alts": [],
+                    }
+
+            if reply is None and assistant_text_brut is not None:
+                reply = str(assistant_text_brut)
+                if final_pack is None:
+                    final_pack = {
+                        "text": reply,
+                        "chosen": {"text": reply},
+                        "alts": [],
+                    }
+
+            if reply is not None:
+                print(reply)
         except Exception as e:
             print("⚠️ Erreur lors du rendu :", e)
             traceback.print_exc()
             continue
 
         if reply is not None:
+            if final_pack:
+                try:
+                    final_pack["text"] = reply
+                    chosen = final_pack.get("chosen") or {}
+                    if not isinstance(chosen, dict):
+                        chosen = {"text": reply}
+                    else:
+                        chosen = dict(chosen)
+                        chosen["text"] = reply
+                    final_pack["chosen"] = chosen
+                    if not isinstance(final_pack.get("alts"), list):
+                        final_pack["alts"] = []
+                except Exception:
+                    final_pack = {
+                        "text": reply,
+                        "chosen": {"text": reply},
+                        "alts": [],
+                    }
+            else:
+                final_pack = {
+                    "text": reply,
+                    "chosen": {"text": reply},
+                    "alts": [],
+                }
+
+            arch._last_candidates = final_pack
+            arch._last_macro = selected_macro
+
             try:
                 auto.arch.memory.add_memory({"kind": "interaction", "role": "assistant", "text": reply})
                 arch.lexicon.add_from_text(reply, liked=False)
