@@ -52,6 +52,8 @@ from AGI_Evolutive.language.lexicon import LiveLexicon
 from AGI_Evolutive.language.style_observer import StyleObserver
 from AGI_Evolutive.conversation.context import ContextBuilder
 from AGI_Evolutive.language.renderer import LanguageRenderer
+from AGI_Evolutive.memory.concept_extractor import ConceptExtractor
+from AGI_Evolutive.memory.preferences_adapter import PreferencesAdapter
 
 BANNER = """
 ╔══════════════════════════════════════════════╗
@@ -126,6 +128,9 @@ def run_cli():
         sys.exit(1)
 
     voice = arch.voice_profile
+    concept_extractor = ConceptExtractor(getattr(getattr(arch, "memory", None), "store", None))
+    prefs = PreferencesAdapter(getattr(arch, "beliefs_graph", None))
+    _last_cleanup_ts = 0.0
 
     print("✅ AGI initialisée. (Persistance & mémoire prêtes)")
     print(HELP_TEXT)
@@ -143,6 +148,18 @@ def run_cli():
                 _last_view = _print_pending(qm, k=3, preset=preset)  # garde en mémoire locale
             except Exception:
                 _last_view = []
+
+            try:
+                now = time.time()
+                if now - _last_cleanup_ts > 24 * 3600:
+                    mem_store = getattr(getattr(arch, "memory", None), "store", None) or getattr(arch, "memory", None)
+                    from AGI_Evolutive.memory.janitor import run_once as memory_janitor_run
+
+                    if mem_store:
+                        memory_janitor_run(mem_store)
+                    _last_cleanup_ts = now
+            except Exception:
+                pass
 
             msg = input("\n> ").strip()
         except (EOFError, KeyboardInterrupt):
@@ -276,6 +293,22 @@ def run_cli():
             voice.update_from_feedback(msg, positive=True)
         elif any(kw in t for kw in ["trop long", "bof", "pas clair", "trop familier", "trop froid"]):
             voice.update_from_feedback(msg, positive=False)
+
+        try:
+            t = msg.lower()
+            pos = any(kw in t for kw in ["++", "parfait", "top", "merci beaucoup", "exactement"])
+            neg = any(kw in t for kw in ["trop long", "bof", "pas clair", "trop familier", "trop froid"])
+            if pos or neg:
+                sign = 1 if pos and not neg else -1
+                raw_concepts = concept_extractor._extract_concepts(msg) or []
+                targets = [str(c).strip().lower() for c in raw_concepts if c and len(str(c)) >= 3][:5]
+                if targets:
+                    evidence_id = f"user:{int(time.time())}"
+                    strength = 1.0 if sign > 0 else 0.8
+                    for c in targets:
+                        prefs.observe_feedback(concept=c, sign=sign, evidence_id=evidence_id, strength=strength)
+        except Exception:
+            pass
 
         if t.startswith("j'aime") and "inbox/" in t:
             import re as _re
