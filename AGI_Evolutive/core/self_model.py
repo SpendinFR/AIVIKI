@@ -172,8 +172,17 @@ class SelfModel:
         prefs = ident.setdefault("preferences", {})
         style = prefs.setdefault("style", {})
         if isinstance(getattr(self, "persona", None), dict):
-            style.setdefault("tone", self.persona.get("tone", "helpful"))
-            prefs.setdefault("values", self.persona.get("values", ["curiosity", "care", "precision"]))
+            persona_tone = self.persona.get("tone")
+            if persona_tone is not None:
+                style["tone"] = persona_tone
+            elif "tone" not in style:
+                style["tone"] = "helpful"
+
+            persona_values = self.persona.get("values")
+            if persona_values is not None:
+                prefs["values"] = copy.deepcopy(persona_values)
+            elif "values" not in prefs:
+                prefs["values"] = ["curiosity", "care", "precision"]
         else:
             style.setdefault("tone", "helpful")
             prefs.setdefault("values", ["curiosity", "care", "precision"])
