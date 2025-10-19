@@ -3,7 +3,8 @@ import re
 from pathlib import Path
 import shutil
 
-TARGET = Path('metacognition/__init__.py')
+ROOT = Path(__file__).resolve().parents[1]
+TARGET = ROOT / 'metacognition' / '__init__.py'
 
 def main():
     if not TARGET.exists():
