@@ -109,6 +109,9 @@ class TriggerBus:
                             uncertainty=t.meta["uncertainty"],
                             valence=valence,
                         )
+                        habit = float(t.meta.get("habit_strength", 0.0))
+                        if habit:
+                            pr = 0.85 * pr + 0.15 * habit
                     key = self._key(t)
                     # cooldown 1.5s to avoid storms
                     if key is not None:
