@@ -131,7 +131,7 @@ class EvolutionManager:
         ok = False
         try:
             from AGI_Evolutive.social.social_critic import SocialCritic
-            from AGI_Evolutive.world_model.social import SocialModel
+            from AGI_Evolutive.world_model import SocialModel
             from AGI_Evolutive.self_improver.promote import PromoteManager
             from AGI_Evolutive.core.self_model import SelfModel
 

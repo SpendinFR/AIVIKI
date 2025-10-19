@@ -106,7 +106,7 @@ class PrincipleInducer:
         # 2) Fallback direct (robuste si pas de singleton ou API différente)
         try:
             from AGI_Evolutive.social.social_critic import SocialCritic
-            from AGI_Evolutive.world_model.social import SocialModel
+            from AGI_Evolutive.world_model import SocialModel
             from AGI_Evolutive.self_improver.promote import PromoteManager
 
             critic = SocialCritic()
