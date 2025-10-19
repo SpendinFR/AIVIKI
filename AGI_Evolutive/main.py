@@ -13,7 +13,7 @@ except ImportError:  # pragma: no cover - module optionnel
     QuoteMemory = None  # type: ignore
 
 try:
-    from AGI_Evolutive.language.social.tactic_selector import TacticSelector  # type: ignore
+    from AGI_Evolutive.social.tactic_selector import TacticSelector  # type: ignore
 except ImportError:  # pragma: no cover - module optionnel
     TacticSelector = None  # type: ignore
 
@@ -73,7 +73,7 @@ from AGI_Evolutive.language.style_observer import StyleObserver
 from AGI_Evolutive.conversation.context import ContextBuilder
 from AGI_Evolutive.language.renderer import LanguageRenderer
 from AGI_Evolutive.memory.concept_extractor import ConceptExtractor
-from AGI_Evolutive.memory.preferences_adapter import PreferencesAdapter
+from AGI_Evolutive.memory.prefs_bridge import PrefsBridge as PreferencesAdapter
 
 BANNER = """
 ╔══════════════════════════════════════════════╗
@@ -105,7 +105,7 @@ def run_cli():
     try:
         arch = CognitiveArchitecture()
         arch.prioritizer = getattr(arch, "prioritizer", GoalPrioritizer(arch))
-        from AGI_Evolutive.core.trigger_bus import TriggerBus  # déjà importable
+        from AGI_Evolutive.cognition.trigger_bus import TriggerBus  # déjà importable
         from AGI_Evolutive.cognition.evolution_manager import EvolutionManager
 
         try:
