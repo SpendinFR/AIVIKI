@@ -105,6 +105,15 @@ def run_cli():
     try:
         arch = CognitiveArchitecture()
         arch.prioritizer = getattr(arch, "prioritizer", GoalPrioritizer(arch))
+        from AGI_Evolutive.core.trigger_bus import TriggerBus  # déjà importable
+        from AGI_Evolutive.cognition.evolution_manager import EvolutionManager
+
+        try:
+            bus = getattr(arch.prioritizer, "trigger_bus", None)
+            if bus and hasattr(bus, "set_habit_strength_source"):
+                bus.set_habit_strength_source(EvolutionManager.shared().habits_strength)
+        except Exception:
+            pass
         # --- bootstrap voix & contexte ---
         arch.voice_profile = getattr(
             arch,
