@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import time
 import uuid
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
+
+Expr = Dict[str, Any]
 
 # ---------- Types ----------
 Expr = Dict[str, Any]  # {"op":"and","args":[...]} | {"op":"atom","name":"has_commitment","args":[...]}
@@ -31,7 +33,7 @@ class EvidenceRef:
     url: Optional[str] = None
     title: Optional[str] = None
     snippet: Optional[str] = None
-    kind: Optional[str] = None              # e.g. "doc", "episode", "web"
+    kind: Optional[str] = None
     weight: float = 1.0
 
 
@@ -52,17 +54,26 @@ class ImpactHypothesis:
 @dataclass
 class Bid:
     """Bid emitted by an MAI or another attentional mechanism."""
-    source: str                              # e.g., "MAI:<id>" | "planner" | "critic"
-    action_hint: str                         # e.g., "AskConsent", "ClarifyIntent", ...
-    target: Optional[Any] = None
-    rationale: Optional[str] = None
+
+    mai_id: Optional[str]
+    action_hint: str
     expected_info_gain: float = 0.0
     urgency: float = 0.0
     affect_value: float = 0.0
     cost: float = 0.0
     expires_at: Optional[float] = None       # epoch seconds
     payload: Dict[str, Any] = field(default_factory=dict)
+    target: Optional[Any] = None
+    rationale: Optional[str] = None
     evidence_refs: List[EvidenceRef] = field(default_factory=list)
+
+    def origin_tag(self) -> str:
+        origin = self.payload.get("origin")
+        if origin:
+            return str(origin)
+        if self.mai_id:
+            return f"MAI:{self.mai_id}"
+        return "mechanism"
 
     def serialise(self) -> Dict[str, Any]:
         data = asdict(self)
@@ -72,39 +83,20 @@ class Bid:
         return data
 
 
-# ---------- Expression evaluation ----------
-def eval_expr(expr: Expr, state: Mapping[str, Any],
-              predicate_registry: Mapping[str, Callable[..., bool]]) -> bool:
-    """Evaluate a minimal boolean expression tree against the provided state.
-
-    Supported ops:
-      - {"op":"atom","name":<predicate>,"args":[...]}
-      - {"op":"and","args":[...]}
-      - {"op":"or","args":[...]}
-      - {"op":"not","args":[<expr>]}
-    Unknown ops or missing predicates evaluate to False (fail-safe).
-    """
-    if not isinstance(expr, Mapping):
-        return False
+def eval_expr(expr: Expr, state: Dict[str, Any], predicate_registry: Dict[str, Callable[..., bool]]) -> bool:
+    """Evaluate a minimal boolean expression tree against the provided state."""
 
     op = expr.get("op")
     if op == "atom":
         name = expr.get("name")
         args = expr.get("args", [])
-        func = predicate_registry.get(name) if isinstance(name, str) else None
+        func = predicate_registry.get(name)
         if func is None:
             return False
         try:
             return bool(func(state, *args))
-        except TypeError:
-            # allow predicates with (state) signature if args provided accidentally
-            try:
-                return bool(func(state))
-            except Exception:
-                return False
         except Exception:
             return False
-
     if op == "and":
         return all(eval_expr(e, state, predicate_registry) for e in expr.get("args", []))
     if op == "or":
@@ -115,13 +107,12 @@ def eval_expr(expr: Expr, state: Mapping[str, Any],
     return False
 
 
-# ---------- MAI ----------
 @dataclass
 class MAI:
     """Mechanistic Actionable Insight."""
     id: str
-    version: int = 1
     docstring: str = ""
+    version: int = 1
     title: str = ""
     summary: str = ""
     status: str = "draft"
@@ -132,17 +123,22 @@ class MAI:
     tags: List[str] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
     owner: Optional[str] = None
-
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
-
-    # Preconditions (legacy list form) and/or structured expression
     preconditions: List[Any] = field(default_factory=list)
+    bids: List[Mapping[str, Any]] = field(default_factory=list)
     precondition_expr: Expr = field(default_factory=dict)
-
-    # Bid sources
-    bids: List[Mapping[str, Any]] = field(default_factory=list)  # explicit inline bid configs
-    propose_spec: Dict[str, Any] = field(default_factory=dict)   # {"bids":[ {...}, ... ]}
+    propose_spec: Dict[str, Any] = field(default_factory=dict)
+    safety_invariants: List[str] = field(default_factory=list)
+    runtime_counters: Dict[str, float] = field(
+        default_factory=lambda: {
+            "activation": 0.0,
+            "wins": 0.0,
+            "benefit": 0.0,
+            "regret": 0.0,
+            "rollbacks": 0.0,
+        }
+    )
 
     # Safety and runtime
     safety_invariants: List[str] = field(default_factory=list)
@@ -163,43 +159,33 @@ class MAI:
                 yield cond
 
     def _iter_bid_configs(self) -> Iterable[Mapping[str, Any]]:
-        # explicit configs
-        for conf in self.bids:
-            if isinstance(conf, Mapping):
-                yield conf
-
-        # from metadata
+        if self.bids:
+            for conf in self.bids:
+                if isinstance(conf, Mapping):
+                    yield conf
         meta_bids = self.metadata.get("bids") if isinstance(self.metadata, Mapping) else None
         if isinstance(meta_bids, list):
             for conf in meta_bids:
                 if isinstance(conf, Mapping):
                     yield conf
-
-        # from propose_spec
+        if not self.bids and not meta_bids:
+            yield {
+                "action_hint": self.metadata.get("action_hint", "ClarifyIntent"),
+                "expected_info_gain": self.expected_impact.confidence,
+                "affect_value": self.expected_impact.trust_delta,
+                "urgency": self.metadata.get("urgency", 0.0),
+                "cost": self.metadata.get("cost", 0.0),
+            }
         for conf in self.propose_spec.get("bids", []):
             if isinstance(conf, Mapping):
                 yield conf
 
-        # fallback default if nothing was provided
-        if not self.bids and not meta_bids and not self.propose_spec.get("bids"):
-            yield {
-                "action_hint": self.metadata.get("action_hint", "ClarifyIntent"),
-                "expected_info_gain": float(self.expected_impact.confidence),
-                "affect_value": float(self.expected_impact.trust_delta),
-                "urgency": float(self.metadata.get("urgency", 0.0)),
-                "cost": float(self.metadata.get("cost", 0.0)),
-            }
-
-    # ---- Logic ----
-    def is_applicable(self, state: Mapping[str, Any],
-                      predicate_registry: Mapping[str, Callable[..., bool]]) -> bool:
+    def is_applicable(self, state: Mapping[str, Any], predicate_registry: Mapping[str, Callable[..., bool]]) -> bool:
         if self.precondition_expr:
             try:
                 return eval_expr(self.precondition_expr, dict(state), dict(predicate_registry))
             except Exception:
                 return False
-
-        # legacy list of predicates
         for cond in self._iter_preconditions():
             name: Optional[str]
             args: Sequence[Any]
@@ -218,9 +204,7 @@ class MAI:
                 else:
                     args = (raw_args,)
             else:
-                # unsupported entry, treat as failing precondition
-                return False
-
+                continue
             pred = predicate_registry.get(name)
             if pred is None:
                 return False
@@ -235,8 +219,6 @@ class MAI:
             if not result:
                 return False
 
-        return True
-
     def propose(self, state: Mapping[str, Any]) -> List[Bid]:
         now = time.time()
         proposals: List[Bid] = []
@@ -248,20 +230,14 @@ class MAI:
             cost = float(conf.get("cost", 0.0))
             rationale = conf.get("rationale")
             target = conf.get("target")
-
-            # normalize expiration
             expires_at = conf.get("expires_at")
-            if expires_at is None:
-                rel = conf.get("expires_in", conf.get("ttl_s"))
-                if rel is not None:
-                    try:
-                        expires_at = now + float(rel)
-                    except Exception:
-                        expires_at = None
-
-            # payload with origin
-            payload_raw = conf.get("payload", {})
-            payload = dict(payload_raw) if isinstance(payload_raw, Mapping) else {}
+            if expires_at is None and conf.get("expires_in") is not None:
+                try:
+                    expires_at = now + float(conf.get("expires_in", 0.0))
+                except Exception:
+                    expires_at = None
+            payload_source = conf.get("payload", {})
+            payload = dict(payload_source) if isinstance(payload_source, Mapping) else {}
             payload.setdefault("origin", f"MAI:{self.id}")
 
             proposals.append(
@@ -276,26 +252,27 @@ class MAI:
                     cost=cost,
                     expires_at=expires_at,
                     payload=payload,
+                    target=target,
+                    rationale=rationale,
                     evidence_refs=list(self.provenance_docs),
                 )
             )
         return proposals
 
-    def touch(self) -> None:
-        self.updated_at = time.time()
-
-    def update_from_feedback(self, delta: Mapping[str, float]) -> None:
+    def update_from_feedback(self, delta: Dict[str, float]) -> None:
         for key, value in delta.items():
             self.runtime_counters[key] = self.runtime_counters.get(key, 0.0) + float(value)
-        self.touch()
 
 
-# ---------- Factory ----------
-def new_mai(docstring: str, precondition_expr: Expr, propose_spec: Dict[str, Any],
-            evidence: List[EvidenceRef], safety: List[str]) -> MAI:
+def new_mai(
+    docstring: str,
+    precondition_expr: Expr,
+    propose_spec: Dict[str, Any],
+    evidence: List[EvidenceRef],
+    safety: List[str],
+) -> MAI:
     return MAI(
         id=str(uuid.uuid4()),
-        version=1,
         docstring=docstring,
         precondition_expr=precondition_expr,
         propose_spec=propose_spec,
