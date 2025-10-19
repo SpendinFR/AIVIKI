@@ -1,9 +1,15 @@
-"""Lightweight structures representing Mechanistic Actionable Insights (MAI).
+"""Core dataclasses and helpers for policy/knowledge/runtime integration.
 
-This module centralises the dataclasses shared across policy, knowledge and
-runtime modules.  It provides a small ``Bid`` container used by MAIs to push
-signals into the global workspace as well as helper methods to evaluate
-preconditions and derive bids from stored metadata.
+This module defines:
+- EvidenceRef: references to supporting material.
+- ImpactHypothesis: qualitative hypothesis about applying an MAI.
+- Bid: lightweight container used by MAIs to propose actions to the workspace.
+- MAI: Mechanistic Actionable Insight with preconditions and bid generation.
+
+Conventions:
+- 'source' fields are string tags (e.g., "MAI:<id>", "planner", "critic").
+- Bid expiration uses either an absolute 'expires_at' (epoch seconds) or a
+  relative duration via 'expires_in' / 'ttl_s' in configs.
 """
 
 from __future__ import annotations
@@ -15,12 +21,15 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 
 Expr = Dict[str, Any]
 
+# ---------- Types ----------
+Expr = Dict[str, Any]  # {"op":"and","args":[...]} | {"op":"atom","name":"has_commitment","args":[...]}
 
+
+# ---------- Dataclasses ----------
 @dataclass
 class EvidenceRef:
     """Reference to supporting material for an MAI."""
-
-    source: Optional[str] = None
+    source: Optional[str] = None            # e.g. "doc:xyz.pdf#p3", "episode:<id>"
     url: Optional[str] = None
     title: Optional[str] = None
     snippet: Optional[str] = None
@@ -31,7 +40,6 @@ class EvidenceRef:
 @dataclass
 class ImpactHypothesis:
     """Qualitative hypothesis about the impact of applying an MAI."""
-
     trust_delta: float = 0.0
     harm_delta: float = 0.0
     identity_coherence_delta: float = 0.0
@@ -53,7 +61,7 @@ class Bid:
     urgency: float = 0.0
     affect_value: float = 0.0
     cost: float = 0.0
-    expires_at: Optional[float] = None
+    expires_at: Optional[float] = None       # epoch seconds
     payload: Dict[str, Any] = field(default_factory=dict)
     target: Optional[Any] = None
     rationale: Optional[str] = None
@@ -69,7 +77,9 @@ class Bid:
 
     def serialise(self) -> Dict[str, Any]:
         data = asdict(self)
-        data["origin"] = self.origin_tag()
+        # ensure a self-describing origin is always present
+        data.setdefault("payload", {})
+        data["payload"].setdefault("origin", self.source)
         return data
 
 
@@ -100,13 +110,13 @@ def eval_expr(expr: Expr, state: Dict[str, Any], predicate_registry: Dict[str, C
 @dataclass
 class MAI:
     """Mechanistic Actionable Insight."""
-
     id: str
     docstring: str = ""
     version: int = 1
     title: str = ""
     summary: str = ""
     status: str = "draft"
+
     expected_impact: ImpactHypothesis = field(default_factory=ImpactHypothesis)
     provenance_docs: List[EvidenceRef] = field(default_factory=list)
     provenance_episodes: List[str] = field(default_factory=list)
@@ -130,9 +140,19 @@ class MAI:
         }
     )
 
+    # Safety and runtime
+    safety_invariants: List[str] = field(default_factory=list)
+    runtime_counters: Dict[str, float] = field(default_factory=lambda: {
+        "activation": 0.0,
+        "wins": 0.0,
+        "benefit": 0.0,
+        "regret": 0.0,
+        "rollbacks": 0.0,
+    })
+
+    # ---- Helpers ----
     def _iter_preconditions(self) -> Iterable[Any]:
-        for cond in self.preconditions:
-            yield cond
+        yield from self.preconditions
         meta_pre = self.metadata.get("preconditions") if isinstance(self.metadata, Mapping) else None
         if isinstance(meta_pre, (list, tuple)):
             for cond in meta_pre:
@@ -170,9 +190,9 @@ class MAI:
             name: Optional[str]
             args: Sequence[Any]
             negate = False
+
             if isinstance(cond, str):
-                name = cond
-                args = ()
+                name, args = cond, ()
             elif isinstance(cond, Mapping):
                 name = cond.get("name") or cond.get("predicate")
                 negate = bool(cond.get("negate"))
@@ -194,12 +214,10 @@ class MAI:
                 result = pred(state)
             except Exception:
                 result = False
-            result = bool(result)
-            if negate:
-                result = not result
+
+            result = not bool(result) if negate else bool(result)
             if not result:
                 return False
-        return True
 
     def propose(self, state: Mapping[str, Any]) -> List[Bid]:
         now = time.time()
@@ -221,10 +239,13 @@ class MAI:
             payload_source = conf.get("payload", {})
             payload = dict(payload_source) if isinstance(payload_source, Mapping) else {}
             payload.setdefault("origin", f"MAI:{self.id}")
+
             proposals.append(
                 Bid(
-                    mai_id=self.id,
+                    source=f"MAI:{self.id}",
                     action_hint=action_hint,
+                    target=target,
+                    rationale=rationale,
                     expected_info_gain=expected_info_gain,
                     urgency=urgency,
                     affect_value=affect_value,
