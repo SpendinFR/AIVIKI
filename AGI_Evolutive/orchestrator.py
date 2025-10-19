@@ -1381,6 +1381,15 @@ class Orchestrator:
                         policy_engine.update_outcome(mode_name, ok=(obt >= exp))
                     except Exception:
                         pass
+                ctx.setdefault("scratch", {})
+                if "prediction_error" not in ctx["scratch"]:
+                    ctx["scratch"]["prediction_error"] = 0.5  # valeur neutre
+
+                # Renforcement de l'habitude pour (action_type :: contexte)
+                try:
+                    EvolutionManager.shared().reinforce(ctx)
+                except Exception:
+                    pass
             elif stg is Stage.LEARN:
                 self.cognition.evolution.reinforce(ctx)
             elif stg is Stage.UPDATE:
