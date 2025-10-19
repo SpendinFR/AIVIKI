@@ -18,7 +18,6 @@ avec des implémentations compactes et robustes (pas de verbiage inutile).
 """
 
 from __future__ import annotations
-import os, re, time, math, random, json
 
 import importlib
 import json
@@ -38,7 +37,6 @@ DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "
 os.makedirs(DATA_DIR, exist_ok=True)
 
 
-def _json_load(path: str, default: Any):
 # --- Compat: alias éventuels d'anciens namespaces ---
 ALIASES = {
     "AGI_Evolutive.models.intent": "language.models.intent",
@@ -58,11 +56,9 @@ for old, new in ALIASES.items():
 
 
 # --- Utilitaires communs ---
-DATA_DIR = os.path.join(os.getcwd(), "data")
-os.makedirs(DATA_DIR, exist_ok=True)
 
 
-def _json_load(path, default):
+def _json_load(path: str, default: Any) -> Any:
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -73,15 +69,12 @@ def _json_load(path, default):
 def _json_save(path: str, obj: Any) -> None:
     try:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(obj, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
     except Exception:
         pass
-def _json_save(path, obj):
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
 
 
 # ============================================================

@@ -67,6 +67,7 @@ class StylePolicy:
         "coach": {"warmth": 0.15, "directness": 0.08, "verbosity": 0.1},
         "sobre": {"emoji": -0.2, "warmth": -0.08, "structure": 0.05},
         "deadpan": {"hedging": -0.08, "politeness": -0.04},
+    }
     STYLE_MACROS: ClassVar[Dict[str, Dict[str, float]]] = {
         "taquin": {"warmth": +0.10, "directness": +0.10, "hedging": -0.10},
         "coach": {"warmth": +0.10, "asking_rate": +0.15},
@@ -89,12 +90,15 @@ class StylePolicy:
             self._apply_presets()
 
     def apply_macro(self, macro: str) -> None:
-        deltas = self.MACRO_DELTAS.get((macro or "").lower())
+        key = (macro or "").lower()
+        deltas = self.MACRO_DELTAS.get(key)
+        if not deltas:
+            deltas = self.STYLE_MACROS.get(key, {})
         if not deltas:
             return
-        for key, delta in deltas.items():
-            base = self.params.get(key, 0.5)
-            self.params[key] = self._clip(base + delta)
+        for param, delta in deltas.items():
+            base = self.params.get(param, 0.5)
+            self.params[param] = self._clip(base + delta)
 
     def adapt_from_instruction(self, text: str) -> Dict[str, float]:
         """Infère des deltas de style depuis des instructions libres."""
@@ -182,11 +186,6 @@ class StylePolicy:
         for overrides in (persona_overrides, mode_overrides):
             for key, value in overrides.items():
                 self.params[key] = self._clip(value)
-
-    def apply_macro(self, name: str) -> None:
-        for key, delta in self.STYLE_MACROS.get(name, {}).items():
-            base = self.params.get(key, 0.5)
-            self.params[key] = self._clip(base + delta)
 
     @staticmethod
     def _clip(val: float, lo: float = 0.0, hi: float = 1.0) -> float:

@@ -1,10 +1,8 @@
-from typing import List, Callable, Dict, Any, Optional
+from typing import Any, Callable, Dict, List, Optional
 from dataclasses import dataclass
 import hashlib
 import json
 import time
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
 
 from AGI_Evolutive.core.trigger_types import Trigger, TriggerType
 from AGI_Evolutive.core.evaluation import unified_priority
@@ -35,7 +33,6 @@ class TriggerBus:
 
         self._habit_strength_source = source
 
-    def _key(self, t: Trigger) -> str:
     def _payload_fingerprint(self, payload: Any) -> str:
         try:
             serialized = json.dumps(payload, sort_keys=True, default=str)
@@ -112,9 +109,6 @@ class TriggerBus:
                             uncertainty=t.meta["uncertainty"],
                             valence=valence,
                         )
-                        habit = float(t.meta.get("habit_strength", 0.0))
-                        if habit:
-                            pr = 0.85 * pr + 0.15 * habit
                     key = self._key(t)
                     # cooldown 1.5s to avoid storms
                     if key is not None:
