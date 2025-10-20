@@ -1,7 +1,9 @@
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from dataclasses import dataclass
 import hashlib
 import json
+import math
+import random
 import time
 
 from AGI_Evolutive.core.trigger_types import Trigger, TriggerType
@@ -15,6 +17,80 @@ Collector = Callable[[], List[Trigger]]
 class ScoredTrigger:
     trigger: Trigger
     priority: float
+    feedback_token: Optional[str] = None
+
+
+class OnlineLinear:
+    """Very small online GLM with sigmoid link and bounded weights."""
+
+    def __init__(
+        self,
+        feature_names: Iterable[str],
+        lr: float = 0.05,
+        bounds: Tuple[float, float] = (0.0, 1.0),
+        l2: float = 0.0,
+        init_weights: Optional[Dict[str, float]] = None,
+    ) -> None:
+        self.lr = lr
+        self.bounds = bounds
+        self.l2 = l2
+        self.intercept = 0.0
+        self.weights: Dict[str, float] = {name: 0.0 for name in feature_names}
+        if init_weights:
+            for name, value in init_weights.items():
+                self.weights[name] = float(value)
+
+    def _clip(self, value: float) -> float:
+        lo, hi = self.bounds
+        if lo is None and hi is None:
+            return value
+        if lo is not None:
+            value = max(lo, value)
+        if hi is not None:
+            value = min(hi, value)
+        return value
+
+    def predict(self, features: Dict[str, float]) -> float:
+        z = self.intercept
+        for name, val in features.items():
+            z += self.weights.get(name, 0.0) * val
+        return 1.0 / (1.0 + math.exp(-z))
+
+    def predict_with_weights(self, features: Dict[str, float], weights: Dict[str, float]) -> float:
+        z = self.intercept
+        for name, val in features.items():
+            z += weights.get(name, self.weights.get(name, 0.0)) * val
+        return 1.0 / (1.0 + math.exp(-z))
+
+    def update(self, features: Dict[str, float], target: float) -> None:
+        target = self._clip(target)
+        prediction = self.predict(features)
+        error = target - prediction
+        self.intercept += self.lr * error
+        for name, value in features.items():
+            weight = self.weights.get(name, 0.0)
+            gradient = error * value - self.l2 * weight
+            weight += self.lr * gradient
+            self.weights[name] = self._clip(weight)
+
+
+class DiscreteThompsonSampler:
+    """Simple Thompson Sampling over a discrete set of weight dictionaries."""
+
+    def __init__(self, candidates: List[Dict[str, float]]) -> None:
+        self.candidates = candidates
+        self._alphas: List[float] = [1.0] * len(candidates)
+        self._betas: List[float] = [1.0] * len(candidates)
+
+    def sample(self) -> Tuple[int, Dict[str, float]]:
+        scores = [random.betavariate(a, b) for a, b in zip(self._alphas, self._betas)]
+        idx = max(range(len(scores)), key=lambda i: scores[i])
+        return idx, self.candidates[idx]
+
+    def update(self, idx: int, reward: float) -> None:
+        reward = max(0.0, min(1.0, reward))
+        self._alphas[idx] += reward
+        self._betas[idx] += 1.0 - reward
 
 
 class TriggerBus:
@@ -24,6 +100,81 @@ class TriggerBus:
         self.collectors: List[Collector] = []
         self.cooldown_cache: Dict[str, float] = {}  # simple dedup/cooldown
         self._habit_strength_source: Optional[Any] = None
+        self._adaptive_model = OnlineLinear(
+            feature_names=[
+                "importance",
+                "probability",
+                "reversibility",
+                "effort",
+                "uncertainty",
+                "immediacy",
+                "habit_strength",
+                "importance_sq",
+                "probability_sq",
+                "immediacy_sq",
+            ],
+            lr=0.05,
+            bounds=(0.0, 1.0),
+            l2=1e-3,
+            init_weights={
+                "importance": 0.9,
+                "probability": 0.7,
+                "reversibility": 0.2,
+                "effort": -0.4,
+                "uncertainty": -0.3,
+                "immediacy": 0.6,
+                "habit_strength": 0.4,
+                "importance_sq": 0.2,
+                "probability_sq": 0.1,
+                "immediacy_sq": 0.15,
+            },
+        )
+        self._ts_sampler = DiscreteThompsonSampler(
+            [
+                {
+                    "importance": 0.9,
+                    "probability": 0.7,
+                    "reversibility": 0.2,
+                    "effort": -0.5,
+                    "uncertainty": -0.4,
+                    "immediacy": 0.6,
+                    "habit_strength": 0.4,
+                    "importance_sq": 0.1,
+                    "probability_sq": 0.1,
+                    "immediacy_sq": 0.05,
+                },
+                {
+                    "importance": 1.1,
+                    "probability": 0.9,
+                    "reversibility": 0.1,
+                    "effort": -0.2,
+                    "uncertainty": -0.2,
+                    "immediacy": 0.8,
+                    "habit_strength": 0.2,
+                    "importance_sq": 0.05,
+                    "probability_sq": 0.15,
+                    "immediacy_sq": 0.25,
+                },
+                {
+                    "importance": 0.7,
+                    "probability": 0.6,
+                    "reversibility": 0.4,
+                    "effort": -0.6,
+                    "uncertainty": -0.5,
+                    "immediacy": 0.5,
+                    "habit_strength": 0.6,
+                    "importance_sq": 0.3,
+                    "probability_sq": 0.0,
+                    "immediacy_sq": 0.1,
+                },
+            ]
+        )
+        self._ts_blend = 0.35
+        self._adaptive_blend = 0.5
+        self._pending_feedback_limit = 1024
+        self._pending_feedback: Dict[
+            str, Tuple[Dict[str, float], Optional[int], Optional[str], Optional[str]]
+        ] = {}
 
     def register(self, fn: Collector):
         self.collectors.append(fn)
@@ -74,6 +225,60 @@ class TriggerBus:
         # emotion influence is applied in scoring (not stored)
         return t
 
+    def _build_features(self, t: Trigger) -> Dict[str, float]:
+        features = {
+            "importance": float(t.meta.get("importance", 0.5)),
+            "probability": float(t.meta.get("probability", 0.6)),
+            "reversibility": float(t.meta.get("reversibility", 1.0)),
+            "effort": float(t.meta.get("effort", 0.5)),
+            "uncertainty": float(t.meta.get("uncertainty", 0.2)),
+            "immediacy": float(t.meta.get("immediacy", 0.2)),
+            "habit_strength": float(t.meta.get("habit_strength", 0.0)),
+        }
+        features["importance_sq"] = features["importance"] ** 2
+        features["probability_sq"] = features["probability"] ** 2
+        features["immediacy_sq"] = features["immediacy"] ** 2
+        return features
+
+    def _compute_adaptive_priority(
+        self,
+        t: Trigger,
+        base_priority: float,
+        sampled_weights: Optional[Tuple[int, Dict[str, float]]],
+    ) -> Tuple[float, Dict[str, float], Optional[int]]:
+        features = self._build_features(t)
+        adaptive_score = self._adaptive_model.predict(features)
+        blended = self._adaptive_blend * adaptive_score + (1.0 - self._adaptive_blend) * base_priority
+        if sampled_weights:
+            idx, weights = sampled_weights
+            ts_score = self._adaptive_model.predict_with_weights(features, weights)
+            blended = (1.0 - self._ts_blend) * blended + self._ts_blend * ts_score
+        else:
+            idx = None
+        return blended, features, idx
+
+    def register_feedback(self, token_or_trigger: Any, reward: float) -> None:
+        """Update adaptive scorers based on downstream feedback in [0,1]."""
+
+        if isinstance(token_or_trigger, Trigger):
+            token = token_or_trigger.meta.get("_feedback_token") or self._key(token_or_trigger)
+        else:
+            token = str(token_or_trigger) if token_or_trigger is not None else None
+        if not token:
+            return
+        payload = self._pending_feedback.pop(token, None)
+        if not payload:
+            return
+        features, ts_idx, alias, origin = payload
+        reward = max(0.0, min(1.0, float(reward)))
+        self._adaptive_model.update(features, reward)
+        if ts_idx is not None:
+            self._ts_sampler.update(ts_idx, reward)
+        if alias is not None and alias != token:
+            self._pending_feedback.pop(alias, None)
+        if origin and origin != token:
+            self._pending_feedback.pop(origin, None)
+
     def _lookup_habit_strength(self, key: Any) -> float:
         if key is None or self._habit_strength_source is None:
             return 0.0
@@ -93,6 +298,7 @@ class TriggerBus:
     def collect_and_score(self, valence: float = 0.0) -> List[ScoredTrigger]:
         now = time.time()
         scored: List[ScoredTrigger] = []
+        sampled_weights = self._ts_sampler.sample() if self._ts_sampler else None
         for fn in self.collectors:
             try:
                 for t in fn() or []:
@@ -100,8 +306,10 @@ class TriggerBus:
                     # hard overrides
                     if t.type is TriggerType.THREAT and t.meta.get("immediacy", 0.0) >= 0.8:
                         pr = 1.0
+                        features: Dict[str, float] = self._build_features(t)
+                        ts_idx: Optional[int] = None
                     else:
-                        pr = unified_priority(
+                        base_priority = unified_priority(
                             impact=t.meta["importance"],
                             probability=t.meta["probability"],
                             reversibility=t.meta["reversibility"],
@@ -109,6 +317,10 @@ class TriggerBus:
                             uncertainty=t.meta["uncertainty"],
                             valence=valence,
                         )
+                        adaptive_priority, features, ts_idx = self._compute_adaptive_priority(
+                            t, base_priority, sampled_weights
+                        )
+                        pr = adaptive_priority
                         habit = float(t.meta.get("habit_strength", 0.0))
                         if habit:
                             pr = 0.85 * pr + 0.15 * habit
@@ -118,7 +330,20 @@ class TriggerBus:
                         if self.cooldown_cache.get(key, 0) + 1.5 > now:
                             continue
                         self.cooldown_cache[key] = now
-                    scored.append(ScoredTrigger(trigger=t, priority=pr))
+                    token = (
+                        f"{key}:{int(now * 1000)}" if key is not None else f"anon:{id(t)}:{int(now * 1000)}"
+                    )
+                    t.meta["_feedback_token"] = token
+                    alias = key if key is not None else None
+                    self._pending_feedback[token] = (features, ts_idx, alias, token)
+                    if alias is not None:
+                        self._pending_feedback[alias] = (features, ts_idx, alias, token)
+                    if len(self._pending_feedback) > self._pending_feedback_limit:
+                        # prune the oldest inserted token (approximate)
+                        oldest = next(iter(self._pending_feedback))
+                        if oldest != token:
+                            self._pending_feedback.pop(oldest, None)
+                    scored.append(ScoredTrigger(trigger=t, priority=pr, feedback_token=token))
             except Exception:
                 continue
         # preemption rules
