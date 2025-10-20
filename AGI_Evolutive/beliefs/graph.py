@@ -28,7 +28,14 @@ class Evidence:
 
     @staticmethod
     def new(kind: str, source: str, snippet: str, weight: float = 0.5) -> "Evidence":
-        return Evidence(id=str(uuid.uuid4()), kind=kind, source=source, snippet=snippet[:500], weight=float(max(0.0, min(1.0, weight))))
+        safe_snippet = ("" if snippet is None else str(snippet))[:500]
+        return Evidence(
+            id=str(uuid.uuid4()),
+            kind=kind,
+            source=source,
+            snippet=safe_snippet,
+            weight=float(max(0.0, min(1.0, weight))),
+        )
 
 
 @dataclass
