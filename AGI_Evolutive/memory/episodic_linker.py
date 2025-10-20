@@ -2,7 +2,13 @@ import os
 import json
 import time
 import glob
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+try:
+    from AGI_Evolutive.learning import OnlineLinearModel, ThompsonBandit
+except Exception:  # pragma: no cover - learning module optional in some builds
+    OnlineLinearModel = None  # type: ignore[assignment]
+    ThompsonBandit = None  # type: ignore[assignment]
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
 
@@ -29,6 +35,171 @@ REL_CAUSES = "CAUSES"
 REL_REFERS = "REFERS_TO"
 REL_SUPPORTS = "SUPPORTS"
 REL_CONTRADICTS = "CONTRADICTS"
+
+
+class _AdaptiveScheduler:
+    """Bandit-based tuner for the run cadence and episode window."""
+
+    def __init__(
+        self,
+        default_period: float,
+        default_window: float,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.default_period = default_period
+        self.default_window = default_window
+        self.actions = [
+            "period=10.0_window=600",
+            "period=15.0_window=900",
+            "period=20.0_window=900",
+            "period=25.0_window=1200",
+            "period=30.0_window=1500",
+        ]
+        self.bandit: Optional[ThompsonBandit] = None
+        if ThompsonBandit is not None:
+            self.bandit = ThompsonBandit(prior_alpha=1.5, prior_beta=1.5)
+        self.last_action: Optional[str] = None
+        self.decay = 0.97
+        if isinstance(state, dict):
+            self.last_action = state.get("last_action")
+            if self.bandit and isinstance(state.get("bandit"), dict):
+                params: Dict[str, Tuple[float, float]] = {}
+                for key, value in state["bandit"].items():
+                    if not isinstance(value, (list, tuple)) or len(value) != 2:
+                        continue
+                    alpha = max(1e-3, float(value[0]))
+                    beta = max(1e-3, float(value[1]))
+                    params[str(key)] = (alpha, beta)
+                if params:
+                    self.bandit.parameters = params
+
+    @staticmethod
+    def _parse(action: Optional[str]) -> Tuple[float, float]:
+        if not action:
+            return 20.0, 15 * 60.0
+        parts = action.split("_")
+        period = 20.0
+        window = 15 * 60.0
+        for part in parts:
+            if part.startswith("period="):
+                try:
+                    period = float(part.split("=", 1)[1])
+                except (TypeError, ValueError):
+                    period = 20.0
+            elif part.startswith("window="):
+                try:
+                    window = float(part.split("=", 1)[1])
+                except (TypeError, ValueError):
+                    window = 15 * 60.0
+        return period, window
+
+    def select(self, load_signal: float) -> Tuple[float, float, Optional[str]]:
+        if not self.bandit:
+            return self.default_period, self.default_window, None
+        priors = {}
+        load_signal = max(0.0, min(1.0, float(load_signal)))
+        for action in self.actions:
+            period, window = self._parse(action)
+            # Encourage shorter periods when load is high
+            expected = 1.0 / (1.0 + period / max(1.0, load_signal * 20.0 + 1.0))
+            expected *= max(0.1, min(1.0, window / (30.0 * 60.0)))
+            priors[action] = max(0.0, min(1.0, expected))
+        action = self.bandit.select(self.actions, priors=priors, fallback=lambda: self.actions[0])
+        self.last_action = action
+        period, window = self._parse(action)
+        return period, window, action
+
+    def update(self, reward: float) -> None:
+        if not self.bandit or not self.last_action:
+            return
+        reward = max(0.0, min(1.0, float(reward)))
+        alpha, beta = self.bandit._params(self.last_action)
+        alpha = alpha * self.decay + reward
+        beta = beta * self.decay + (1.0 - reward)
+        self.bandit.parameters[self.last_action] = (max(1e-3, alpha), max(1e-3, beta))
+
+    def to_state(self) -> Dict[str, Any]:
+        if not self.bandit:
+            return {}
+        return {
+            "last_action": self.last_action,
+            "bandit": {key: list(value) for key, value in self.bandit.parameters.items()},
+        }
+
+
+class _SalienceLearner:
+    """Online learner for relation salience scoring with forgetting."""
+
+    def __init__(self, state: Optional[Dict[str, Any]] = None) -> None:
+        self.model: Optional[OnlineLinearModel] = None
+        if OnlineLinearModel is not None:
+            feature_dim = 6 + len({REL_CAUSES, REL_SUPPORTS, REL_CONTRADICTS, REL_REFERS, REL_NEXT})
+            self.model = OnlineLinearModel(
+                feature_dim=feature_dim,
+                learning_rate=0.12,
+                l2=5e-3,
+                bounds=(0.0, 1.0),
+            )
+        self.forget = 0.985
+        if self.model and isinstance(state, dict):
+            weights = state.get("weights")
+            bias = state.get("bias")
+            try:
+                if isinstance(weights, list):
+                    self.model._ensure_dim(len(weights))
+                    for i, value in enumerate(weights):
+                        self.model.weights[i] = float(value)
+                if bias is not None:
+                    self.model.bias = float(bias)
+            except Exception:
+                self.model.reset()
+
+    def _decay(self) -> None:
+        if not self.model:
+            return
+        for i in range(len(self.model.weights)):
+            self.model.weights[i] *= self.forget
+        self.model.bias *= self.forget
+
+    def features(
+        self,
+        baseline: float,
+        recency: float,
+        emotion_factor: float,
+        relation: str,
+    ) -> List[float]:
+        link_types = [REL_CAUSES, REL_SUPPORTS, REL_CONTRADICTS, REL_REFERS, REL_NEXT]
+        features: List[float] = [
+            max(0.0, min(1.0, baseline)),
+            max(0.0, min(1.0, recency)),
+            max(0.0, min(1.0, emotion_factor)),
+            max(0.0, min(1.0, recency * emotion_factor)),
+            max(0.0, min(1.0, recency * baseline)),
+            max(0.0, min(1.0, emotion_factor * baseline)),
+        ]
+        for rel_type in link_types:
+            features.append(1.0 if relation == rel_type else 0.0)
+        return features
+
+    def score(self, features: Iterable[float], fallback: float) -> float:
+        if not self.model:
+            return max(0.0, min(1.0, fallback))
+        prediction = self.model.predict(list(features))
+        return max(0.0, min(1.0, prediction))
+
+    def learn(self, features: Iterable[float], target: float) -> None:
+        if not self.model:
+            return
+        self._decay()
+        self.model.update(list(features), max(0.0, min(1.0, target)))
+
+    def to_state(self) -> Dict[str, Any]:
+        if not self.model:
+            return {}
+        return {
+            "weights": list(self.model.weights),
+            "bias": float(self.model.bias),
+        }
 
 
 class EpisodicLinker:
@@ -68,11 +239,27 @@ class EpisodicLinker:
         self.backlinks = self._load(self.paths["backlinks"], {})  # mem_id -> [{to, rel}]
         self.graph = self._load(self.graph_path, {"nodes": [], "edges": []})
 
-        self.period_s = 20.0
+        scheduler_state = self.state.get("scheduler") if isinstance(self.state, dict) else None
+        self._scheduler = _AdaptiveScheduler(20.0, 15 * 60.0, scheduler_state)
+        initial_period, initial_window = _AdaptiveScheduler._parse(
+            scheduler_state.get("last_action") if isinstance(scheduler_state, dict) else None
+        )
+        self.period_s = initial_period
         self._last_step = 0.0
-        self.window_s = 15 * 60  # 15 minutes pour grouper en épisode
+        self.window_s = initial_window  # 15 minutes pour grouper en épisode (adaptatif)
         self._salient_queue: List[Dict[str, Any]] = []
-        self._salient_seen: Set[str] = set()
+        self._salient_seen: Dict[str, float] = {}
+        self._duplicate_ttl = 3 * 3600.0
+        self._salience_features: Dict[str, List[float]] = {}
+        salience_state = self.state.get("salience") if isinstance(self.state, dict) else None
+        self._salience_learner = _SalienceLearner(salience_state)
+        self._relation_priors = {
+            REL_CAUSES: 0.9,
+            REL_SUPPORTS: 0.75,
+            REL_CONTRADICTS: 0.85,
+            REL_REFERS: 0.6,
+            REL_NEXT: 0.5,
+        }
 
     def bind(self, memory=None, language=None, metacog=None, emotions=None):
         self.bound.update(
@@ -102,6 +289,14 @@ class EpisodicLinker:
         if not mems:
             return
 
+        if hasattr(self, "_scheduler") and isinstance(self._scheduler, _AdaptiveScheduler):
+            load_signal = min(1.0, len(mems) / float(max(1, max_batch)))
+            period, window, action = self._scheduler.select(load_signal)
+            self.period_s = 0.7 * self.period_s + 0.3 * period
+            self.window_s = 0.7 * self.window_s + 0.3 * window
+            if action:
+                self.state.setdefault("scheduler", {})["last_action"] = action
+
         # trier par timestamp si dispo
         def _ts(memory):
             metadata = memory.get("metadata", {})
@@ -124,9 +319,12 @@ class EpisodicLinker:
 
         # grouper en épisodes
         episodes = self._group_into_episodes(batch, key_ts=_ts)
+        total_relations = 0
+        total_memories = sum(len(ep.get("memories", [])) for ep in episodes)
         for episode in episodes:
             ep_id = self._next_episode_id()
             rels = self._link_relations(episode["memories"])
+            total_relations += len(rels)
             self._queue_salient_associations(episode["memories"], rels)
             summary = self._summarize_episode(episode["memories"])
             record = {
@@ -154,6 +352,16 @@ class EpisodicLinker:
         if len(self.state["processed_ids"]) > 5000:
             self.state["processed_ids"] = self.state["processed_ids"][-2500:]
         self.state["last_run"] = _now()
+        if hasattr(self, "_scheduler") and isinstance(self._scheduler, _AdaptiveScheduler):
+            denom = max(1, total_memories)
+            relation_density = total_relations / denom
+            episode_count = len(episodes)
+            reward = 0.6 * max(0.0, min(1.0, relation_density / 3.0))
+            reward += 0.4 * max(0.0, min(1.0, episode_count / float(len(batch))))
+            self._scheduler.update(reward)
+            self.state["scheduler"] = self._scheduler.to_state()
+        if hasattr(self, "_salience_learner") and isinstance(self._salience_learner, _SalienceLearner):
+            self.state["salience"] = self._salience_learner.to_state()
         self._save(self.paths["state"], self.state)
         self._save(self.paths["backlinks"], self.backlinks)
 
@@ -292,14 +500,10 @@ class EpisodicLinker:
             if isinstance(memory, dict)
         }
         now = _now()
-
-        weight = {
-            REL_CAUSES: 0.9,
-            REL_SUPPORTS: 0.75,
-            REL_CONTRADICTS: 0.85,
-            REL_REFERS: 0.6,
-            REL_NEXT: 0.5,
-        }
+        expired_keys = [key for key, ts in self._salient_seen.items() if now - ts > self._duplicate_ttl]
+        for key in expired_keys:
+            self._salient_seen.pop(key, None)
+            self._salience_features.pop(key, None)
 
         for rel in relations:
             src = rel.get("src")
@@ -308,17 +512,21 @@ class EpisodicLinker:
             if not src or not dst or not rel_type:
                 continue
             key = f"{src}->{dst}:{rel_type}"
-            if key in self._salient_seen:
+            last_seen = self._salient_seen.get(key)
+            if last_seen and now - last_seen < self._duplicate_ttl:
                 continue
 
             src_ts = self._memory_timestamp(mem_index.get(src))
             dst_ts = self._memory_timestamp(mem_index.get(dst))
             recency = max(0.1, min(1.0, 1.0 - (now - max(src_ts, dst_ts)) / (6 * 3600)))
-            link_strength = weight.get(rel_type, 0.4)
-            score = max(0.0, min(1.0, recency * emotion_factor * link_strength))
+            link_strength = self._relation_priors.get(rel_type, 0.4)
+            baseline = max(0.0, min(1.0, recency * emotion_factor * link_strength))
+            features = self._salience_learner.features(baseline, recency, emotion_factor, rel_type)
+            score = self._salience_learner.score(features, baseline)
 
             self._salient_queue.append(
                 {
+                    "key": key,
                     "source": src,
                     "target": dst,
                     "relation": rel_type,
@@ -326,11 +534,21 @@ class EpisodicLinker:
                     "timestamp": max(src_ts, dst_ts),
                 }
             )
-            self._salient_seen.add(key)
+            self._salience_features[key] = features
+            self._salient_seen[key] = now
 
         if len(self._salient_queue) > 40:
             self._salient_queue.sort(key=lambda item: item.get("score", 0.0), reverse=True)
-            self._salient_queue = self._salient_queue[:40]
+            kept = self._salient_queue[:40]
+            discarded = self._salient_queue[40:]
+            self._salient_queue = kept
+            for item in discarded:
+                key = item.get("key")
+                if key and key in self._salience_features:
+                    self._salience_learner.learn(self._salience_features[key], 0.05)
+                    self._salience_features.pop(key, None)
+                if key:
+                    self._salient_seen.pop(key, None)
 
     def pop_salient_associations(self, max_n=2) -> Dict[str, Any]:
         try:
@@ -340,7 +558,14 @@ class EpisodicLinker:
 
         items: List[Dict[str, Any]] = []
         while self._salient_queue and len(items) < limit:
-            items.append(self._salient_queue.pop(0))
+            entry = self._salient_queue.pop(0)
+            key = entry.get("key")
+            if key and key in self._salience_features:
+                self._salience_learner.learn(self._salience_features.pop(key), 0.9)
+            if key:
+                self._salient_seen.pop(key, None)
+                entry.pop("key", None)
+            items.append(entry)
 
         if items:
             return {"items": items, "count": len(items), "source": "queue"}
