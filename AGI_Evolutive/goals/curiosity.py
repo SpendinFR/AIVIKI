@@ -2,23 +2,116 @@
 
 from __future__ import annotations
 
+import math
 import random
-from typing import Any, Dict, List, Optional
+import re
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+
+class OnlineLinear:
+    """Very small online linear regressor with bounded weights.
+
+    The model uses stochastic gradient descent on a squared loss and clips the
+    learned coefficients into a configurable range so it remains numerically
+    stable even when fed very noisy feedback.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        *,
+        lr: float = 0.12,
+        l2: float = 0.01,
+        weight_bounds: Tuple[float, float] = (-1.5, 1.5),
+    ) -> None:
+        self.dim = dim
+        self.lr = lr
+        self.l2 = l2
+        self.lower, self.upper = weight_bounds
+        self.weights = [0.0 for _ in range(dim)]
+
+    def predict(self, features: Sequence[float]) -> float:
+        score = sum(w * x for w, x in zip(self.weights, features))
+        return max(0.0, min(1.0, 0.5 + 0.5 * math.tanh(score)))
+
+    def update(self, features: Sequence[float], target: float) -> None:
+        target = max(0.0, min(1.0, target))
+        prediction = self.predict(features)
+        error = target - prediction
+        for idx in range(self.dim):
+            grad = error * features[idx] - self.l2 * self.weights[idx]
+            self.weights[idx] += self.lr * grad
+            self.weights[idx] = max(self.lower, min(self.upper, self.weights[idx]))
+
+
+class DiscreteThompsonSampler:
+    """Small helper implementing Thompson sampling on a discrete set."""
+
+    def __init__(self, arms: Dict[str, Dict[str, float]], rng: Optional[random.Random] = None) -> None:
+        self._arms = {
+            name: {
+                "config": dict(config),
+                "alpha": 1.0,
+                "beta": 1.0,
+            }
+            for name, config in arms.items()
+        }
+        self._rng = rng or random.Random()
+
+    def sample(self) -> Tuple[str, Dict[str, float]]:
+        best_name: Optional[str] = None
+        best_score = -1.0
+        for name, payload in self._arms.items():
+            draw = self._rng.betavariate(payload["alpha"], payload["beta"])
+            if draw > best_score:
+                best_name = name
+                best_score = draw
+        assert best_name is not None
+        return best_name, dict(self._arms[best_name]["config"])
+
+    def update(self, arm: str, reward: float) -> None:
+        if arm not in self._arms:
+            return
+        reward = max(0.0, min(1.0, reward))
+        payload = self._arms[arm]
+        payload["alpha"] += reward
+        payload["beta"] += max(0.0, 1.0 - reward)
 
 
 class CuriosityEngine:
-    """Generate candidate sub-goals based on simple heuristics.
+    """Generate candidate sub-goals driven by adaptive curiosity signals."""
 
-    Cette version vit dans le module *goals* et s'occupe de traduire des
-    signaux de curiosité (lacunes détectées, contradictions, concepts
-    nouveaux) en objectifs concrets pour le :class:`DagStore`.  Elle est
-    complémentaire au moteur de curiosité du package ``learning`` qui ne
-    produit qu'une récompense intrinsèque numérique.
-    """
+    _BANDIT_PRESETS: Dict[str, Dict[str, float]] = {
+        "balanced": {"value": 0.55, "competence": 0.5, "curiosity": 0.7, "urgency": 0.4},
+        "focus_value": {"value": 0.65, "competence": 0.45, "curiosity": 0.6, "urgency": 0.45},
+        "curiosity_push": {"value": 0.5, "competence": 0.45, "curiosity": 0.85, "urgency": 0.35},
+        "urgent_learning": {"value": 0.6, "competence": 0.55, "curiosity": 0.65, "urgency": 0.55},
+    }
 
     def __init__(self, architecture=None):
         self.architecture = architecture
+        self._rng = random.Random()
+        self._feature_order: List[str] = [
+            "severity",
+            "severity_sq",
+            "score",
+            "is_performance",
+            "is_reasoning_error",
+            "is_novel_concept",
+            "is_contradiction",
+            "is_exploration",
+            "context_perf_mean",
+            "context_perf_low_ratio",
+            "context_novelty_count",
+            "context_contradiction_count",
+        ]
+        self._weight_model = OnlineLinear(len(self._feature_order))
+        self._bandit = DiscreteThompsonSampler(self._BANDIT_PRESETS, self._rng)
+        self._pending_proposals: List[Dict[str, Any]] = []
+        self._goal_memory: Dict[str, Dict[str, Any]] = {}
+        self._explore_rate = 0.2
 
+    # ------------------------------------------------------------------
     def suggest_subgoals(
         self,
         parent_goal: Optional[Dict[str, Any]] = None,
@@ -27,25 +120,78 @@ class CuriosityEngine:
         """Return up to ``k`` sub-goal dictionaries for :class:`DagStore`."""
 
         context = self._collect_context()
+        context_stats = self._context_statistics(context)
         gaps = self._identify_gaps(context)
-        proposals = [self._gap_to_goal(gap, parent_goal) for gap in gaps]
+        if not gaps:
+            gaps = [{"domain": "exploration", "score": 0.5, "severity": 0.4}]
 
-        if len(proposals) < k:
-            proposals.append(
+        proposals: List[Dict[str, Any]] = []
+        self._pending_proposals = []
+
+        bandit_arm, bandit_config = self._bandit.sample()
+
+        for gap in gaps:
+            features_dict = self._gap_feature_dict(gap, context_stats)
+            feature_vector = self._vectorize(features_dict)
+            learned_preference = self._weight_model.predict(feature_vector)
+            use_exploration = self._rng.random() < self._explore_rate
+
+            if use_exploration:
+                weights = self._random_weights(gap)
+                arm_name = "explore"
+            else:
+                weights = self._derive_weights(bandit_config, gap, learned_preference)
+                arm_name = bandit_arm
+
+            proposal = self._build_goal_from_gap(gap, parent_goal, weights)
+            signature = self._proposal_signature(proposal)
+            self._pending_proposals.append(
                 {
-                    "description": "Explorer un concept peu maîtrisé et produire une synthèse.",
-                    "criteria": ["Fournir un résumé structuré et une auto-évaluation."],
-                    "created_by": "curiosity",
-                    "value": 0.55,
-                    "competence": 0.5,
-                    "curiosity": 0.8,
-                    "urgency": 0.35,
-                    "parent_ids": [parent_goal["id"]] if parent_goal else [],
+                    "signature": signature,
+                    "features": feature_vector,
+                    "arm": arm_name,
+                    "gap": dict(gap),
+                    "weights": dict(weights),
                 }
             )
+            proposals.append(proposal)
 
         random.shuffle(proposals)
         return proposals[:k]
+
+    # ------------------------------------------------------------------
+    def register_proposal(self, goal_id: str, proposal: Dict[str, Any]) -> None:
+        signature = self._proposal_signature(proposal)
+        for idx, pending in enumerate(self._pending_proposals):
+            if pending.get("signature") == signature:
+                record = dict(pending)
+                record["goal_id"] = goal_id
+                self._pending_proposals.pop(idx)
+                self._goal_memory[goal_id] = record
+                self._prune_goal_memory()
+                break
+
+    def observe_goal_feedback(self, goal_id: str, message: str) -> None:
+        reward = self._analyze_feedback_text(message)
+        if reward is None:
+            return
+        entry = self._goal_memory.get(goal_id)
+        if not entry:
+            return
+        self._weight_model.update(entry["features"], reward)
+        self._bandit.update(entry["arm"], reward)
+        entry["last_reward"] = reward
+
+    def observe_goal_outcome(self, goal_id: str, success: bool, confidence: float = 1.0) -> None:
+        entry = self._goal_memory.get(goal_id)
+        if not entry:
+            return
+        confidence = max(0.0, min(1.0, confidence))
+        reward = 0.5 + (0.5 if success else -0.5) * confidence
+        reward = max(0.0, min(1.0, reward))
+        self._weight_model.update(entry["features"], reward)
+        self._bandit.update(entry["arm"], reward)
+        entry["last_reward"] = reward
 
     # ------------------------------------------------------------------
     def _collect_context(self) -> Dict[str, Any]:
@@ -128,7 +274,7 @@ class CuriosityEngine:
         )
 
         gaps: List[Dict[str, Any]] = [
-            {"domain": name, "score": value, "severity": float(1.0 - value)}
+            {"domain": name, "score": value, "severity": float(max(0.0, min(1.0, 1.0 - value)))}
             for name, value in low_metrics[:3]
         ]
 
@@ -154,22 +300,18 @@ class CuriosityEngine:
                 }
             )
 
-        if not gaps:
-            gaps.append({"domain": "exploration", "score": 0.5, "severity": 0.4})
-
         return gaps
 
-    def _gap_to_goal(self, gap: Dict[str, Any], parent_goal: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    def _build_goal_from_gap(
+        self,
+        gap: Dict[str, Any],
+        parent_goal: Optional[Dict[str, Any]],
+        weights: Dict[str, float],
+    ) -> Dict[str, Any]:
         description = self._describe_gap(gap)
         criteria = self._default_criteria(gap)
         parent_ids = [parent_goal["id"]] if parent_goal and "id" in parent_goal else []
 
-        base_value = 0.5 + 0.2 * random.random()
-        competence = max(0.3, min(0.7, 0.45 + (random.random() - 0.5) * 0.3))
-        curiosity = min(1.0, 0.6 + 0.3 * random.random())
-        urgency = 0.3 + 0.2 * random.random()
-
-        # Cas générique : concept nouveau → objectif d’apprentissage “naturel”
         if gap.get("domain") == "novel_concept" and gap.get("concept"):
             c = str(gap["concept"]).strip()
             description = f"Apprendre le concept « {c} » et produire une synthèse exploitable."
@@ -185,17 +327,17 @@ class CuriosityEngine:
             criteria = [
                 "Lister les preuves soutenant chaque version.",
                 "Identifier une observation décisive à collecter.",
-                "Mettre à jour la croyance avec justification." ,
+                "Mettre à jour la croyance avec justification.",
             ]
 
         return {
             "description": description,
             "criteria": criteria,
             "created_by": "curiosity",
-            "value": base_value,
-            "competence": competence,
-            "curiosity": curiosity,
-            "urgency": urgency,
+            "value": weights.get("value", 0.55),
+            "competence": weights.get("competence", 0.5),
+            "curiosity": weights.get("curiosity", 0.7),
+            "urgency": weights.get("urgency", 0.4),
             "parent_ids": parent_ids,
         }
 
@@ -222,3 +364,132 @@ class CuriosityEngine:
         if domain == "belief_contradiction":
             return ["Comparer les justifications et collecter une preuve supplémentaire."]
         return ["Mesurer une amélioration significative après 3 essais contrôlés."]
+
+    # ------------------------------------------------------------------
+    def _context_statistics(self, context: Dict[str, Any]) -> Dict[str, float]:
+        performance = context.get("metacog", {}).get("performance_metrics", {})
+        values = list(performance.values())
+        if values:
+            mean_perf = float(sum(values) / len(values))
+            low_ratio = float(sum(1 for v in values if v < 0.45) / len(values))
+        else:
+            mean_perf = 0.5
+            low_ratio = 0.0
+        contradictions = context.get("contradictions", [])
+        novelty = context.get("novel_concepts", [])
+        return {
+            "context_perf_mean": max(0.0, min(1.0, mean_perf)),
+            "context_perf_low_ratio": max(0.0, min(1.0, low_ratio)),
+            "context_contradiction_count": float(min(1.0, len(contradictions) / 3.0)),
+            "context_novelty_count": float(min(1.0, len(novelty) / 5.0)),
+        }
+
+    def _gap_feature_dict(self, gap: Dict[str, Any], context_stats: Dict[str, float]) -> Dict[str, float]:
+        domain = (gap.get("domain") or "").lower()
+        severity = float(max(0.0, min(1.0, gap.get("severity", 0.5))))
+        score = float(max(0.0, min(1.0, gap.get("score", 0.5))))
+        features = {
+            "severity": severity,
+            "severity_sq": severity * severity,
+            "score": score,
+            "is_performance": 1.0 if domain not in {"reasoning_error", "novel_concept", "belief_contradiction", "exploration"} else 0.0,
+            "is_reasoning_error": 1.0 if domain == "reasoning_error" else 0.0,
+            "is_novel_concept": 1.0 if domain == "novel_concept" else 0.0,
+            "is_contradiction": 1.0 if domain == "belief_contradiction" else 0.0,
+            "is_exploration": 1.0 if domain == "exploration" else 0.0,
+        }
+        features.update(context_stats)
+        return features
+
+    def _vectorize(self, features: Dict[str, float]) -> List[float]:
+        return [float(features.get(name, 0.0)) for name in self._feature_order]
+
+    def _derive_weights(
+        self,
+        base: Dict[str, float],
+        gap: Dict[str, Any],
+        preference: float,
+    ) -> Dict[str, float]:
+        domain = (gap.get("domain") or "").lower()
+        severity = float(max(0.0, min(1.0, gap.get("severity", 0.5))))
+        delta = preference - 0.5
+        weights = dict(base)
+        weights["value"] = self._clip01(weights.get("value", 0.55) + 0.3 * delta + 0.2 * severity)
+        weights["competence"] = self._clip01(
+            weights.get("competence", 0.5) + 0.1 * (0.2 - delta) + (0.1 if domain == "reasoning_error" else 0.0)
+        )
+        curiosity_bonus = 0.1 if domain in {"novel_concept", "exploration"} else 0.0
+        weights["curiosity"] = self._clip01(weights.get("curiosity", 0.7) + 0.4 * delta + curiosity_bonus)
+        urgency_bonus = 0.12 if domain == "belief_contradiction" else 0.0
+        weights["urgency"] = self._clip01(weights.get("urgency", 0.4) + 0.25 * severity + urgency_bonus)
+        return weights
+
+    def _random_weights(self, gap: Dict[str, Any]) -> Dict[str, float]:
+        domain = (gap.get("domain") or "").lower()
+        curiosity_base = 0.8 if domain in {"novel_concept", "exploration"} else 0.6
+        return {
+            "value": self._clip01(self._rng.uniform(0.45, 0.75)),
+            "competence": self._clip01(self._rng.uniform(0.35, 0.7)),
+            "curiosity": self._clip01(self._rng.uniform(curiosity_base - 0.1, curiosity_base + 0.15)),
+            "urgency": self._clip01(self._rng.uniform(0.25, 0.6)),
+        }
+
+    def _proposal_signature(self, proposal: Dict[str, Any]) -> str:
+        criteria = tuple(proposal.get("criteria", []))
+        payload = (
+            proposal.get("description", ""),
+            criteria,
+            round(float(proposal.get("value", 0.0)), 2),
+            round(float(proposal.get("competence", 0.0)), 2),
+            round(float(proposal.get("curiosity", 0.0)), 2),
+            round(float(proposal.get("urgency", 0.0)), 2),
+        )
+        return repr(payload)
+
+    def _prune_goal_memory(self) -> None:
+        if len(self._goal_memory) <= 200:
+            return
+        for goal_id in list(sorted(self._goal_memory.keys()))[: len(self._goal_memory) - 200]:
+            self._goal_memory.pop(goal_id, None)
+
+    def _analyze_feedback_text(self, message: str) -> Optional[float]:
+        tokens = re.findall(r"[\w']+", message.lower())
+        if not tokens:
+            return None
+        positive = {
+            "ok",
+            "bien",
+            "super",
+            "merci",
+            "fait",
+            "terminé",
+            "good",
+            "great",
+            "yes",
+            "resolu",
+            "résolu",
+            "cool",
+        }
+        negative = {
+            "raté",
+            "rate",
+            "échec",
+            "bloqué",
+            "probleme",
+            "problème",
+            "non",
+            "fail",
+            "ko",
+            "aucun",
+            "impossible",
+        }
+        pos = sum(1 for token in tokens if token in positive)
+        neg = sum(1 for token in tokens if token in negative)
+        if pos == 0 and neg == 0:
+            return None
+        raw = 0.5 + 0.15 * (pos - neg)
+        return max(0.0, min(1.0, raw))
+
+    @staticmethod
+    def _clip01(value: float) -> float:
+        return max(0.0, min(1.0, value))
