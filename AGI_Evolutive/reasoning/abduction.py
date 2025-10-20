@@ -1,8 +1,16 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Deque, Dict, List, Optional, Tuple
 import datetime as dt
 import re
+from collections import defaultdict, deque
+
+from ..learning import OnlineLinearModel
+
+FRENCH_CAUSE_REGEX = re.compile(
+    r"\best\s+(?:un|une|le|la|l'|les|des)\s+([\wàâäéèêëîïôöùûüç'-]+)",
+    re.IGNORECASE,
+)
 
 from .structures import CausalStore, DomainSimulator, HTNPlanner, SimulationResult, TaskNode
 
@@ -26,6 +34,135 @@ class Hypothesis:
     causal_support: List[str] = field(default_factory=list)
     simulations: List[Dict[str, Any]] = field(default_factory=list)
     plan: Optional[List[str]] = None
+    generator: Optional[str] = None
+    source_features: Dict[str, float] = field(default_factory=dict)
+
+
+class AdaptiveTextClassifier:
+    """Online text classifier used as a robust fallback."""
+
+    def __init__(self, bounds: Tuple[float, float] = (0.0, 1.0)) -> None:
+        self.bounds = bounds
+        self._models: Dict[str, OnlineLinearModel] = {}
+
+    def _get_model(self, label: str) -> OnlineLinearModel:
+        if label not in self._models:
+            self._models[label] = OnlineLinearModel(
+                feature_dim=8,
+                learning_rate=0.08,
+                l2=1e-3,
+                bounds=self.bounds,
+            )
+        return self._models[label]
+
+    def _features(self, label: str, text: str) -> List[float]:
+        lower = text.lower()
+        length = max(len(text), 1)
+        tokens = re.findall(r"[\wàâäéèêëîïôöùûüç']+", lower)
+        token_count = max(len(tokens), 1)
+        punct_count = sum(1 for ch in text if ch in "!?…")
+        emoji_count = sum(1 for ch in text if ord(ch) > 1000)
+        uppercase_ratio = sum(1 for ch in text if ch.isupper()) / float(length)
+        accent_ratio = sum(1 for ch in text if ch in "àâäéèêëîïôöùûüç") / float(length)
+        label_mentions = lower.count(label.lower())
+        features = [
+            1.0,
+            label_mentions / float(token_count),
+            uppercase_ratio,
+            punct_count / 10.0,
+            emoji_count / 5.0,
+            accent_ratio,
+            min(1.0, len(tokens) / 25.0),
+            1.0 if any(token.startswith(label[:4].lower()) for token in tokens) else 0.0,
+        ]
+        return features
+
+    def predict(self, label: str, text: str) -> float:
+        model = self._get_model(label)
+        return float(model.predict(self._features(label, text)))
+
+    def update(self, label: str, text: str, reward: float) -> None:
+        model = self._get_model(label)
+        model.update(self._features(label, text), reward)
+
+    def suggest(self, text: str, threshold: float = 0.55) -> List[Tuple[str, float]]:
+        suggestions: List[Tuple[str, float]] = []
+        for label in self._models:
+            score = self.predict(label, text)
+            if score >= threshold:
+                suggestions.append((label, score))
+        suggestions.sort(key=lambda item: item[1], reverse=True)
+        return suggestions[:3]
+
+
+class AbductiveAdaptationManager:
+    """Centralises online learning signals for the abductive pipeline."""
+
+    def __init__(self) -> None:
+        self._scorer = OnlineLinearModel(
+            feature_dim=9,
+            learning_rate=0.06,
+            l2=5e-4,
+            bounds=(0.0, 1.0),
+        )
+        self.generator_stats: Dict[str, Deque[float]] = defaultdict(lambda: deque(maxlen=50))
+        self.text_classifier = AdaptiveTextClassifier()
+
+    def _feature_vector(
+        self,
+        base_score: float,
+        priors: Dict[str, float],
+        context: Dict[str, float],
+    ) -> List[float]:
+        return [
+            1.0,
+            base_score,
+            priors.get("pri", 0.0),
+            priors.get("boost", 0.0),
+            priors.get("matches", 0.0),
+            context.get("causal_strength", 0.0),
+            context.get("simulation_success", 0.0),
+            context.get("plan_depth", 0.0),
+            context.get("text_confidence", base_score),
+        ]
+
+    def score(
+        self,
+        base_score: float,
+        priors: Dict[str, float],
+        context: Dict[str, float],
+    ) -> float:
+        features = self._feature_vector(base_score, priors, context)
+        return float(self._scorer.predict(features))
+
+    def update_feedback(
+        self,
+        label: str,
+        base_score: float,
+        priors: Dict[str, float],
+        context: Dict[str, float],
+        reward: float,
+    ) -> None:
+        features = self._feature_vector(base_score, priors, context)
+        self._scorer.update(features, reward)
+        observation = context.get("observation", "")
+        if observation:
+            self.text_classifier.update(label, observation, reward)
+        generator = context.get("generator")
+        if generator:
+            self.generator_stats[generator].append(reward)
+
+    def generator_weight(self, name: str) -> float:
+        stats = self.generator_stats.get(name)
+        if not stats:
+            return 1.0
+        avg = sum(stats) / max(1, len(stats))
+        return 0.5 + avg
+
+    def register_generator(self, name: str, priors: Optional[float] = None) -> None:
+        if name not in self.generator_stats:
+            self.generator_stats[name] = deque(maxlen=50)
+
 
 class AbductiveReasoner:
     """
@@ -67,18 +204,37 @@ class AbductiveReasoner:
         if not self.planner.has_template("diagnostic_general"):
             self._register_default_plan()
 
+        self.adaptation = AbductiveAdaptationManager()
+        for gen in self.generators:
+            self.adaptation.register_generator(getattr(gen, "__name__", gen.__class__.__name__))
+        self.adaptation.register_generator("adaptive_classifier")
+        self._last_observation: Optional[str] = None
+        self._last_contexts: Dict[str, Dict[str, Any]] = {}
+
     def _g_default(self, text: str) -> List[Tuple[str, str]]:
-        t = text.lower()
-        if "jaune" in t and ("ongle" in t or "doigt" in t):
-            return [
-                ("cheddar", "résidu de fromage fondu"),
-                ("curcuma", "résidu d'épice"),
-                ("nicotine", "tache nicotine"),
-                ("infection", "sécrétion ou mycose"),
-                ("autre", "autre cause"),
-            ]
-        # fallback neutre
-        return [("inconnu", "cause inconnue faute d'indices")]
+        lower = text.lower()
+        candidates: List[Tuple[str, str]] = []
+        if "jaune" in lower and ("ongle" in lower or "doigt" in lower):
+            candidates.extend(
+                [
+                    ("cheddar", "résidu de fromage fondu"),
+                    ("curcuma", "résidu d'épice"),
+                    ("nicotine", "tache nicotine"),
+                    ("infection", "sécrétion ou mycose"),
+                    ("autre", "autre cause possible identifiée"),
+                ]
+            )
+        for match in FRENCH_CAUSE_REGEX.findall(text):
+            focus = match.lower()
+            candidates.append(
+                (
+                    focus,
+                    f"pattern linguistique détecté (« est {match} »)",
+                )
+            )
+        if not candidates:
+            candidates.append(("inconnu", "aucun indice déterminant détecté"))
+        return candidates
 
     def _time(self) -> dt.datetime:
         return dt.datetime.now()
@@ -104,34 +260,97 @@ class AbductiveReasoner:
         return score, {"pri": pri, "boost": boost, "matches": matches}, ev
 
     def generate(self, observation_text: str) -> List[Hypothesis]:
-        cands: List[Tuple[str, str]] = []
+        self._last_observation = observation_text
+        self._last_contexts = {}
+        candidate_rows: List[Tuple[str, str, str]] = []
         for g in self.generators:
+            name = getattr(g, "__name__", g.__class__.__name__)
             try:
-                cands.extend(g(observation_text))
+                for label, why in g(observation_text):
+                    candidate_rows.append((label, why, name))
             except Exception:
                 continue
-        # dedup
-        uniq: Dict[str, str] = {}
-        for lab, why in cands:
-            uniq.setdefault(lab, why)
+
+        classifier_suggestions = self.adaptation.text_classifier.suggest(observation_text)
+        for label, score in classifier_suggestions:
+            candidate_rows.append(
+                (
+                    label,
+                    f"suggestion classifieur (score {score:.2f})",
+                    "adaptive_classifier",
+                )
+            )
+
+        uniq: Dict[str, Dict[str, Any]] = {}
+        for lab, why, generator in candidate_rows:
+            weight = self.adaptation.generator_weight(generator)
+            item = uniq.get(lab)
+            if not item or weight > item["weight"]:
+                uniq[lab] = {"why": why, "generator": generator, "weight": weight}
+
         hyps: List[Hypothesis] = []
-        for lab, why in uniq.items():
-            s, pri, ev = self._score(lab, observation_text)
+        for lab, info in uniq.items():
+            base_score, priors, evidence = self._score(lab, observation_text)
             causal_support = self._causal_support(lab, observation_text)
             simulations = self._run_simulations(lab, observation_text)
             plan = self._plan_validation(lab, observation_text)
-            hyps.append(
-                Hypothesis(
-                    label=lab,
-                    explanation=why,
-                    score=s,
-                    priors=pri,
-                    evidence=ev,
-                    causal_support=causal_support,
-                    simulations=simulations,
-                    plan=plan,
+
+            causal_strength = 0.0
+            if causal_support:
+                positives = sum(
+                    1
+                    for msg in causal_support
+                    if "observé" in msg.lower() or "conditions ok" in msg.lower()
                 )
+                causal_strength = positives / float(len(causal_support))
+
+            simulation_success = 0.0
+            if simulations:
+                simulation_success = sum(1.0 if sim.get("success") else 0.0 for sim in simulations) / float(
+                    len(simulations)
+                )
+
+            plan_depth = min(1.0, (len(plan) if plan else 0) / 5.0)
+            text_confidence = self.adaptation.text_classifier.predict(lab, observation_text)
+
+            context = {
+                "causal_strength": causal_strength,
+                "simulation_success": simulation_success,
+                "plan_depth": plan_depth,
+                "text_confidence": text_confidence,
+                "generator": info["generator"],
+                "observation": observation_text,
+            }
+            adaptive_score = self.adaptation.score(base_score, priors, context)
+            score = max(0.0, min(1.0, (0.6 * base_score + 0.4 * adaptive_score) * info["weight"]))
+
+            meta_features = {
+                "base_score": base_score,
+                "adaptive_score": adaptive_score,
+                "generator_weight": info["weight"],
+                **context,
+                **priors,
+            }
+
+            hyp = Hypothesis(
+                label=lab,
+                explanation=info["why"],
+                score=score,
+                priors=priors,
+                evidence=evidence,
+                causal_support=causal_support,
+                simulations=simulations,
+                plan=plan,
+                generator=info["generator"],
+                source_features=meta_features,
             )
+            hyps.append(hyp)
+            self._last_contexts[lab] = {
+                "base_score": base_score,
+                "priors": dict(priors),
+                **context,
+            }
+
         hyps.sort(key=lambda h: h.score, reverse=True)
         if self.qengine:
             try:
@@ -146,6 +365,36 @@ class AbductiveReasoner:
         if question and hyps:
             hyps[0].ask_next = question
         return hyps[:5]
+
+    def register_feedback(
+        self,
+        label: str,
+        reward: float,
+        observation_text: Optional[str] = None,
+    ) -> None:
+        if observation_text is None:
+            observation_text = self._last_observation
+        if not observation_text:
+            return
+        context = self._last_contexts.get(label)
+        if not context:
+            return
+        clamped = max(0.0, min(1.0, float(reward)))
+        priors = context.get("priors", {})
+        base_score = context.get("base_score", 0.0)
+        update_context = {
+            key: value
+            for key, value in context.items()
+            if key not in {"priors", "base_score"}
+        }
+        update_context["observation"] = observation_text
+        self.adaptation.update_feedback(label, base_score, priors, update_context, clamped)
+        if hasattr(self.question_policy, "register_feedback"):
+            try:
+                self.question_policy.register_feedback(clamped)
+            except Exception:
+                pass
+        self._last_contexts.pop(label, None)
 
     def _craft_question(self, a: str, b: str) -> str:
         # squelette générique
@@ -244,15 +493,27 @@ class AbductiveReasoner:
 
 
 class EntropyQuestionPolicy:
-    """Active questioning policy based on entropy reduction heuristics."""
+    """Active questioning policy with online calibration of entropy threshold."""
+
+    def __init__(self, base_threshold: float = 0.05) -> None:
+        self.base_threshold = base_threshold
+        self._meta = OnlineLinearModel(
+            feature_dim=4,
+            learning_rate=0.09,
+            l2=1e-3,
+            bounds=(0.0, 1.0),
+        )
+        self._last_features: Optional[List[float]] = None
 
     def suggest(self, hypotheses: List[Hypothesis], observation: str) -> Optional[str]:
         if len(hypotheses) < 2:
+            self._last_features = None
             return None
         top = hypotheses[:4]
         scores = [max(h.score, 1e-4) for h in top]
         total = float(sum(scores))
         if total == 0.0:
+            self._last_features = None
             return None
         probs = [score / total for score in scores]
         best_pair: Optional[Tuple[Hypothesis, Hypothesis]] = None
@@ -263,8 +524,22 @@ class EntropyQuestionPolicy:
                 if gain > best_gain:
                     best_gain = gain
                     best_pair = (top[i], top[j])
-        if not best_pair or best_gain < 0.05:
+        if not best_pair:
+            self._last_features = None
             return None
+
+        features = [
+            1.0,
+            best_gain,
+            min(1.0, len(hypotheses) / 5.0),
+            min(1.0, len(observation) / 120.0),
+        ]
+        confidence = self._meta.predict(features)
+        dynamic_threshold = max(0.02, self.base_threshold * (0.8 + 0.4 * (1.0 - confidence)))
+        if best_gain < dynamic_threshold:
+            self._last_features = None
+            return None
+
         a, b = best_pair
         discriminants: List[str] = []
         if a.causal_support:
@@ -277,4 +552,12 @@ class EntropyQuestionPolicy:
                 f"Quel indice vérifierait {a.label} ({discriminants[0]}) ou {b.label} ({discriminants[-1]}) ?"
             )
         info = f"(gain info ≈ {best_gain:.2f})"
+        self._last_features = features
         return f"{base} {info}"
+
+    def register_feedback(self, reward: float) -> None:
+        if self._last_features is None:
+            return
+        clamped = max(0.0, min(1.0, float(reward)))
+        self._meta.update(self._last_features, clamped)
+        self._last_features = None
