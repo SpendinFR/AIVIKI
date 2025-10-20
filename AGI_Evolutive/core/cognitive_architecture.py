@@ -754,6 +754,7 @@ class CognitiveArchitecture:
 
                                 self.concept_recognizer = ConceptRecognizer(self)
                             evidence_payload = {}
+                            features_payload = {}
                             mem = getattr(self, "memory", None)
                             if mem and hasattr(mem, "find_recent"):
                                 ev = mem.find_recent(
@@ -763,16 +764,19 @@ class CognitiveArchitecture:
                                 ) or {}
                                 if isinstance(ev, dict):
                                     evidence_payload = ev.get("evidence", {}) or {}
+                                    features_payload = ev.get("features", {}) or {}
                                 elif isinstance(ev, list) and ev:
                                     first = ev[0]
                                     if isinstance(first, dict):
                                         evidence_payload = first.get("evidence", {}) or {}
+                                        features_payload = first.get("features", {}) or {}
                             if getattr(self, "concept_recognizer", None):
                                 self.concept_recognizer.learn_from_rejection(
                                     kind="concept",
                                     label=concept,
                                     evidence=evidence_payload,
                                     penalty=0.6,
+                                    features=features_payload,
                                 )
                         except Exception:
                             pass
@@ -1545,18 +1549,22 @@ class CognitiveArchitecture:
             if mem and hasattr(mem, "find_recent"):
                 ev = mem.find_recent(kind="concept_candidate", since_sec=3600 * 24, where={"label": concept_norm}) or {}
             evidence_payload = {}
+            features_payload = {}
             if isinstance(ev, dict):
                 evidence_payload = ev.get("evidence", {}) or {}
+                features_payload = ev.get("features", {}) or {}
             elif isinstance(ev, list) and ev:
                 first = ev[0]
                 if isinstance(first, dict):
                     evidence_payload = first.get("evidence", {}) or {}
+                    features_payload = first.get("features", {}) or {}
             if getattr(self, "concept_recognizer", None):
                 self.concept_recognizer.learn_from_confirmation(
                     kind="concept",
                     label=concept_norm,
                     evidence=evidence_payload,
                     reward=0.85,
+                    features=features_payload,
                 )
         except Exception:
             pass
