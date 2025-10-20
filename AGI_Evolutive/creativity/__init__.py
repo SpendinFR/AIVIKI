@@ -10,11 +10,12 @@ Implémente des gardes robustes + normalisation silencieuse pour éviter les err
 """
 from __future__ import annotations
 
+import math
 import time
 import random
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from collections import defaultdict, deque
 
 try:
@@ -178,6 +179,200 @@ def crea_normalize(self: "CreativitySystem") -> None:
     self.creative_knowledge.setdefault("constraint_templates", {})
     self.creative_knowledge.setdefault("innovation_patterns", {})
 
+# -------------------- Adaptive helpers --------------------
+
+class OnlineLogisticModel:
+    """Modèle logistique en ligne avec facteur d'oubli et bornes."""
+
+    def __init__(self, dim: int, lr: float = 0.2, l2: float = 0.01,
+                 forget: float = 0.01, bounds: Tuple[float, float] = (-3.0, 3.0)) -> None:
+        self.dim = dim
+        self.lr = lr
+        self.l2 = l2
+        self.forget = forget
+        self.bounds = bounds
+        self.weights: List[float] = [0.0] * dim
+
+    def _clip_weight(self, w: float) -> float:
+        return max(self.bounds[0], min(self.bounds[1], w))
+
+    def predict(self, features: List[float]) -> float:
+        z = sum(w * x for w, x in zip(self.weights, features))
+        # Protection contre overflow
+        z = max(-30.0, min(30.0, z))
+        return 1.0 / (1.0 + math.exp(-z))
+
+    def update(self, features: List[float], target: float) -> float:
+        target = _clip(target, 0.0, 1.0)
+        pred = self.predict(features)
+        err = target - pred
+        max_shift = 0.0
+        for idx, x in enumerate(features):
+            grad = err * x - self.l2 * self.weights[idx]
+            updated = (1.0 - self.forget) * self.weights[idx] + self.lr * grad
+            updated = self._clip_weight(updated)
+            shift = abs(updated - self.weights[idx])
+            if shift > max_shift:
+                max_shift = shift
+            self.weights[idx] = updated
+        return max_shift
+
+
+class AdaptiveCreativeMetrics:
+    """Apprentissage en ligne des pondérations de mise à jour des états créatifs."""
+
+    def __init__(self, states: Dict[str, float], strategy_names: List[str]) -> None:
+        self.state_names = [k for k in ("creative_flow", "creative_confidence",
+                                        "cognitive_flexibility", "inspiration_level")
+                            if k in states]
+        self.strategy_index: Dict[str, float] = {}
+        if strategy_names:
+            denom = max(1, len(strategy_names) - 1)
+            for idx, name in enumerate(strategy_names):
+                self.strategy_index[name] = idx / denom if denom else 0.0
+        self.default_strategy_value = 0.5
+        self.default_ttl_days = 7.0
+        self.feature_dim = 12
+        self.models: Dict[str, OnlineLogisticModel] = {
+            name: OnlineLogisticModel(self.feature_dim, lr=0.25, l2=0.02, forget=0.015)
+            for name in self.state_names
+        }
+        self.max_delta: Dict[str, float] = {
+            "creative_flow": 0.15,
+            "creative_confidence": 0.12,
+            "cognitive_flexibility": 0.1,
+            "inspiration_level": 0.14,
+        }
+        self.drift_threshold = 0.08
+        self.drift_log: deque = deque(maxlen=200)
+
+    def _strategy_value(self, strategy: Optional[str]) -> float:
+        if strategy in self.strategy_index:
+            return self.strategy_index[strategy]
+        return self.default_strategy_value
+
+    def _features(self, stats: Dict[str, Any]) -> List[float]:
+        ideas_norm = min(1.0, stats.get("ideas_generated", 0) / 10.0)
+        efficiency_norm = min(1.0, stats.get("efficiency", 0.0) / 10.0)
+        constraints_norm = min(1.0, stats.get("constraints_count", 0) / 5.0)
+        ttl_norm = stats.get("ttl_days", self.default_ttl_days) / 30.0
+        reward = stats.get("reward", 0.5)
+        novelty = stats.get("avg_novelty", 0.5)
+        usefulness = stats.get("avg_usefulness", 0.5)
+        feasibility = stats.get("avg_feasibility", 0.5)
+        elaboration = stats.get("avg_elaboration", 0.3)
+        diversity = stats.get("diversity", 0.5)
+        strategy_val = self._strategy_value(stats.get("strategy"))
+        features = [
+            1.0,
+            ideas_norm,
+            novelty,
+            usefulness,
+            feasibility,
+            elaboration,
+            efficiency_norm,
+            reward,
+            constraints_norm,
+            ttl_norm,
+            diversity,
+            strategy_val,
+        ]
+        return features
+
+    def _target(self, state: str, stats: Dict[str, Any]) -> float:
+        if state == "creative_flow":
+            base = 0.6 * stats.get("reward", 0.5) + 0.4 * min(1.0, stats.get("efficiency", 0.0) / 5.0)
+        elif state == "creative_confidence":
+            base = 0.6 * stats.get("avg_usefulness", 0.5) + 0.4 * stats.get("avg_feasibility", 0.5)
+        elif state == "inspiration_level":
+            base = 0.6 * stats.get("avg_novelty", 0.5) + 0.4 * stats.get("avg_elaboration", 0.3)
+        else:  # cognitive_flexibility
+            inv_constraints = 1.0 - min(1.0, stats.get("constraints_count", 0) / 10.0)
+            base = 0.5 * stats.get("diversity", 0.5) + 0.5 * inv_constraints
+        return _clip(base, 0.0, 1.0)
+
+    def apply(self, stats: Dict[str, Any], states: Dict[str, float], scale: float = 1.0) -> None:
+        features = self._features(stats)
+        for state in self.state_names:
+            model = self.models[state]
+            max_delta = self.max_delta.get(state, 0.1) * scale
+            pred = model.predict(features)
+            delta = (pred - 0.5) * 2.0 * max_delta
+            states[state] = _clip(states.get(state, 0.5) + delta)
+            drift = model.update(features, self._target(state, stats))
+            if drift > self.drift_threshold:
+                self.drift_log.append({
+                    "timestamp": time.time(),
+                    "state": state,
+                    "drift": drift,
+                    "features": features,
+                    "stats": {k: stats.get(k) for k in ("strategy", "reward", "ideas_generated")},
+                })
+
+
+class ContextualThompsonBandit:
+    """Bandit contextuel simple avec Thompson Sampling discret."""
+
+    def __init__(self, strategies: List[str], decay: float = 0.01) -> None:
+        self.strategies = strategies
+        self.decay = decay
+        self.posteriors: Dict[Tuple[str, str], List[float]] = defaultdict(lambda: [1.0, 1.0])
+
+    def select(self, context_key: str) -> Tuple[str, str]:
+        if not self.strategies:
+            return "random_association", context_key
+        best_strategy = None
+        best_score = -1.0
+        for strat in self.strategies:
+            alpha, beta = self.posteriors[(strat, context_key)]
+            sample = random.betavariate(alpha, beta)
+            if sample > best_score:
+                best_score = sample
+                best_strategy = strat
+        return best_strategy or self.strategies[0], context_key
+
+    def update(self, strategy: str, context_key: str, reward: float) -> None:
+        key = (strategy, context_key)
+        alpha, beta = self.posteriors[key]
+        alpha = max(1.0, alpha * (1.0 - self.decay))
+        beta = max(1.0, beta * (1.0 - self.decay))
+        success = _clip(reward, 0.0, 1.0)
+        failure = 1.0 - success
+        self.posteriors[key] = [alpha + success, beta + failure]
+
+
+class DiscreteThompsonSelector:
+    """Sélectionneur Thompson Sampling pour options discrètes (ex. TTL)."""
+
+    def __init__(self, options: List[int], default: int = 7, decay: float = 0.01) -> None:
+        self.options = options
+        self.default = default
+        self.decay = decay
+        self.posteriors: Dict[Tuple[int, str], List[float]] = defaultdict(lambda: [1.0, 1.0])
+        self.last_choice: int = default
+
+    def select(self, context_key: str) -> Tuple[int, str]:
+        if not self.options:
+            return self.default, context_key
+        choice = None
+        best_score = -1.0
+        for option in self.options:
+            alpha, beta = self.posteriors[(option, context_key)]
+            sample = random.betavariate(alpha, beta)
+            if sample > best_score:
+                best_score = sample
+                choice = option
+        self.last_choice = choice or self.default
+        return self.last_choice, context_key
+
+    def update(self, option: int, context_key: str, reward: float) -> None:
+        key = (option, context_key)
+        alpha, beta = self.posteriors[key]
+        alpha = max(1.0, alpha * (1.0 - self.decay))
+        beta = max(1.0, beta * (1.0 - self.decay))
+        success = _clip(reward, 0.0, 1.0)
+        failure = 1.0 - success
+        self.posteriors[key] = [alpha + success, beta + failure]
 # -------------------- Subsystems (light) --------------------
 
 class ActivationSpreadingSystem:
@@ -254,6 +449,7 @@ class CreativitySystem:
         self._initialize_basic_conceptual_network()
         self._initialize_generation_strategies()
         self._initialize_innate_creativity()
+        self._initialize_adaptive_modules()
 
         # Start background
         self._start_creative_monitoring()
@@ -295,6 +491,13 @@ class CreativitySystem:
             "problem_solution": {"description": "Problème → Solution", "success_rate": 0.6},
             "improvement": {"description": "Amélioration incrémentale", "success_rate": 0.7},
         })
+
+    def _initialize_adaptive_modules(self) -> None:
+        strategies = list(self.idea_generation.get("generation_strategies", {}).keys())
+        self.strategy_selector = ContextualThompsonBandit(strategies)
+        self.ttl_selector = DiscreteThompsonSelector([3, 7, 14, 30], default=7)
+        self.adaptive_metrics = AdaptiveCreativeMetrics(self.creative_states, strategies)
+        self.adaptive_drift_log = self.adaptive_metrics.drift_log
 
     # -------------------- Background threads --------------------
 
@@ -365,25 +568,106 @@ class CreativitySystem:
 
     def generate_ideas(self, topic: str, constraints: List[str], num_ideas: int=10, strategy: str="auto") -> List[CreativeIdea]:
         crea_normalize(self)
+        context_key = self._context_signature(topic, constraints)
+        strategy_context = context_key
         if strategy == "auto":
-            strategy = self._select_strategy(topic, constraints)
+            strategy, strategy_context = self._select_strategy(topic, constraints)
+        ttl_choice, ttl_context = self.ttl_selector.select(context_key)
+        self._enforce_ttl(ttl_choice)
         func = self.idea_generation["generation_strategies"].get(strategy, self._strat_random_association)
+        start_time = time.time()
         raw = func(topic, constraints, num_ideas)
+        generation_time = max(0.001, time.time() - start_time)
         out: List[CreativeIdea] = []
         for s in raw:
             ci = self._develop_raw_idea(s, topic, constraints)
             out.append(ci)
             self.idea_generation["idea_pool"].append(ci)
             self.creative_history["ideas_generated"].append(ci)
-        self._update_creative_metrics(len(out), max(0.001, 0.05*len(out)), strategy)
+        stats = self._compute_generation_stats(out, strategy, generation_time, len(constraints), ttl_choice, context_key, strategy_context, ttl_context)
+        self._update_creative_metrics(stats)
+        reward = stats.get("reward", 0.0)
+        self.strategy_selector.update(strategy, strategy_context, reward)
+        self.ttl_selector.update(ttl_choice, ttl_context, reward)
         return out
 
-    def _select_strategy(self, topic: str, constraints: List[str]) -> str:
-        lvl = len(constraints)/10.0
-        if lvl > 0.7: return "constraint_challenge"
-        if " " not in topic and len(topic)<8: return "random_association"
-        if random.random()<0.3: return "domain_transfer"
-        return "attribute_listing"
+    def _select_strategy(self, topic: str, constraints: List[str]) -> Tuple[str, str]:
+        context_key = self._context_signature(topic, constraints)
+        strategy, ctx = self.strategy_selector.select(context_key)
+        return strategy, ctx
+
+    def _context_signature(self, topic: str, constraints: List[str]) -> str:
+        topic = topic or ""
+        words = topic.split()
+        char_bucket = min(5, len(topic) // 4)
+        word_bucket = min(5, len(words))
+        constraint_bucket = min(5, len(constraints))
+        mode = "multi" if word_bucket > 1 else "mono"
+        time_bucket = int((time.time() % 86400) // 3600) // 4
+        return f"len:{char_bucket}|words:{word_bucket}|constraints:{constraint_bucket}|mode:{mode}|t:{time_bucket}"
+
+    def _enforce_ttl(self, ttl_days: int) -> None:
+        ttl_seconds = max(1, ttl_days) * 86400
+        cutoff = time.time() - ttl_seconds
+        pool = self.idea_generation["idea_pool"]
+        retained = []
+        for idea in list(pool):
+            if _is_ci(idea) and getattr(idea, "created_time", 0.0) < cutoff:
+                continue
+            retained.append(idea)
+        if len(retained) != len(pool):
+            pool.clear()
+            pool.extend(retained)
+
+    def _aggregate_idea_metrics(self, ideas: List[CreativeIdea]) -> Dict[str, float]:
+        if not ideas:
+            return {
+                "count": 0,
+                "avg_novelty": 0.5,
+                "avg_usefulness": 0.5,
+                "avg_feasibility": 0.5,
+                "avg_elaboration": 0.3,
+                "diversity": 0.5,
+            }
+        total = len(ideas)
+        novelty = sum(getattr(i, "novelty", 0.5) for i in ideas) / total
+        usefulness = sum(getattr(i, "usefulness", 0.5) for i in ideas) / total
+        feasibility = sum(getattr(i, "feasibility", 0.5) for i in ideas) / total
+        elaboration = sum(getattr(i, "elaboration", 0.3) for i in ideas) / total
+        unique_signatures = {str(getattr(i, "concept_core", ""))[:64] for i in ideas}
+        diversity = min(1.0, len(unique_signatures) / max(1, total))
+        return {
+            "count": total,
+            "avg_novelty": _clip(novelty),
+            "avg_usefulness": _clip(usefulness),
+            "avg_feasibility": _clip(feasibility),
+            "avg_elaboration": _clip(elaboration),
+            "diversity": diversity,
+        }
+
+    def _compute_generation_stats(self, ideas: List[CreativeIdea], strategy: str, generation_time: float,
+                                   constraints_count: int, ttl_days: int, context_key: str,
+                                   strategy_context: str, ttl_context: str) -> Dict[str, Any]:
+        metrics = self._aggregate_idea_metrics(ideas)
+        efficiency = metrics["count"] / max(generation_time, 1e-6)
+        reward = _clip(0.4 * metrics["avg_novelty"] + 0.4 * metrics["avg_usefulness"] + 0.2 * metrics["avg_feasibility"])
+        return {
+            "ideas_generated": metrics["count"],
+            "generation_time": generation_time,
+            "strategy": strategy,
+            "strategy_context": strategy_context,
+            "avg_novelty": metrics["avg_novelty"],
+            "avg_usefulness": metrics["avg_usefulness"],
+            "avg_feasibility": metrics["avg_feasibility"],
+            "avg_elaboration": metrics["avg_elaboration"],
+            "diversity": metrics["diversity"],
+            "reward": reward,
+            "efficiency": efficiency,
+            "constraints_count": constraints_count,
+            "ttl_days": ttl_days,
+            "ttl_context": ttl_context,
+            "context": context_key,
+        }
 
     # Strategies (return list[str])
     def _strat_random_association(self, topic: str, constraints: List[str], n: int) -> List[str]:
@@ -466,8 +750,18 @@ class CreativitySystem:
     def _monitor_creative_state(self) -> None:
         ideas = [i for i in list(self.idea_generation["idea_pool"])[-10:] if _is_ci(i)]
         if ideas:
-            self.creative_states["creative_flow"] = _clip(self.creative_states.get("creative_flow",0.3) + 0.02*len(ideas))
-            self.creative_states["creative_confidence"] = _clip(self.creative_states.get("creative_confidence",0.5) + 0.01*len(ideas))
+            ttl_days = getattr(self.ttl_selector, "last_choice", 7)
+            stats = self._compute_generation_stats(
+                ideas,
+                strategy="monitor",
+                generation_time=1.0,
+                constraints_count=0,
+                ttl_days=ttl_days,
+                context_key="monitoring",
+                strategy_context="monitoring",
+                ttl_context="monitoring",
+            )
+            self.adaptive_metrics.apply(stats, self.creative_states, scale=0.35)
 
     def _update_conceptual_space(self) -> None:
         G = self.conceptual_space["concept_network"]
@@ -574,19 +868,28 @@ class CreativitySystem:
 
     # -------------------- Metrics & Status --------------------
 
-    def _update_creative_metrics(self, ideas_generated: int, generation_time: float, strategy: str) -> None:
-        eff = ideas_generated / max(generation_time, 1e-6)
-        self.creative_states["creative_flow"] = _clip(self.creative_states.get("creative_flow",0.3) + 0.1 * min(0.2, 0.01*eff))
-        if ideas_generated>0:
-            self.creative_states["creative_confidence"] = _clip(self.creative_states.get("creative_confidence",0.5) + 0.02*ideas_generated)
-        self.creative_history["learning_trajectory"].append({
+    def _update_creative_metrics(self, stats: Dict[str, Any]) -> None:
+        self.adaptive_metrics.apply(stats, self.creative_states)
+        log_entry = {
             "timestamp": time.time(),
-            "strategy": strategy,
-            "ideas_generated": ideas_generated,
-            "generation_time": generation_time,
-            "efficiency": eff,
-            "new_state": dict(self.creative_states)
-        })
+            "strategy": stats.get("strategy"),
+            "strategy_context": stats.get("strategy_context"),
+            "ttl_days": stats.get("ttl_days"),
+            "ttl_context": stats.get("ttl_context"),
+            "ideas_generated": stats.get("ideas_generated"),
+            "generation_time": stats.get("generation_time"),
+            "reward": stats.get("reward"),
+            "avg_novelty": stats.get("avg_novelty"),
+            "avg_usefulness": stats.get("avg_usefulness"),
+            "avg_feasibility": stats.get("avg_feasibility"),
+            "avg_elaboration": stats.get("avg_elaboration"),
+            "diversity": stats.get("diversity"),
+            "efficiency": stats.get("efficiency"),
+            "creative_state": dict(self.creative_states),
+        }
+        if self.adaptive_metrics.drift_log:
+            log_entry["recent_drift"] = self.adaptive_metrics.drift_log[-1]
+        self.creative_history["learning_trajectory"].append(log_entry)
 
     def get_creative_status(self) -> Dict[str, Any]:
         pool = [i for i in list(self.idea_generation["idea_pool"])[-10:] if _is_ci(i)]
