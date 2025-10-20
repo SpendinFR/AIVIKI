@@ -62,6 +62,8 @@ class AdaptiveDominanceModel:
     score_moments: RunningMoments = field(
         default_factory=lambda: RunningMoments(forgetting=0.1)
     )
+    warmup_samples: int = 5
+    observations: int = 0
 
     def _features(
         self, champion: Mapping[str, float], challenger: Mapping[str, float]
@@ -114,6 +116,7 @@ class AdaptiveDominanceModel:
         target = self._target(features)
         self._update(features=features, target=target, score=score)
         self.score_moments.update(score)
+        self.observations += 1
         return accepted
 
 
@@ -195,8 +198,12 @@ def dominates(
         )
 
     comparator = model or _ADAPTIVE_MODEL
-    if comparator.should_accept(champion, challenger):
-        return True
+    adaptive_accept = comparator.should_accept(champion, challenger)
+    if adaptive_accept:
+        warmup = getattr(comparator, "warmup_samples", 0)
+        seen = getattr(comparator, "observations", 0)
+        if seen >= max(0, warmup):
+            return True
     return _dominates_static(
         champion,
         challenger,

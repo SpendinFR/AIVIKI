@@ -184,9 +184,9 @@ class AdaptiveDecisionMaker:
         if model.state.seen < 5:
             passed = lower >= threshold or fallback >= threshold
         else:
-            passed = calibrated >= 0.5
+            passed = calibrated >= threshold
 
-        target = 1.0 if fallback >= 0.5 else 0.0
+        target = 1.0 if fallback >= threshold else 0.0
         model.update(features, target)
         self._save()
         return {
