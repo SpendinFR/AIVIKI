@@ -1,14 +1,200 @@
 from __future__ import annotations
 
 import json
+import math
 import os
-import time
 import random
+import time
+from dataclasses import dataclass, field
+from statistics import mean, pstdev
 from typing import Any, Callable, Dict, List, Tuple
 
 from .metrics import aggregate_metrics
 
 ArchFactory = Callable[[Dict[str, Any]], Any]
+
+
+@dataclass
+class _SuiteState:
+    """Persisted parameters for adaptive decision models."""
+
+    weights: Dict[str, float] = field(default_factory=dict)
+    bias: float = 0.0
+    calibrator_a: float = 1.0
+    calibrator_b: float = 0.0
+    seen: int = 0
+
+
+class OnlineLogisticModel:
+    """Simple online logistic regression with Platt calibration."""
+
+    def __init__(
+        self,
+        feature_names: List[str],
+        state: _SuiteState | None = None,
+        learning_rate: float = 0.1,
+        calibrator_lr: float = 0.05,
+    ) -> None:
+        self.feature_names = feature_names
+        self.learning_rate = learning_rate
+        self.calibrator_lr = calibrator_lr
+        self.state = state or _SuiteState(
+            weights={name: 0.0 for name in feature_names},
+            bias=0.0,
+            calibrator_a=1.0,
+            calibrator_b=0.0,
+            seen=0,
+        )
+
+        for name in feature_names:
+            self.state.weights.setdefault(name, 0.0)
+
+    def _dot(self, features: Dict[str, float]) -> float:
+        total = self.state.bias
+        for name in self.feature_names:
+            total += self.state.weights.get(name, 0.0) * float(features.get(name, 0.0))
+        return total
+
+    @staticmethod
+    def _sigmoid(value: float) -> float:
+        if value >= 0:
+            z = math.exp(-value)
+            return 1.0 / (1.0 + z)
+        z = math.exp(value)
+        return z / (1.0 + z)
+
+    def predict_raw(self, features: Dict[str, float]) -> float:
+        return self._dot(features)
+
+    def predict_proba(self, features: Dict[str, float]) -> float:
+        return self._sigmoid(self.predict_raw(features))
+
+    def calibrate(self, probability: float) -> float:
+        # Apply Platt scaling using running parameters A, B.
+        score = self.state.calibrator_a * probability + self.state.calibrator_b
+        return self._sigmoid(score)
+
+    def update(self, features: Dict[str, float], target: float) -> None:
+        probability = self.predict_proba(features)
+        error = probability - target
+        for name in self.feature_names:
+            grad = error * float(features.get(name, 0.0))
+            self.state.weights[name] = self.state.weights.get(name, 0.0) - (
+                self.learning_rate * grad
+            )
+        self.state.bias -= self.learning_rate * error
+
+        calibrated = self.calibrate(probability)
+        cal_error = calibrated - target
+        self.state.calibrator_a -= self.calibrator_lr * cal_error * probability
+        self.state.calibrator_b -= self.calibrator_lr * cal_error
+        self.state.seen += 1
+
+
+class AdaptiveDecisionMaker:
+    """Manages online models for each evaluation suite."""
+
+    DEFAULT_THRESHOLDS = {
+        "abduction": 0.6,
+        "abduction_hard": 0.5,
+        "abduction_adversarial": 0.4,
+        "concepts": 0.7,
+    }
+
+    def __init__(self, path: str, feature_names: List[str]) -> None:
+        self.path = path
+        self.feature_names = feature_names
+        self._models: Dict[str, OnlineLogisticModel] = {}
+        self._load()
+
+    # ------------------------------------------------------------------
+    def _load(self) -> None:
+        if not os.path.exists(self.path):
+            return
+        try:
+            with open(self.path, "r", encoding="utf-8") as handle:
+                raw = json.load(handle)
+        except Exception:
+            return
+        if not isinstance(raw, dict):
+            return
+        for suite, params in raw.items():
+            if isinstance(params, dict):
+                state = _SuiteState(
+                    weights=dict(params.get("weights", {})),
+                    bias=float(params.get("bias", 0.0)),
+                    calibrator_a=float(params.get("calibrator_a", 1.0)),
+                    calibrator_b=float(params.get("calibrator_b", 0.0)),
+                    seen=int(params.get("seen", 0)),
+                )
+                self._models[suite] = OnlineLogisticModel(
+                    self.feature_names, state=state
+                )
+
+    def _save(self) -> None:
+        payload: Dict[str, Dict[str, float]] = {}
+        for suite, model in self._models.items():
+            state = model.state
+            payload[suite] = {
+                "weights": state.weights,
+                "bias": state.bias,
+                "calibrator_a": state.calibrator_a,
+                "calibrator_b": state.calibrator_b,
+                "seen": state.seen,
+            }
+        directory = os.path.dirname(self.path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(self.path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+
+    # ------------------------------------------------------------------
+    def _get_model(self, suite: str) -> OnlineLogisticModel:
+        if suite not in self._models:
+            self._models[suite] = OnlineLogisticModel(self.feature_names)
+        return self._models[suite]
+
+    @staticmethod
+    def _wilson_interval(successes: float, total: int, z: float = 1.96) -> Tuple[float, float]:
+        if total <= 0:
+            return 0.0, 0.0
+        phat = successes / total
+        denom = 1 + (z**2) / total
+        centre = phat + (z**2) / (2 * total)
+        margin = z * math.sqrt((phat * (1 - phat) + (z**2) / (4 * total)) / total)
+        lower = max(0.0, (centre - margin) / denom)
+        upper = min(1.0, (centre + margin) / denom)
+        return lower, upper
+
+    def decide(
+        self,
+        suite: str,
+        features: Dict[str, float],
+        successes: float,
+        total: int,
+    ) -> Dict[str, Any]:
+        model = self._get_model(suite)
+        probability = model.predict_proba(features)
+        calibrated = model.calibrate(probability)
+        lower, upper = self._wilson_interval(successes, total)
+
+        fallback = features.get("acc", 0.0)
+        threshold = self.DEFAULT_THRESHOLDS.get(suite, 0.5)
+        # If the model is still immature, rely on Wilson lower bound + fallback.
+        if model.state.seen < 5:
+            passed = lower >= threshold or fallback >= threshold
+        else:
+            passed = calibrated >= 0.5
+
+        target = 1.0 if fallback >= 0.5 else 0.0
+        model.update(features, target)
+        self._save()
+        return {
+            "passed": passed,
+            "adaptive_probability": calibrated,
+            "confidence_interval": (lower, upper),
+            "fallback_threshold": threshold,
+        }
 
 
 class DatasetRegistry:
@@ -44,6 +230,10 @@ class SandboxRunner:
         os.makedirs(self.eval_root, exist_ok=True)
         self.registry = DatasetRegistry(os.path.join(self.eval_root, "registry.json"))
         self.curriculum_level = "base"
+        self.adaptive = AdaptiveDecisionMaker(
+            os.path.join(self.eval_root, "adaptive_state.json"),
+            feature_names=["acc", "time", "count", "variance"],
+        )
 
     # ------------------------------------------------------------------
     # Evaluation data loading helpers
@@ -71,6 +261,21 @@ class SandboxRunner:
 
     def set_curriculum_level(self, level: str) -> None:
         self.curriculum_level = level
+
+    # ------------------------------------------------------------------
+    # Feature helpers
+    @staticmethod
+    def _suite_features(
+        samples: List[Dict[str, float]], scores: List[float], metrics: Dict[str, float]
+    ) -> Dict[str, float]:
+        count = len(samples)
+        variance = float(pstdev(scores)) if len(scores) > 1 else 0.0
+        return {
+            "acc": float(metrics.get("acc", 0.0)),
+            "time": float(metrics.get("time", 0.0)),
+            "count": float(count),
+            "variance": variance,
+        }
 
     # ------------------------------------------------------------------
     # Individual evaluations
@@ -140,63 +345,90 @@ class SandboxRunner:
         base_scores: List[float],
     ) -> List[Dict[str, Any]]:
         report: List[Dict[str, Any]] = []
-        thresholds = {
-            "abduction": 0.6,
-            "abduction_hard": 0.5,
-            "abduction_adversarial": 0.4,
-            "concepts": 0.7,
-        }
-
         base_metrics = aggregate_metrics(base_samples)
         baseline_total = float(sum(base_scores))
+        base_features = self._suite_features(base_samples, base_scores, base_metrics)
+        base_decision = self.adaptive.decide(
+            "abduction", base_features, successes=baseline_total, total=len(base_scores)
+        )
         report.append(
             {
                 "suite": "abduction",
-                "passed": base_metrics.get("acc", 0.0) >= thresholds["abduction"],
-                "threshold": thresholds["abduction"],
+                "passed": base_decision["passed"],
+                "threshold": base_decision["fallback_threshold"],
                 "metrics": base_metrics,
                 "baseline_total": baseline_total,
+                "adaptive_probability": base_decision["adaptive_probability"],
+                "confidence_interval": base_decision["confidence_interval"],
             }
         )
 
         abduction_hard = self._load_eval("abduction_hard")
         if abduction_hard:
-            samples, _ = self._eval_abduction(arch, tasks=abduction_hard)
+            samples, scores = self._eval_abduction(arch, tasks=abduction_hard)
             metrics = aggregate_metrics(samples)
+            features = self._suite_features(samples, scores, metrics)
+            decision = self.adaptive.decide(
+                "abduction_hard", features, successes=sum(scores), total=len(scores)
+            )
             report.append(
                 {
                     "suite": "abduction_hard",
-                    "passed": metrics.get("acc", 0.0) >= thresholds["abduction_hard"],
-                    "threshold": thresholds["abduction_hard"],
+                    "passed": decision["passed"],
+                    "threshold": decision["fallback_threshold"],
                     "metrics": metrics,
+                    "adaptive_probability": decision["adaptive_probability"],
+                    "confidence_interval": decision["confidence_interval"],
                 }
             )
 
         abduction_adv = self._load_eval("abduction_adversarial")
         if abduction_adv:
-            samples, _ = self._eval_abduction(arch, tasks=abduction_adv)
+            samples, scores = self._eval_abduction(arch, tasks=abduction_adv)
             metrics = aggregate_metrics(samples)
+            features = self._suite_features(samples, scores, metrics)
+            decision = self.adaptive.decide(
+                "abduction_adversarial",
+                features,
+                successes=sum(scores),
+                total=len(scores),
+            )
             report.append(
                 {
                     "suite": "abduction_adversarial",
-                    "passed": metrics.get("acc", 0.0) >= thresholds["abduction_adversarial"],
-                    "threshold": thresholds["abduction_adversarial"],
+                    "passed": decision["passed"],
+                    "threshold": decision["fallback_threshold"],
                     "metrics": metrics,
+                    "adaptive_probability": decision["adaptive_probability"],
+                    "confidence_interval": decision["confidence_interval"],
                 }
             )
 
         concepts_hard = self._load_eval("concepts_hard")
         if concepts_hard:
-            samples, _ = self._eval_concepts(arch, tasks=concepts_hard)
+            samples, scores = self._eval_concepts(arch, tasks=concepts_hard)
             metrics = aggregate_metrics(samples)
+            features = self._suite_features(samples, scores, metrics)
+            decision = self.adaptive.decide(
+                "concepts", features, successes=sum(scores), total=len(scores)
+            )
             report.append(
                 {
                     "suite": "concepts_hard",
-                    "passed": metrics.get("acc", 0.0) >= thresholds["concepts"],
-                    "threshold": thresholds["concepts"],
+                    "passed": decision["passed"],
+                    "threshold": decision["fallback_threshold"],
                     "metrics": metrics,
+                    "adaptive_probability": decision["adaptive_probability"],
+                    "confidence_interval": decision["confidence_interval"],
                 }
             )
+
+        # Adjust curriculum difficulty dynamically based on base performance.
+        base_prob = base_decision["adaptive_probability"]
+        if base_prob >= 0.8:
+            self.curriculum_level = "advanced"
+        elif base_prob <= 0.35:
+            self.curriculum_level = "base"
         return report
 
     def _run_mutation_tests(self, arch: Any, base_scores: List[float]) -> Dict[str, Any]:
@@ -212,10 +444,17 @@ class SandboxRunner:
         _, mutated_scores = self._eval_abduction(arch, tasks=mutated)
         baseline_total = float(sum(base_scores))
         mutated_total = float(sum(mutated_scores))
+        baseline_mean = mean(base_scores) if base_scores else 0.0
+        mutated_mean = mean(mutated_scores) if mutated_scores else 0.0
+        normalizer = max(1.0, baseline_total)
+        robustness = (baseline_total - mutated_total) / normalizer
         return {
-            "passed": mutated_total < baseline_total,
+            "passed": robustness > 0.05,
             "baseline_total": baseline_total,
             "mutated_total": mutated_total,
+            "baseline_mean": baseline_mean,
+            "mutated_mean": mutated_mean,
+            "robustness_score": robustness,
         }
 
     def _run_security_suite(self, arch: Any) -> Dict[str, Any]:
@@ -249,11 +488,14 @@ class SandboxRunner:
             report["ethics_error"] = str(exc)
 
         passed = privacy_ok and sandbox_ok and ethics_ok
+        scores = [float(privacy_ok), float(sandbox_ok), float(ethics_ok)]
+        composite = mean(scores)
         report.update({
             "privacy": privacy_ok,
             "sandbox": sandbox_ok,
             "ethics": ethics_ok,
             "passed": passed,
+            "risk_score": 1.0 - composite,
         })
         return report
 
