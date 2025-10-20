@@ -18,6 +18,225 @@ import random
 
 from .emotion_engine import EmotionEngine
 
+
+class BoundedOnlineLinear:
+    """Régression linéaire en ligne bornée pour l'ajustement d'hyperparamètres."""
+
+    def __init__(
+        self,
+        feature_names: Optional[Set[str]] = None,
+        *,
+        bounds: Tuple[float, float] = (0.0, 1.0),
+        lr: float = 0.05,
+        base_value: Optional[float] = None,
+    ) -> None:
+        self.feature_names = set(feature_names or [])
+        self.bounds = bounds
+        self.lr = float(lr)
+        lo, hi = self.bounds
+        self.base_value = base_value if base_value is not None else (lo + hi) / 2.0
+        self.weights: Dict[str, float] = {name: 0.0 for name in self.feature_names}
+
+    def predict(self, features: Dict[str, float]) -> float:
+        total = self.base_value
+        for name, value in features.items():
+            if name not in self.weights:
+                # Les nouvelles caractéristiques démarrent neutres
+                self.weights[name] = 0.0
+            total += self.weights[name] * float(value)
+        return max(self.bounds[0], min(self.bounds[1], total))
+
+    def update(self, features: Dict[str, float], target: float) -> Tuple[float, float]:
+        target_clipped = max(self.bounds[0], min(self.bounds[1], float(target)))
+        prediction = self.predict(features)
+        error = target_clipped - prediction
+        scaled_error = self.lr * error
+
+        for name, value in features.items():
+            if name not in self.weights:
+                self.weights[name] = 0.0
+            self.weights[name] += scaled_error * float(value)
+            # Les poids restent bornés pour éviter les dérives
+            self.weights[name] = max(-1.0, min(1.0, self.weights[name]))
+
+        # Léger ajustement de la base vers la cible
+        self.base_value += scaled_error * 0.1
+        self.base_value = max(self.bounds[0], min(self.bounds[1], self.base_value))
+
+        return prediction, error
+
+
+class DiscreteThompsonSampler:
+    """Thompson Sampling sur un ensemble discret de bras."""
+
+    def __init__(self, arms: List[Any], prior: Tuple[float, float] = (1.0, 1.0)) -> None:
+        if not arms:
+            raise ValueError("At least one arm is required for Thompson Sampling")
+        self.arms = list(arms)
+        self.stats: Dict[Any, List[float]] = {
+            arm: [float(prior[0]), float(prior[1])] for arm in self.arms
+        }
+
+    def sample(self) -> Any:
+        draws = {}
+        for arm, (alpha, beta) in self.stats.items():
+            alpha = max(alpha, 1e-3)
+            beta = max(beta, 1e-3)
+            draws[arm] = np.random.beta(alpha, beta)
+        # Sélectionne le bras avec le tirage le plus élevé
+        return max(draws.items(), key=lambda item: item[1])[0]
+
+    def update(self, arm: Any, success: float) -> None:
+        if arm not in self.stats:
+            return
+        alpha, beta = self.stats[arm]
+        success_clamped = max(0.0, min(1.0, float(success)))
+        alpha += success_clamped
+        beta += 1.0 - success_clamped
+        self.stats[arm] = [alpha, beta]
+
+
+class AdaptiveEMARegressor:
+    """EMA adaptative guidée par Thompson Sampling et corrélation récompense."""
+
+    def __init__(self, betas: Tuple[float, ...] = (0.2, 0.4, 0.6, 0.8)) -> None:
+        self.betas = tuple(sorted(betas))
+        self.sampler = DiscreteThompsonSampler(list(self.betas))
+        self.state: Dict[float, float] = {beta: None for beta in self.betas}
+        self.current_beta = self.betas[0]
+        self.history: deque = deque(maxlen=256)
+        self.correlation: float = 0.0
+
+    def _compute_correlation(self) -> float:
+        if len(self.history) < 6:
+            return self.correlation
+        smoothed = np.array([item[0] for item in self.history])
+        target = np.array([item[1] for item in self.history])
+        if np.allclose(smoothed.std(), 0.0) or np.allclose(target.std(), 0.0):
+            return self.correlation
+        corr = float(np.corrcoef(smoothed, target)[0, 1])
+        self.correlation = corr
+        return corr
+
+    def update(self, signal: float, target: Optional[float] = None) -> Dict[str, float]:
+        if target is None:
+            target = float(signal)
+
+        beta = self.sampler.sample()
+        previous = self.state.get(beta)
+        if previous is None:
+            smoothed = float(signal)
+        else:
+            smoothed = beta * float(signal) + (1.0 - beta) * float(previous)
+        self.state[beta] = smoothed
+
+        self.history.append((smoothed, float(target)))
+        previous_corr = self.correlation
+        new_corr = self._compute_correlation()
+        improvement = 1.0 if new_corr >= previous_corr else 0.0
+        self.sampler.update(beta, improvement)
+        self.current_beta = beta
+
+        return {
+            "smoothed": smoothed,
+            "beta": beta,
+            "correlation": new_corr,
+            "improved": improvement,
+        }
+
+
+class EmotionDriftDetector:
+    """Détection simple de dérive sur des fenêtres glissantes."""
+
+    def __init__(self, window: int = 40, threshold: float = 0.15) -> None:
+        self.window = max(5, int(window))
+        self.threshold = float(threshold)
+        self.buffer: deque = deque(maxlen=self.window)
+        self.reference: Optional[float] = None
+
+    def update(self, value: float) -> Optional[Dict[str, float]]:
+        self.buffer.append(float(value))
+        if len(self.buffer) < self.buffer.maxlen:
+            return None
+
+        current_mean = float(np.mean(self.buffer))
+        if self.reference is None:
+            self.reference = current_mean
+            return None
+
+        drift = abs(current_mean - self.reference)
+        if drift >= self.threshold:
+            event = {
+                "from": self.reference,
+                "to": current_mean,
+                "delta": drift,
+            }
+            self.reference = current_mean
+            return event
+
+        # Mise à jour progressive de la référence pour suivre la tendance lente
+        self.reference = self.reference * 0.9 + current_mean * 0.1
+        return None
+
+
+class EmotionalHyperAdaptationManager:
+    """Orchestration hiérarchique de l'adaptation des hyperparamètres émotionnels."""
+
+    def __init__(self) -> None:
+        self.update_rate_model = BoundedOnlineLinear(bounds=(0.05, 0.55), lr=0.04)
+        self.mood_inertia_model = BoundedOnlineLinear(bounds=(0.3, 0.9), lr=0.03)
+        self.regulation_model = BoundedOnlineLinear(bounds=(0.5, 0.85), lr=0.02)
+        # Couples (multiplicateur_update_rate, multiplicateur_decay)
+        self.combo_sampler = DiscreteThompsonSampler(
+            [(1.0, 1.0), (0.8, 1.1), (1.15, 0.9), (1.0, 1.2)]
+        )
+        self.ema = AdaptiveEMARegressor()
+        self.last_quality: Optional[float] = None
+        self.last_context: Dict[str, float] = {}
+        self._last_combo: Tuple[float, float] = (1.0, 1.0)
+
+    def suggest(self, features: Dict[str, float]) -> Dict[str, float]:
+        features_with_bias = dict(features)
+        features_with_bias.setdefault("bias", 1.0)
+
+        rate = self.update_rate_model.predict(features_with_bias)
+        inertia = self.mood_inertia_model.predict(features_with_bias)
+        regulation = self.regulation_model.predict(features_with_bias)
+        mult_rate, mult_decay = self.combo_sampler.sample()
+        self._last_combo = (mult_rate, mult_decay)
+
+        return {
+            "update_rate": max(0.05, min(0.65, rate * mult_rate)),
+            "decay_multiplier": max(0.5, min(1.5, mult_decay)),
+            "mood_inertia": inertia,
+            "regulation_threshold": regulation,
+        }
+
+    def observe(
+        self,
+        features: Dict[str, float],
+        *,
+        quality: float,
+        smoothing_quality: float,
+        combo_success: float,
+        regulation_effectiveness: float,
+    ) -> None:
+        features_with_bias = dict(features)
+        features_with_bias.setdefault("bias", 1.0)
+
+        quality_clamped = max(0.0, min(1.0, quality))
+        smoothing_score = max(-1.0, min(1.0, smoothing_quality))
+        regulation_score = max(0.0, min(1.0, regulation_effectiveness))
+
+        self.update_rate_model.update(features_with_bias, quality_clamped)
+        self.mood_inertia_model.update(features_with_bias, 0.5 + 0.4 * smoothing_score)
+        self.regulation_model.update(features_with_bias, regulation_score)
+        self.combo_sampler.update(self._last_combo, combo_success)
+
+        self.last_quality = quality_clamped
+        self.last_context = dict(features)
+
+
 class EmotionalState(Enum):
     """États émotionnels fondamentaux"""
     JOY = "joie"
@@ -178,7 +397,8 @@ class EmotionalSystem:
             "emotional_episodes": deque(maxlen=1000),
             "affective_associations": {},
             "emotional_conditioning": EmotionalConditioningSystem(),
-            "mood_congruent_memory": MoodCongruentMemory()
+            "mood_congruent_memory": MoodCongruentMemory(),
+            "adaptation_signatures": deque(maxlen=200)
         }
         
         # === RÉGULATION ÉMOTIONNELLE ===
@@ -226,9 +446,10 @@ class EmotionalSystem:
             "intensity_peaks": deque(maxlen=100),
             "mood_transitions": deque(maxlen=200),
             "regulation_attempts": deque(maxlen=500),
-            "learning_episodes": deque(maxlen=300)
+            "learning_episodes": deque(maxlen=300),
+            "drift_events": deque(maxlen=200)
         }
-        
+
         # === PARAMÈTRES DE FONCTIONNEMENT ===
         self.operational_parameters = {
             "emotional_granularity": 0.6,     # Niveau de détail des expériences émotionnelles
@@ -241,7 +462,21 @@ class EmotionalSystem:
         # === THREADS DE TRAITEMENT ===
         self.processing_threads = {}
         self.running = True
-        
+
+        # Adaptation hiérarchique et détection de dérive
+        self.hyper_adaptation_manager = EmotionalHyperAdaptationManager()
+        self.drift_detectors = {
+            "intensity": EmotionDriftDetector(window=40, threshold=0.12),
+            "valence": EmotionDriftDetector(window=40, threshold=0.15),
+            "mood": EmotionDriftDetector(window=60, threshold=0.10),
+        }
+        self._adaptive_context = {
+            "last_balance": 0.5,
+            "last_reward": 0.5,
+            "last_features": {},
+            "decay_multiplier": 1.0,
+        }
+
         # Initialisation des systèmes
         self._initialize_emotional_system()
 
@@ -264,7 +499,7 @@ class EmotionalSystem:
     
     def _initialize_emotional_system(self):
         """Initialise le système émotionnel avec des capacités de base"""
-        
+
         # Émotions innées de base
         innate_emotions = {
             EmotionalState.JOY: 0.1,
@@ -283,7 +518,157 @@ class EmotionalSystem:
         
         # Évaluation initiale de l'état émotionnel
         self._perform_initial_emotional_assessment()
-    
+
+    def _estimate_reward_signal(self, experience: EmotionalExperience) -> float:
+        """Estime un signal de récompense/qualité à partir de l'expérience."""
+        valence_score = (experience.valence + 1.0) / 2.0  # -> [0,1]
+        dominance_score = max(0.0, min(1.0, experience.dominance))
+        arousal_score = 1.0 - abs(max(0.0, min(1.0, experience.arousal)) - 0.5) * 2.0
+        stress = self.physiological_influences.get("stress_level", 0.3)
+        stress_penalty = max(0.0, min(1.0, 1.0 - stress))
+        return max(
+            0.0,
+            min(
+                1.0,
+                0.45 * valence_score
+                + 0.25 * dominance_score
+                + 0.2 * stress_penalty
+                + 0.1 * arousal_score,
+            ),
+        )
+
+    def _recent_emotional_statistics(self, window: int = 20) -> Dict[str, float]:
+        """Calcule des statistiques sur les expériences récentes."""
+        experiences = list(self.emotional_history["emotional_experiences"])[-window:]
+        if not experiences:
+            return {
+                "avg_valence": 0.0,
+                "avg_arousal": 0.5,
+                "avg_intensity": 0.2,
+                "positive_ratio": 0.5,
+            }
+
+        valences = np.array([exp.valence for exp in experiences])
+        arousals = np.array([exp.arousal for exp in experiences])
+        intensities = np.array([exp.intensity for exp in experiences])
+        positives = float(np.sum(valences > 0)) / len(experiences)
+        return {
+            "avg_valence": float(np.mean(valences)),
+            "avg_arousal": float(np.mean(arousals)),
+            "avg_intensity": float(np.mean(intensities)),
+            "positive_ratio": positives,
+        }
+
+    def _build_adaptation_features(
+        self,
+        experience: EmotionalExperience,
+        reward: float,
+        smoothing: Dict[str, float],
+    ) -> Dict[str, float]:
+        stats = self._recent_emotional_statistics()
+        current_mood = self.mood_system["current_mood"]
+        features = {
+            "valence": experience.valence,
+            "arousal": experience.arousal,
+            "dominance": experience.dominance,
+            "intensity": experience.intensity,
+            "reward": reward,
+            "mood_intensity": current_mood.intensity,
+            "mood_stability": current_mood.stability,
+            "balance": self.emotional_balance,
+            "energy": self.physiological_influences.get("energy_level", 0.5),
+            "stress": self.physiological_influences.get("stress_level", 0.3),
+            "avg_valence": stats["avg_valence"],
+            "avg_arousal": stats["avg_arousal"],
+            "avg_intensity": stats["avg_intensity"],
+            "positive_ratio": stats["positive_ratio"],
+            "smoothing_beta": smoothing.get("beta", 0.4),
+            "smoothing_corr": smoothing.get("correlation", 0.0),
+        }
+        if self.emotional_memory["adaptation_signatures"]:
+            last_signature = self.emotional_memory["adaptation_signatures"][-1]
+            features["last_update_rate"] = last_signature.get("update_rate", 0.3)
+            features["last_reward"] = last_signature.get("reward", 0.5)
+        else:
+            features["last_update_rate"] = 0.3
+            features["last_reward"] = self._adaptive_context.get("last_reward", 0.5)
+        return features
+
+    def _hyper_adaptation_step(self, experience: EmotionalExperience) -> Dict[str, Any]:
+        reward = self._estimate_reward_signal(experience)
+        smoothing = self.hyper_adaptation_manager.ema.update(experience.valence, reward)
+        features = self._build_adaptation_features(experience, reward, smoothing)
+        suggestions = self.hyper_adaptation_manager.suggest(features)
+
+        # Application directe de certains paramètres
+        self.operational_parameters["mood_inertia"] = suggestions["mood_inertia"]
+        self.emotion_regulation["regulation_threshold"] = suggestions["regulation_threshold"]
+        self._adaptive_context["last_features"] = features
+        self._adaptive_context["last_reward"] = reward
+        self._adaptive_context["decay_multiplier"] = suggestions["decay_multiplier"]
+
+        adaptation_record = {
+            "timestamp": time.time(),
+            "reward": reward,
+            "beta": smoothing.get("beta"),
+            "correlation": smoothing.get("correlation"),
+            "update_rate": suggestions["update_rate"],
+            "decay_multiplier": suggestions["decay_multiplier"],
+            "regulation_threshold": suggestions["regulation_threshold"],
+        }
+        self.emotional_memory["adaptation_signatures"].append(adaptation_record)
+        if self.memory_system and hasattr(self.memory_system, "register_emotional_adaptation"):
+            try:
+                self.memory_system.register_emotional_adaptation(adaptation_record)
+            except Exception as exc:
+                print(f"[emotion] adaptation memory hook failed: {exc}")
+
+        return {
+            "update_rate": suggestions["update_rate"],
+            "decay_multiplier": suggestions["decay_multiplier"],
+            "features": features,
+            "reward": reward,
+            "smoothing": smoothing,
+        }
+
+    def _record_adaptation_feedback(
+        self,
+        adaptation: Dict[str, Any],
+        combo_success: float,
+    ) -> None:
+        smoothing = adaptation.get("smoothing", {})
+        features = adaptation.get("features", {})
+        reward = adaptation.get("reward", 0.5)
+        regulation_effectiveness = self.emotion_regulation.get("effectiveness", 0.5)
+        self.hyper_adaptation_manager.observe(
+            features,
+            quality=reward,
+            smoothing_quality=smoothing.get("correlation", 0.0),
+            combo_success=combo_success,
+            regulation_effectiveness=regulation_effectiveness,
+        )
+
+    def _check_drift(self, signal: str, value: float) -> None:
+        detector = self.drift_detectors.get(signal)
+        if not detector:
+            return
+        event = detector.update(value)
+        if event:
+            self._log_drift_event(signal, event)
+
+    def _log_drift_event(self, signal: str, event: Dict[str, float]) -> None:
+        record = {
+            "timestamp": time.time(),
+            "signal": signal,
+            **event,
+        }
+        self.emotional_history["drift_events"].append(record)
+        if self.metacognitive_system and hasattr(self.metacognitive_system, "handle_emotional_drift"):
+            try:
+                self.metacognitive_system.handle_emotional_drift(record)
+            except Exception as exc:
+                print(f"[emotion] drift callback failed: {exc}")
+
     def _initialize_basic_emotions(self) -> Dict[EmotionalState, Dict[str, Any]]:
         """Initialise les émotions de base avec leurs caractéristiques"""
         return {
@@ -1214,30 +1599,42 @@ class EmotionalSystem:
     
     def _update_current_emotions(self, experience: EmotionalExperience):
         """Met à jour les émotions actuelles basé sur la nouvelle expérience"""
-        update_rate = 0.3  # Taux de mise à jour
-        
+        adaptation = self._hyper_adaptation_step(experience)
+        update_rate = adaptation.get("update_rate", 0.3)
+        decay_multiplier = adaptation.get("decay_multiplier", 1.0)
+
         # Mise à jour de l'émotion primaire
         primary_emotion = experience.primary_emotion
         new_intensity = experience.intensity
-        
+
         current_intensity = self.current_emotions[primary_emotion]
         updated_intensity = (1 - update_rate) * current_intensity + update_rate * new_intensity
-        
+
         self.current_emotions[primary_emotion] = updated_intensity
-        
+
         # Décroissance des autres émotions
         for emotion in self.current_emotions:
             if emotion != primary_emotion:
                 decay_rate = self.emotional_repertoire["basic_emotions"][emotion]["intensity_decay"]
-                self.current_emotions[emotion] *= (1 - decay_rate)
-        
+                adaptive_decay = decay_rate * decay_multiplier
+                adaptive_decay = max(0.01, min(0.9, adaptive_decay))
+                self.current_emotions[emotion] *= (1 - adaptive_decay)
+
         # Mise à jour des dimensions affectives
         self.affective_dimensions["pleasure_arousal_dominance"]["pleasure"] = experience.valence
         self.affective_dimensions["pleasure_arousal_dominance"]["arousal"] = experience.arousal
         self.affective_dimensions["pleasure_arousal_dominance"]["dominance"] = experience.dominance
-        
+
         # Mise à jour de l'équilibre émotionnel
+        previous_balance = self._adaptive_context.get("last_balance", 0.5)
         self._update_emotional_balance()
+        combo_success = 1.0 if self.emotional_balance >= previous_balance else 0.0
+        combo_success = max(combo_success, adaptation.get("smoothing", {}).get("improved", 0.0))
+        self._adaptive_context["last_balance"] = self.emotional_balance
+
+        # Feedback d'adaptation et surveillance
+        self._record_adaptation_feedback(adaptation, combo_success)
+        self._check_drift("valence", experience.valence)
     
     def _update_emotional_balance(self):
         """Met à jour l'équilibre émotionnel global"""
@@ -1258,8 +1655,11 @@ class EmotionalSystem:
         # Décroissance naturelle des émotions
         for emotion in self.current_emotions:
             decay_rate = self.emotional_repertoire["basic_emotions"][emotion]["intensity_decay"]
-            self.current_emotions[emotion] *= (1 - decay_rate * 0.1)  # Décroissance lente
-        
+            multiplier = self._adaptive_context.get("decay_multiplier", 1.0)
+            adaptive_decay = decay_rate * 0.1 * multiplier
+            adaptive_decay = max(0.001, min(0.2, adaptive_decay))
+            self.current_emotions[emotion] *= (1 - adaptive_decay)  # Décroissance lente
+
         # Influence de l'humeur sur les émotions de base
         self._apply_mood_influence()
     
@@ -1301,6 +1701,8 @@ class EmotionalSystem:
                 "context": "surveillance_automatique"
             }
             self.emotional_history["intensity_peaks"].append(peak_record)
+
+        self._check_drift("intensity", self.emotional_intensity)
     
     def _detect_emotional_patterns(self):
         """Détecte les patterns émotionnels récurrents"""
@@ -1354,10 +1756,11 @@ class EmotionalSystem:
                 self._transition_to_new_mood(new_mood, new_intensity)
         else:
             # Mise à jour de l'intensité de l'humeur actuelle
-            updated_intensity = (mood_inertia * current_mood.intensity + 
+            updated_intensity = (mood_inertia * current_mood.intensity +
                                (1 - mood_inertia) * new_intensity)
             current_mood.intensity = updated_intensity
             current_mood.duration += 10  # Mise à jour de la durée
+            self._check_drift("mood", current_mood.intensity)
     
     def _determine_mood_from_affect(self, valence: float, arousal: float) -> MoodState:
         """Détermine l'humeur basée sur les dimensions affectives"""
@@ -1410,6 +1813,7 @@ class EmotionalSystem:
         
         # Ajout à l'historique
         self.mood_system["mood_history"].append(self.mood_system["current_mood"])
+        self._check_drift("mood", intensity)
     
     def _update_physiological_state(self):
         """Met à jour l'état physiologique simulé"""
