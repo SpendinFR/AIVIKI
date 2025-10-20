@@ -17,13 +17,16 @@ Default path (if env var not set):
 If that file does not exist but legacy 'data/mai_store.jsonl' exists, it will use the legacy file.
 """
 
+import getpass
 import json
 import os
+import platform
 import threading
 import time
+from collections import defaultdict
 from dataclasses import asdict, fields
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Mapping, Optional
+from typing import Callable, Dict, Iterable, Iterator, List, Mapping, Optional
 
 # Import MAI and nested dataclasses. We only use types; persistence is via dicts.
 from AGI_Evolutive.core.structures.mai import (
@@ -45,7 +48,12 @@ _LEGACY_PATH = Path("data/mai_store.jsonl")
 class MechanismStore:
     """Append-only JSONL store for :class:`MAI` objects (thread-safe)."""
 
-    def __init__(self, path: Path | str | None = None):
+    def __init__(
+        self,
+        path: Path | str | None = None,
+        *,
+        audit_context: Optional[Mapping[str, object]] = None,
+    ):
         # Resolve path with env/legacy fallback
         if path is not None:
             self.path = Path(path)
@@ -59,6 +67,8 @@ class MechanismStore:
 
         self._lock = threading.RLock()
         self._cache: Dict[str, MAI] = {}
+        self._audit_context = self._build_audit_context(audit_context)
+        self._hooks: Dict[str, List[Callable[[Mapping[str, object]], None]]] = defaultdict(list)
 
         if self.path.exists():
             self._load_all()
@@ -70,12 +80,14 @@ class MechanismStore:
         with self._lock:
             self._cache[mai.id] = mai
             self._append("add", mai)
+            self._fire_hooks("add", {"id": mai.id, "mai": mai})
 
     def update(self, mai: MAI) -> None:
         """Update/replace an existing MAI by id."""
         with self._lock:
             self._cache[mai.id] = mai
             self._append("update", mai)
+            self._fire_hooks("update", {"id": mai.id, "mai": mai})
 
     def retire(self, mai_id: str, reason: Optional[str] = None) -> None:
         """Soft-delete a MAI (kept in the event log, removed from cache)."""
@@ -96,12 +108,14 @@ class MechanismStore:
 
             self._append("retire", payload)
             self._cache.pop(mai_id, None)
+            self._fire_hooks("retire", {"id": mai_id, "reason": reason})
 
     def delete(self, mai_id: str) -> None:
         """Hard-delete from the in-memory index. Logged in the JSONL as 'delete'."""
         with self._lock:
             self._cache.pop(mai_id, None)
             self._append("delete", {"id": mai_id})
+            self._fire_hooks("delete", {"id": mai_id})
 
     def get(self, mai_id: str) -> Optional[MAI]:
         with self._lock:
@@ -141,6 +155,95 @@ class MechanismStore:
         return winners
 
     # ------------------------------------------------------------------
+    # Extensibility / observability helpers
+    def register_hook(self, event: str, callback: Callable[[Mapping[str, object]], None]) -> None:
+        """Register a callback invoked with event payloads.
+
+        Hooks receive a mapping containing at minimum the ``id`` of the MAI concerned.
+        They execute within the store lock, so implementations should be fast/non-blocking.
+        """
+
+        if not callable(callback):
+            raise TypeError("callback must be callable")
+        with self._lock:
+            self._hooks[event].append(callback)
+
+    def update_audit_context(self, extra: Mapping[str, object]) -> None:
+        """Merge additional audit context that will be appended to future log records."""
+
+        if not isinstance(extra, Mapping):
+            raise TypeError("audit context must be a mapping")
+        with self._lock:
+            self._audit_context.update(extra)
+
+    def annotate_metrics(
+        self,
+        mai_id: str,
+        metrics: Mapping[str, float],
+        *,
+        freshness: Optional[float] = None,
+        ttl: Optional[float] = None,
+        extra: Optional[Mapping[str, object]] = None,
+        history_limit: int = 50,
+    ) -> None:
+        """Annotate a MAI with external evaluation metrics without imposing aggregation logic."""
+
+        if not isinstance(metrics, Mapping):
+            raise TypeError("metrics must be a mapping")
+        cleaned_metrics: Dict[str, float] = {}
+        for key, value in metrics.items():
+            if value is None:
+                continue
+            try:
+                cleaned_metrics[str(key)] = float(value)
+            except (TypeError, ValueError):
+                continue
+
+        timestamp = time.time()
+        with self._lock:
+            mai = self._cache.get(mai_id)
+            if not mai:
+                raise KeyError(f"MAI '{mai_id}' not found")
+
+            metadata = mai.metadata if isinstance(mai.metadata, dict) else {}
+            metrics_block = metadata.setdefault("metrics", {})
+            metrics_block["values"] = {**metrics_block.get("values", {}), **cleaned_metrics}
+            metrics_block["updated_at"] = timestamp
+            if freshness is not None:
+                metrics_block["freshness"] = float(freshness)
+            if ttl is not None:
+                metrics_block["ttl"] = float(ttl)
+            if extra and isinstance(extra, Mapping):
+                extra_section = metrics_block.setdefault("extra", {})
+                extra_section.update({str(k): v for k, v in extra.items()})
+
+            history = metrics_block.setdefault("history", [])
+            history.append(
+                {
+                    "time": timestamp,
+                    "values": cleaned_metrics,
+                    "freshness": freshness,
+                    "ttl": ttl,
+                }
+            )
+            if history_limit > 0 and len(history) > history_limit:
+                del history[:-history_limit]
+
+            mai.metadata = metadata
+            mai.updated_at = timestamp
+            self._cache[mai.id] = mai
+            self._append("update", mai)
+            self._fire_hooks(
+                "annotate",
+                {
+                    "id": mai.id,
+                    "metrics": cleaned_metrics,
+                    "freshness": freshness,
+                    "ttl": ttl,
+                },
+            )
+
+    # ------------------------------------------------------------------
     # Persistence
     def _append(self, op: str, mai: Optional[MAI | Mapping[str, object]] = None) -> None:
         record: Dict[str, object] = {
@@ -148,6 +251,9 @@ class MechanismStore:
             "op": op,
             "time": time.time(),
         }
+        audit_snapshot = dict(self._audit_context)
+        audit_snapshot["pid"] = os.getpid()
+        record["audit"] = audit_snapshot
         if mai is not None:
             if isinstance(mai, Mapping):
                 record["mai"] = dict(mai)
@@ -180,6 +286,7 @@ class MechanismStore:
                 mai: Optional[MAI] = None
                 if isinstance(payload, dict) and payload.get("id"):
                     try:
+                        payload = self._validate_payload(payload)
                         mai = self._rehydrate_mai(payload)
                     except Exception:
                         mai = None
@@ -190,6 +297,25 @@ class MechanismStore:
                     mai_id = payload.get("id") or (mai.id if mai else None)
                     if isinstance(mai_id, str):
                         self._cache.pop(mai_id, None)
+
+    # ------------------------------------------------------------------
+    # Maintenance
+    def snapshot(self) -> None:
+        """Rewrite the store to the current in-memory state (best-effort compaction)."""
+
+        with self._lock:
+            tmp_path = self.path.with_suffix(".snapshot")
+            with tmp_path.open("w", encoding="utf-8") as fh:
+                for mai in self._cache.values():
+                    record = {
+                        "schema": SCHEMA_VERSION,
+                        "op": "add",
+                        "time": time.time(),
+                        "audit": dict(self._audit_context),
+                        "mai": asdict(mai),
+                    }
+                    fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+            tmp_path.replace(self.path)
 
     # ------------------------------------------------------------------
     # Rehydration helpers
@@ -218,6 +344,76 @@ class MechanismStore:
     def _filter_fields(cls, payload: Mapping[str, object]) -> Dict[str, object]:
         allowed = {f.name for f in fields(cls)}
         return {k: v for k, v in payload.items() if k in allowed}
+
+    def _build_audit_context(
+        self, audit_context: Optional[Mapping[str, object]]
+    ) -> Dict[str, object]:
+        default_context: Dict[str, object] = {
+            "user": self._safe_getpass(),
+            "host": platform.node() or "unknown-host",
+            "runtime_version": os.environ.get("AGI_RUNTIME_VERSION", "unknown"),
+        }
+        if audit_context:
+            default_context.update({str(k): v for k, v in audit_context.items()})
+        return default_context
+
+    @staticmethod
+    def _safe_getpass() -> str:
+        try:
+            return getpass.getuser()
+        except Exception:
+            return os.environ.get("USER", "unknown")
+
+    def _fire_hooks(self, event: str, payload: Mapping[str, object]) -> None:
+        callbacks = list(self._hooks.get(event, ()))
+        if not callbacks:
+            return
+        for cb in callbacks:
+            try:
+                cb(payload)
+            except Exception:
+                continue
+
+    def _validate_payload(self, payload: Mapping[str, object]) -> Dict[str, object]:
+        """Lightweight schema validation to guard against corrupted records."""
+
+        data = dict(payload)
+
+        if not isinstance(data.get("id"), str) or not data["id"].strip():
+            raise ValueError("MAI payload missing valid 'id'")
+
+        for key in ("tags", "provenance_docs", "provenance_episodes", "safety_invariants"):
+            value = data.get(key)
+            if value is None:
+                data[key] = []
+            elif not isinstance(value, list):
+                data[key] = [value]
+
+        metadata = data.get("metadata")
+        if metadata is None:
+            data["metadata"] = {}
+        elif not isinstance(metadata, Mapping):
+            data["metadata"] = {"_coerced_from": type(metadata).__name__}
+
+        runtime_counters = data.get("runtime_counters")
+        if runtime_counters is None or not isinstance(runtime_counters, Mapping):
+            data["runtime_counters"] = {
+                "activation": 0.0,
+                "wins": 0.0,
+                "benefit": 0.0,
+                "regret": 0.0,
+                "rollbacks": 0.0,
+            }
+
+        for ts_field in ("created_at", "updated_at"):
+            value = data.get(ts_field)
+            if value is not None:
+                try:
+                    data[ts_field] = float(value)
+                except (TypeError, ValueError):
+                    data.pop(ts_field, None)
+
+        return data
 
 
 __all__ = ["MAI", "ImpactHypothesis", "EvidenceRef", "MechanismStore"]
