@@ -4,9 +4,10 @@ import json
 import os
 import threading
 import time
-from typing import Any, Dict, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from .analytics import EventPipeline, SnapshotDriftTracker
 
 if TYPE_CHECKING:
     from AGI_Evolutive.core.persistence import PersistenceManager
@@ -15,24 +16,55 @@ class JSONLLogger:
     """
     Logger JSONL thread-safe des événements agent.
     Ecrit dans runtime/agent_events.jsonl + snapshots optionnels.
+
+    L'instance peut enrichir automatiquement les événements grâce à un
+    ``metadata_provider`` et les rediriger vers une ``EventPipeline``
+    asynchrone pour des calculs de métriques.
     """
 
-    def __init__(self, path: str = "runtime/agent_events.jsonl", persistence: Optional["PersistenceManager"] = None):
+    def __init__(
+        self,
+        path: str = "runtime/agent_events.jsonl",
+        persistence: Optional["PersistenceManager"] = None,
+        *,
+        metadata_provider: Optional[Callable[[str, Dict[str, Any]], Dict[str, Any]]] = None,
+        pipeline: Optional[EventPipeline] = None,
+        drift_tracker: Optional[SnapshotDriftTracker] = None,
+    ):
         self.path = path
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         self._lock = threading.Lock()
         self.persistence: Optional["PersistenceManager"] = persistence
+        self._metadata_provider = metadata_provider
+        self._pipeline = pipeline
+        self._drift_tracker = drift_tracker
 
     def write(self, event_type: str, **fields: Any) -> None:
+        meta: Dict[str, Any] = {}
+        if self._metadata_provider is not None:
+            try:
+                extra = self._metadata_provider(event_type, dict(fields))
+            except Exception:
+                extra = None
+            if extra:
+                meta = {k: v for k, v in extra.items() if k not in fields}
+
         rec = {
             "t": time.time(),
             "type": event_type,
             **fields,
+            **meta,
         }
         line = json.dumps(json_sanitize(rec), ensure_ascii=False)
         with self._lock:
             with open(self.path, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
+        if self._pipeline is not None:
+            try:
+                self._pipeline.submit(rec)
+            except Exception:
+                # la collecte analytique ne doit pas perturber le logging principal
+                pass
 
     def snapshot(
         self,
@@ -57,6 +89,13 @@ class JSONLLogger:
         with self._lock:
             with open(out, "w", encoding="utf-8") as f:
                 json.dump(json_sanitize(data), f, ensure_ascii=False, indent=2)
+        if self._drift_tracker is not None and data is not None:
+            try:
+                self._drift_tracker.record(out, data)
+            except Exception:
+                # Ne pas interrompre l'appelant si la détection de drift échoue
+                pass
+
         return out
 
     def rotate(self, keep_last: int = 5) -> None:
