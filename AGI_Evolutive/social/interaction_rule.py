@@ -7,6 +7,112 @@ from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional, Tuple
 import time, math, hashlib, json
 
+
+class OnlineLinear:
+    """Mini-estimateur linéaire en ligne avec régularisation L2."""
+
+    def __init__(self, init: Optional[Dict[str, float]] = None,
+                 lr: float = 0.05,
+                 l2: float = 0.01,
+                 bounds: Tuple[float, float] = (0.0, 1.0)):
+        self.lr = lr
+        self.l2 = l2
+        self.bounds = bounds
+        self.weights: Dict[str, float] = dict(init or {})
+        self.prior: Dict[str, float] = dict(init or {})
+
+    def ensure_defaults(self, defaults: Dict[str, float]):
+        for k, v in defaults.items():
+            if k not in self.weights:
+                self.weights[k] = v
+                self.prior.setdefault(k, v)
+
+    def current_weights(self, defaults: Optional[Dict[str, float]] = None) -> Dict[str, float]:
+        if defaults:
+            self.ensure_defaults(defaults)
+        return dict(self.weights)
+
+    def predict(self, features: Dict[str, float]) -> float:
+        return sum(self.weights.get(k, 0.0) * features.get(k, 0.0) for k in features.keys())
+
+    def update(self, features: Dict[str, float], target: float,
+               defaults: Optional[Dict[str, float]] = None):
+        if defaults:
+            self.ensure_defaults(defaults)
+        if not features:
+            return
+        pred = clamp(self.predict(features))
+        error = pred - clamp(target)
+        for name, value in features.items():
+            if name not in self.weights:
+                base = defaults.get(name, 0.0) if defaults else 0.0
+                self.weights[name] = base
+                self.prior.setdefault(name, base)
+            grad = error * value + self.l2 * (self.weights[name] - self.prior.get(name, 0.0))
+            self.weights[name] = clamp(self.weights[name] - self.lr * grad,
+                                       self.bounds[0], self.bounds[1])
+
+    def state(self) -> Dict[str, float]:
+        return dict(self.weights)
+
+
+class AdaptiveEMA:
+    """Sélection adaptative du coefficient beta d'EMA via suivi d'erreur."""
+
+    def __init__(self,
+                 betas: Tuple[float, ...] = (0.2, 0.3, 0.4, 0.6, 0.8),
+                 state: Optional[Dict[str, Any]] = None,
+                 baseline: float = 0.5):
+        self.betas = betas
+        state = state or {}
+        self.values: Dict[float, float] = {
+            float(b): float(state.get("values", {}).get(str(b), baseline)) for b in betas
+        }
+        self.errors: Dict[float, float] = {
+            float(b): float(state.get("errors", {}).get(str(b), 0.5 + abs(b - 0.3) * 0.01))
+            for b in betas
+        }
+        self.active_beta: float = float(state.get("active_beta", 0.3))
+        self._last_baseline = baseline
+
+    @classmethod
+    def from_state(cls, state: Optional[Dict[str, Any]], baseline: float) -> "AdaptiveEMA":
+        return cls(state=state, baseline=baseline)
+
+    def _ensure(self, baseline: float):
+        for b in self.betas:
+            if b not in self.values:
+                self.values[b] = baseline
+            if b not in self.errors:
+                self.errors[b] = 0.5 + abs(b - 0.3) * 0.01
+        self._last_baseline = baseline
+
+    def update(self, reward: float, baseline: float) -> float:
+        self._ensure(baseline)
+        reward = clamp(reward)
+        best_beta = self.active_beta
+        best_error = None
+        best_value = baseline
+        for b in self.betas:
+            pred = self.values[b]
+            err = abs(reward - pred)
+            self.errors[b] = 0.9 * self.errors[b] + 0.1 * err
+            new_value = (1.0 - b) * pred + b * reward
+            self.values[b] = clamp(new_value)
+            if best_error is None or self.errors[b] < best_error:
+                best_error = self.errors[b]
+                best_beta = b
+                best_value = self.values[b]
+        self.active_beta = best_beta
+        return clamp(best_value)
+
+    def state(self) -> Dict[str, Any]:
+        return {
+            "values": {str(k): v for k, v in self.values.items()},
+            "errors": {str(k): v for k, v in self.errors.items()},
+            "active_beta": self.active_beta,
+        }
+
 # ---------- Petites bases ----------
 TS = float
 
@@ -93,6 +199,45 @@ class EffectPosterior:
     beta: float = 1.0
     # Fenêtre glissante approximative via "decay" (0..1); ex: 0.98 → oublie en douceur
     decay: float = 0.995
+    decay_candidates: Tuple[float, ...] = (0.95, 0.98, 0.995)
+    decay_posteriors: Dict[float, Tuple[float, float]] = field(default_factory=dict)
+    decay_choice: float = field(default=0.995, init=False, repr=False, compare=False)
+
+    def __post_init__(self):
+        if not self.decay_posteriors:
+            self.decay_posteriors = {float(c): (1.0, 1.0) for c in self.decay_candidates}
+        else:
+            cleaned: Dict[float, Tuple[float, float]] = {}
+            for k, v in self.decay_posteriors.items():
+                if isinstance(v, dict):
+                    cleaned[float(k)] = (float(v.get("alpha", 1.0)), float(v.get("beta", 1.0)))
+                else:
+                    cleaned[float(k)] = (float(v[0]), float(v[1]))
+            self.decay_posteriors = cleaned
+        if self.decay not in self.decay_posteriors:
+            self.decay_posteriors[self.decay] = (1.0, 1.0)
+        self.decay_choice = self.decay
+
+    def _select_decay(self):
+        # Thompson discret simplifié → choisir la valeur à espérance max.
+        best_decay = self.decay
+        best_score = -1.0
+        for decay_value, (a, b) in self.decay_posteriors.items():
+            denom = a + b
+            score = a / denom if denom > 0 else 0.5
+            if score > best_score:
+                best_score = score
+                best_decay = decay_value
+        self.decay = best_decay
+        self.decay_choice = best_decay
+
+    def _update_decay_bandit(self, success: bool):
+        a, b = self.decay_posteriors.get(self.decay_choice, (1.0, 1.0))
+        if success:
+            a += 1.0
+        else:
+            b += 1.0
+        self.decay_posteriors[self.decay_choice] = (a, b)
 
     def expected(self) -> float:
         return self.alpha / (self.alpha + self.beta) if (self.alpha + self.beta) > 0 else 0.5
@@ -107,6 +252,7 @@ class EffectPosterior:
         return (clamp(p - 1.96 * se), clamp(p + 1.96 * se))
 
     def observe(self, success: bool):
+        self._select_decay()
         # Décroissance douce pour oublier le très ancien
         self.alpha = 1.0 + (self.alpha - 1.0) * self.decay
         self.beta  = 1.0 + (self.beta  - 1.0) * self.decay
@@ -114,6 +260,28 @@ class EffectPosterior:
             self.alpha += 1.0
         else:
             self.beta += 1.0
+        self._update_decay_bandit(success)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "alpha": self.alpha,
+            "beta": self.beta,
+            "decay": self.decay,
+            "decay_candidates": list(self.decay_candidates),
+            "decay_posteriors": {str(k): {"alpha": v[0], "beta": v[1]} for k, v in self.decay_posteriors.items()},
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "EffectPosterior":
+        decay_posteriors = data.get("decay_posteriors") or {}
+        return cls(
+            alpha=float(data.get("alpha", 1.0)),
+            beta=float(data.get("beta", 1.0)),
+            decay=float(data.get("decay", 0.995)),
+            decay_candidates=tuple(float(x) for x in data.get("decay_candidates", (0.95, 0.98, 0.995))),
+            decay_posteriors={float(k): (float(v.get("alpha", 1.0)), float(v.get("beta", 1.0)))
+                              for k, v in decay_posteriors.items()},
+        )
 
 # ---------- Règle sociale testable ----------
 @dataclass
@@ -140,6 +308,13 @@ class InteractionRule:
     cooldown: float = 0.0      # anti-abus probabiliste (utilisé par le sélecteur, pas ici)
     provenance: Dict[str, Any] = field(default_factory=dict)
     tags: List[str] = field(default_factory=lambda: ["social"])
+    learned_effect_weights: Dict[str, float] = field(default_factory=dict)
+    learned_predicate_weights: Dict[str, float] = field(default_factory=dict)
+    ema_adapter_state: Dict[str, Any] = field(default_factory=dict)
+    effect_weight_learner: Optional[OnlineLinear] = field(default=None, init=False, repr=False, compare=False)
+    predicate_weight_learner: Optional[OnlineLinear] = field(default=None, init=False, repr=False, compare=False)
+    _ema_adapter: Optional[AdaptiveEMA] = field(default=None, init=False, repr=False, compare=False)
+    _last_predicate_features: Dict[str, float] = field(default_factory=dict, init=False, repr=False, compare=False)
 
     # ----------- Usine de construction -----------
     @staticmethod
@@ -159,6 +334,34 @@ class InteractionRule:
             provenance=provenance or {}
         )
 
+    # ----------- Helpers internes -----------
+    def _ensure_learners(self):
+        if self.effect_weight_learner is None:
+            defaults = self._default_effect_weights()
+            merged = dict(defaults)
+            merged.update(self.learned_effect_weights)
+            self.effect_weight_learner = OnlineLinear(init=merged, bounds=(0.05, 0.95))
+            self.learned_effect_weights = self.effect_weight_learner.state()
+        if self.predicate_weight_learner is None:
+            defaults = {p.key: p.weight for p in self.context_predicates}
+            defaults.update(self.learned_predicate_weights)
+            self.predicate_weight_learner = OnlineLinear(init=defaults, bounds=(0.2, 2.0))
+            self.learned_predicate_weights = self.predicate_weight_learner.state()
+        if self._ema_adapter is None:
+            self._ema_adapter = AdaptiveEMA.from_state(self.ema_adapter_state, baseline=self.ema_reward)
+
+    def _default_effect_weights(self) -> Dict[str, float]:
+        return {
+            "reduce_uncertainty": 0.35,
+            "continue_dialogue":  0.25,
+            "positive_valence":   0.25,
+            "acceptance_marker":  0.15
+        }
+
+    def _get_ema_adapter(self) -> AdaptiveEMA:
+        self._ensure_learners()
+        return self._ema_adapter
+
     # ----------- Matching contexte -----------
     def match_score(self, ctx: Dict[str, Any]) -> float:
         """
@@ -167,11 +370,23 @@ class InteractionRule:
         """
         if not self.context_predicates:
             return 0.5  # neutre si aucune contrainte
-        total_w = sum(max(0.0, p.weight) for p in self.context_predicates) or 1.0
+        self._ensure_learners()
+        defaults = {p.key: p.weight for p in self.context_predicates}
+        weights_map = self.predicate_weight_learner.current_weights(defaults)
+        self.learned_predicate_weights = self.predicate_weight_learner.state()
+        total_w = 0.0
         got = 0.0
+        features: Dict[str, float] = {}
         for p in self.context_predicates:
-            ok, sc = p.test(ctx)
-            got += sc
+            ok, _ = p.test(ctx)
+            weight = max(0.0, weights_map.get(p.key, p.weight))
+            total_w += weight
+            if ok:
+                got += weight
+            features[p.key] = 1.0 if ok else 0.0
+        self._last_predicate_features = features
+        if total_w <= 0.0:
+            total_w = 1.0
         return clamp(got / total_w)
 
     # ----------- Utilité attendue -----------
@@ -181,17 +396,17 @@ class InteractionRule:
         Utilité attendue d’appliquer la tactique, combinant effets (postérieurs),
         confiance synthétique, et un petit bonus d’exploration si désiré.
         """
-        W = {
-            "reduce_uncertainty": 0.35,
-            "continue_dialogue":  0.25,
-            "positive_valence":   0.25,
-            "acceptance_marker":  0.15
-        }
+        base = self._default_effect_weights()
         if weights:
-            W.update(weights)
+            base.update(weights)
+        self._ensure_learners()
+        learned = self.effect_weight_learner.current_weights(base)
+        self.learned_effect_weights = dict(learned)
+        combined = dict(base)
+        combined.update(learned)
 
         u = 0.0
-        for name, w in W.items():
+        for name, w in combined.items():
             post = self.effects.get(name)
             if post:
                 u += w * post.expected()
@@ -199,7 +414,7 @@ class InteractionRule:
                 u += w * 0.5  # neutre si inconnu
 
         # synthèse de "confidence" : moyenne des expected()
-        self.confidence = sum((self.effects.get(k, EffectPosterior()).expected() for k in W.keys())) / len(W)
+        self.confidence = sum((self.effects.get(k, EffectPosterior()).expected() for k in combined.keys())) / len(combined)
 
         # exploration: bonus léger quand on n'a pas encore beaucoup essayé
         n = max(1, self.usage_count)
@@ -222,6 +437,7 @@ class InteractionRule:
             "reward": float (0..1),   # Social Critic agrégé
         }
         """
+        self._ensure_learners()
         # reduce_uncertainty
         if "reduced_uncertainty" in outcome:
             self.effects.setdefault("reduce_uncertainty", EffectPosterior()).observe(bool(outcome["reduced_uncertainty"]))
@@ -238,8 +454,22 @@ class InteractionRule:
         # reward agrégé (si fourni)
         if "reward" in outcome:
             r = clamp(float(outcome["reward"]), 0.0, 1.0)
-            # EMA avec demi-vie douce
-            self.ema_reward = round(0.7 * self.ema_reward + 0.3 * r, 4)
+            adapter = self._get_ema_adapter()
+            self.ema_reward = round(adapter.update(r, self.ema_reward), 4)
+            self.ema_adapter_state = adapter.state()
+
+            effect_defaults = self._default_effect_weights()
+            features = {}
+            for name in set(list(effect_defaults.keys()) + list(self.effects.keys())):
+                post = self.effects.get(name)
+                features[name] = post.expected() if post else 0.5
+            self.effect_weight_learner.update(features, r, defaults=effect_defaults)
+            self.learned_effect_weights = self.effect_weight_learner.state()
+
+            if self._last_predicate_features:
+                predicate_defaults = {p.key: p.weight for p in self.context_predicates}
+                self.predicate_weight_learner.update(self._last_predicate_features, r, defaults=predicate_defaults)
+                self.learned_predicate_weights = self.predicate_weight_learner.state()
 
     # ----------- Sérialisation JSON pour Memory -----------
     def to_dict(self) -> Dict[str, Any]:
@@ -249,7 +479,7 @@ class InteractionRule:
             "version": self.version,
             "context_predicates": [asdict(p) for p in self.context_predicates],
             "tactic": {"name": self.tactic.name, "params": self.tactic.params},
-            "effects": {k: {"alpha": v.alpha, "beta": v.beta, "decay": v.decay} for k, v in self.effects.items()},
+            "effects": {k: v.to_dict() for k, v in self.effects.items()},
             "created_ts": self.created_ts,
             "last_used_ts": self.last_used_ts,
             "usage_count": self.usage_count,
@@ -258,12 +488,15 @@ class InteractionRule:
             "cooldown": self.cooldown,
             "provenance": self.provenance,
             "tags": list(self.tags),
+            "learned_effect_weights": dict(self.learned_effect_weights),
+            "learned_predicate_weights": dict(self.learned_predicate_weights),
+            "ema_adapter_state": self._ema_adapter.state() if self._ema_adapter else dict(self.ema_adapter_state),
         }
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "InteractionRule":
         preds = [Predicate(**p) for p in d.get("context_predicates", [])]
-        effs = {k: EffectPosterior(**v) for k, v in (d.get("effects") or {}).items()}
+        effs = {k: EffectPosterior.from_dict(v) for k, v in (d.get("effects") or {}).items()}
         t = d.get("tactic") or {}
         return InteractionRule(
             id=d["id"],
@@ -278,7 +511,10 @@ class InteractionRule:
             ema_reward=float(d.get("ema_reward", 0.5)),
             cooldown=float(d.get("cooldown", 0.0)),
             provenance=d.get("provenance") or {},
-            tags=list(d.get("tags") or ["social"])
+            tags=list(d.get("tags") or ["social"]),
+            learned_effect_weights=dict(d.get("learned_effect_weights") or {}),
+            learned_predicate_weights=dict(d.get("learned_predicate_weights") or {}),
+            ema_adapter_state=d.get("ema_adapter_state") or {},
         )
 
 # ---------- Contexte de décision : builder depuis l’architecture ----------
