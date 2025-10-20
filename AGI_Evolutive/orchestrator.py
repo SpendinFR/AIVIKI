@@ -7,7 +7,7 @@ import time
 import unicodedata
 from contextlib import nullcontext
 from types import SimpleNamespace
-from collections import deque
+from collections import deque, defaultdict
 from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
 
 from AGI_Evolutive.cognition.context_inference import infer_where_and_apply
@@ -103,11 +103,14 @@ class DiscreteThompsonSampler:
         self._drift = drift
         self._last_choice: Optional[int] = None
 
-    def sample(self) -> Dict[str, Any]:
+    def sample(self, priors: Optional[Dict[int, float]] = None) -> Dict[str, Any]:
         best_idx: Optional[int] = None
         best_sample = -1.0
         for idx, info in self._stats.items():
             draw = random.betavariate(max(1e-3, info["alpha"]), max(1e-3, info["beta"]))
+            if priors and idx in priors:
+                prior = max(0.0, min(1.0, priors[idx]))
+                draw = 0.7 * draw + 0.3 * prior
             if draw > best_sample:
                 best_sample = draw
                 best_idx = idx
@@ -116,16 +119,17 @@ class DiscreteThompsonSampler:
         self._last_choice = best_idx
         return self._stats[best_idx]["candidate"]
 
-    def update(self, reward: float) -> None:
+    def update(self, reward: float, weight: float = 1.0) -> None:
         if self._last_choice is None:
             return
         reward = max(0.0, min(1.0, float(reward)))
+        weight = max(0.0, float(weight))
         info = self._stats[self._last_choice]
         alpha = info["alpha"]
         beta = info["beta"]
         forget = 1.0 - self._drift
-        info["alpha"] = max(1e-3, forget * alpha + reward)
-        info["beta"] = max(1e-3, forget * beta + (1.0 - reward))
+        info["alpha"] = max(1e-3, forget * alpha + weight * reward)
+        info["beta"] = max(1e-3, forget * beta + weight * (1.0 - reward))
 
 
 class AdaptiveEMA:
@@ -133,21 +137,95 @@ class AdaptiveEMA:
         self._candidates = [
             {"beta": max(0.0, min(0.99, float(beta)))} for beta in betas
         ]
-        self._sampler = DiscreteThompsonSampler(self._candidates, drift=drift)
+        self._sampler_drift = float(drift)
+        self._sampler = DiscreteThompsonSampler(self._candidates, drift=self._sampler_drift)
+        self._candidate_index = {
+            idx: cand["beta"] for idx, cand in enumerate(self._candidates)
+        }
         self._value = 0.0
+        self._max_step = 0.25
+        self._primary_weight = 0.6
+        self._secondary_weight = 0.4
+        self._pending_reward: Optional[float] = None
+        self._last_value_snapshot: float = 0.0
         self._corr_buffer: Deque[Tuple[float, float]] = deque(maxlen=128)
+        self._reward_history: Deque[float] = deque(maxlen=128)
+        self._drift_events: Deque[Dict[str, Any]] = deque(maxlen=16)
+        self._drift_window = 32
+        self._corr_reset_threshold = 0.1
+        self._last_reset_ts = 0.0
+        self._reset_interval = 30.0
+        self._context_lr = 0.045
+        self._context_drift = 0.02
+        self._max_context_features = 24
+        self._context_weights: Dict[float, Dict[str, float]] = {
+            cand["beta"]: defaultdict(float, {"bias": 0.0}) for cand in self._candidates
+        }
+        self._last_context_vector: Dict[str, float] = {"bias": 1.0}
+        self._last_beta: Optional[float] = None
+        self._last_prev_value: float = 0.0
 
     @property
     def value(self) -> float:
         return self._value
 
-    def update(self, new_value: float, reward: float) -> float:
-        candidate = self._sampler.sample()
+    def update(
+        self,
+        new_value: float,
+        reward: float,
+        reward_features: Optional[Dict[str, float]] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> float:
+        context_vector = self._vectorize_context(context)
+        priors = self._contextual_priors(context_vector)
+        candidate = self._sampler.sample(priors)
         beta = candidate["beta"]
-        self._value = beta * self._value + (1.0 - beta) * float(new_value)
-        self._sampler.update(reward)
-        self._corr_buffer.append((self._value, reward))
+        prev_value = self._value
+        target_value = beta * self._value + (1.0 - beta) * float(new_value)
+        step = max(-self._max_step, min(self._max_step, target_value - prev_value))
+        self._value = prev_value + step
+        enriched_reward = self._enrich_reward(reward, reward_features)
+        self._last_prev_value = prev_value
+        self._last_beta = beta
+        self._last_context_vector = context_vector
+        self._last_value_snapshot = self._value
+        self._pending_reward = enriched_reward
+        self._commit_reward(enriched_reward, self._primary_weight)
+        self._update_context_models(enriched_reward, self._primary_weight)
+        self._detect_drift(prev_value, self._value, enriched_reward, beta)
         return self._value
+
+    def reinforce(
+        self,
+        reward: float,
+        reward_features: Optional[Dict[str, float]] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if self._last_beta is None or self._pending_reward is None:
+            return
+        if context:
+            context_vector = self._vectorize_context(context)
+            merged = dict(self._last_context_vector)
+            merged.update(context_vector)
+            self._last_context_vector = merged
+        enriched = self._enrich_reward(reward, reward_features)
+        combined = self._primary_weight * self._pending_reward + self._secondary_weight * enriched
+        if self._corr_buffer:
+            last_value, _ = self._corr_buffer.pop()
+        else:
+            last_value = self._last_value_snapshot
+        self._corr_buffer.append((last_value, combined))
+        if self._reward_history:
+            self._reward_history.pop()
+        self._reward_history.append(combined)
+        self._sampler.update(enriched, self._secondary_weight)
+        self._update_context_models(combined, self._secondary_weight)
+        if not math.isclose(self._pending_reward, combined, abs_tol=1e-6):
+            self._detect_drift(self._last_prev_value, self._value, combined, self._last_beta or 0.0)
+        self._pending_reward = combined
+
+    def drift_events(self) -> List[Dict[str, Any]]:
+        return list(self._drift_events)
 
     def correlation(self) -> float:
         if len(self._corr_buffer) < 4:
@@ -165,6 +243,115 @@ class AdaptiveEMA:
             return cov / denom
         except statistics.StatisticsError:
             return 0.0
+
+    def _enrich_reward(
+        self, reward: float, reward_features: Optional[Dict[str, float]] = None
+    ) -> float:
+        base = max(0.0, min(1.0, float(reward)))
+        if not reward_features:
+            return base
+        extras: List[float] = []
+        for value in reward_features.values():
+            try:
+                extras.append(max(0.0, min(1.0, float(value))))
+            except (TypeError, ValueError):
+                continue
+        if not extras:
+            return base
+        return 0.6 * base + 0.4 * (sum(extras) / len(extras))
+
+    def _vectorize_context(self, context: Optional[Dict[str, Any]]) -> Dict[str, float]:
+        features: Dict[str, float] = {"bias": 1.0}
+        if not context:
+            return features
+        for key, value in context.items():
+            if value is None:
+                continue
+            if isinstance(value, (int, float)):
+                features[str(key)] = float(value)
+            else:
+                features[f"{key}::{value}"] = 1.0
+            if len(features) >= self._max_context_features:
+                break
+        return features
+
+    def _contextual_priors(self, context: Dict[str, float]) -> Optional[Dict[int, float]]:
+        if not context:
+            return None
+        priors: Dict[int, float] = {}
+        for idx, beta in self._candidate_index.items():
+            weights = self._context_weights.setdefault(beta, defaultdict(float))
+            score = 0.0
+            for key, value in context.items():
+                score += weights.get(key, 0.0) * value
+            priors[idx] = self._sigmoid(score)
+        return priors if any(priors.values()) else None
+
+    def _commit_reward(self, reward: float, weight: float) -> None:
+        self._sampler.update(reward, weight)
+        self._corr_buffer.append((self._last_value_snapshot, reward))
+        self._reward_history.append(reward)
+
+    def _update_context_models(self, reward: float, weight: float) -> None:
+        if self._last_beta is None or not self._last_context_vector:
+            return
+        weights = self._context_weights.setdefault(
+            self._last_beta, defaultdict(float)
+        )
+        lr = self._context_lr * max(0.0, float(weight))
+        if lr <= 0.0:
+            return
+        score = 0.0
+        for key, value in self._last_context_vector.items():
+            score += weights.get(key, 0.0) * value
+        pred = self._sigmoid(score)
+        target = max(0.0, min(1.0, float(reward)))
+        error = target - pred
+        for key, value in self._last_context_vector.items():
+            prev = weights.get(key, 0.0)
+            weights[key] = (1.0 - self._context_drift) * prev + lr * error * value
+
+    def _detect_drift(
+        self, prev: float, new: float, reward: float, beta: float
+    ) -> None:
+        timestamp = time.time()
+        if abs(new - prev) >= 0.9 * self._max_step:
+            self._drift_events.append(
+                {
+                    "ts": timestamp,
+                    "kind": "step_cap",
+                    "from": prev,
+                    "to": new,
+                    "beta": beta,
+                }
+            )
+        if len(self._reward_history) >= self._drift_window:
+            corr = self.correlation()
+            mean_reward = statistics.fmean(self._reward_history)
+            if (
+                corr < self._corr_reset_threshold
+                and mean_reward < 0.5
+                and (timestamp - self._last_reset_ts) > self._reset_interval
+            ):
+                self._drift_events.append(
+                    {
+                        "ts": timestamp,
+                        "kind": "reset",
+                        "corr": corr,
+                        "mean_reward": mean_reward,
+                    }
+                )
+                self._reset_sampler()
+
+    def _reset_sampler(self) -> None:
+        self._sampler = DiscreteThompsonSampler(self._candidates, drift=self._sampler_drift)
+        self._last_reset_ts = time.time()
+        self._last_beta = None
+        self._pending_reward = None
+
+    @staticmethod
+    def _sigmoid(x: float) -> float:
+        return 1.0 / (1.0 + math.exp(-x))
 
 
 class OnlineBoundedLinear:
@@ -1811,7 +1998,40 @@ class Orchestrator:
                     success = obt >= exp
                     if success:
                         reward_signal = max(reward_signal, 0.95)
-                    smoothed_err = self._prediction_error_ema.update(err, reward_signal)
+                    scratch = ctx.setdefault("scratch", {})
+
+                    def _metric(key: str, default: float) -> float:
+                        try:
+                            return float(scratch.get(key, default))
+                        except (TypeError, ValueError):
+                            return float(default)
+
+                    reward_features = {
+                        "memory_consistency": _metric("memory_consistency", 0.5),
+                        "transfer_success": _metric("transfer_success", 0.5),
+                        "explanatory_adequacy": _metric("explanatory_adequacy", 0.5),
+                        "social_appraisal": _metric("social_appraisal", 0.5),
+                        "calibration_gap": _metric("calibration_gap", 0.3),
+                        "clarification_penalty": 1.0
+                        if (ctx.get("decision", {}).get("action", {}).get("type") == "clarify")
+                        else 0.0,
+                        "sj_success": 1.0 if success else 0.0,
+                    }
+                    ema_context = {
+                        "mode": ctx.get("mode").name if ctx.get("mode") else None,
+                        "action": (ctx.get("decision", {}).get("action") or {}).get("type"),
+                        "topic": ctx.get("topic"),
+                        "uncertainty": ctx.get("expected", {}).get("uncertainty"),
+                        "priority": scratch.get("priority"),
+                        "success": 1.0 if success else 0.0,
+                        "contradiction": 1.0 if scratch.get("contradiction") else 0.0,
+                    }
+                    smoothed_err = self._prediction_error_ema.update(
+                        err,
+                        reward_signal,
+                        reward_features=reward_features,
+                        context=ema_context,
+                    )
                     ctx["scratch"]["prediction_error"] = smoothed_err
                     ctx["scratch"]["sj_reward"] = reward_signal
                     ctx["scratch"]["sj_success"] = 1.0 if success else 0.0
@@ -1908,6 +2128,24 @@ class Orchestrator:
                                     "heartbeat_every": self._sj_conf_cache["heartbeat_every"],
                                 },
                             )
+                    except Exception:
+                        pass
+
+                    try:
+                        decision_info = ctx.get("decision") or {}
+                        ema_context = {
+                            "mode": ctx.get("mode").name if ctx.get("mode") else None,
+                            "action": (decision_info.get("action") or {}).get("type"),
+                            "topic": current_topic,
+                            "uncertainty": ctx.get("expected", {}).get("uncertainty"),
+                            "success": ctx.get("scratch", {}).get("sj_success", 0.0),
+                            "clarification": clarification_penalty,
+                        }
+                        self._prediction_error_ema.reinforce(
+                            reward_signal,
+                            reward_features=sj_features,
+                            context=ema_context,
+                        )
                     except Exception:
                         pass
 
