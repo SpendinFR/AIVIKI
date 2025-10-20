@@ -427,7 +427,31 @@ class VoiceProfile:
         self.state.setdefault("register_whitelist", [])
         self.state.setdefault("liked_sources", [])
         self.state.setdefault("last_update", time.time())
-        self.state.setdefault("persona_bootstrapped", False)
+        if "persona_bootstrapped" not in self.state:
+            persona_bootstrapped = False
+            audit = self.state.get("audit_log")
+            if isinstance(audit, list):
+                for entry in audit:
+                    if not isinstance(entry, dict):
+                        continue
+                    if entry.get("event") != "style_adjustment":
+                        continue
+                    data = entry.get("data")
+                    if not isinstance(data, dict):
+                        continue
+                    source = data.get("source")
+                    if isinstance(source, str) and source.startswith("persona:"):
+                        persona_bootstrapped = True
+                        break
+            if not persona_bootstrapped:
+                for knob in STYLE_KNOBS:
+                    before = float(style.get(knob, defaults[knob]))
+                    if abs(before - defaults[knob]) > 1e-3:
+                        persona_bootstrapped = True
+                        break
+            self.state["persona_bootstrapped"] = persona_bootstrapped
+        else:
+            self.state.setdefault("persona_bootstrapped", False)
         # purge audit log size if legacy file trop gros
         audit = self.state.get("audit_log")
         if isinstance(audit, list) and len(audit) > self.config["audit_log_size"]:
