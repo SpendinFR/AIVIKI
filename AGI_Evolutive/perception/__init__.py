@@ -6,12 +6,204 @@ Traitement multi-modal des entrées sensorielles et formation de représentation
 
 import numpy as np
 import time
+from collections import deque
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
 import math
 import hashlib
+
+
+class OnlineLinear:
+    """Simple régression linéaire online avec régularisation."""
+
+    def __init__(self, dimension: int, alpha: float = 1.0, bounds: Optional[Tuple[float, float]] = None):
+        self.dimension = dimension
+        self.alpha = alpha
+        self.bounds = bounds
+        self.A = np.eye(dimension) * alpha  # Matrice de corrélation régularisée
+        self.b = np.zeros(dimension)
+
+    def predict(self, context: List[float]) -> float:
+        context_vec = np.asarray(context, dtype=float)
+        if context_vec.shape[0] != self.dimension:
+            raise ValueError(f"Contexte de dimension {context_vec.shape[0]} incompatible avec le modèle ({self.dimension}).")
+
+        theta = np.linalg.solve(self.A, self.b)
+        prediction = float(theta.dot(context_vec))
+
+        if self.bounds is not None:
+            prediction = float(np.clip(prediction, self.bounds[0], self.bounds[1]))
+
+        return prediction
+
+    def update(self, context: List[float], target: float):
+        context_vec = np.asarray(context, dtype=float)
+        if context_vec.shape[0] != self.dimension:
+            raise ValueError(f"Contexte de dimension {context_vec.shape[0]} incompatible avec le modèle ({self.dimension}).")
+
+        self.A += np.outer(context_vec, context_vec)
+        self.b += context_vec * float(target)
+
+
+class DiscreteThompsonSampler:
+    """Thompson Sampling discret sur un ensemble fini de paramètres."""
+
+    def __init__(self, candidates: List[float]):
+        unique_candidates = sorted(set(float(c) for c in candidates))
+        if not unique_candidates:
+            raise ValueError("La liste de candidats pour le Thompson Sampling ne peut pas être vide.")
+
+        self.candidates = unique_candidates
+        self.alpha: Dict[float, float] = {candidate: 1.0 for candidate in unique_candidates}
+        self.beta: Dict[float, float] = {candidate: 1.0 for candidate in unique_candidates}
+
+    def sample(self) -> float:
+        best_candidate = self.candidates[0]
+        best_score = -np.inf
+
+        for candidate in self.candidates:
+            score = np.random.beta(self.alpha[candidate], self.beta[candidate])
+            if score > best_score:
+                best_candidate = candidate
+                best_score = score
+
+        return best_candidate
+
+    def update(self, candidate: float, reward: float):
+        if candidate not in self.alpha:
+            return
+
+        if reward >= 0:
+            self.alpha[candidate] += reward
+        else:
+            self.beta[candidate] += abs(reward)
+
+
+@dataclass
+class AdaptiveParameter:
+    """Paramètre adaptatif combinant GLM online et bandit discret."""
+
+    name: str
+    value: float
+    bounds: Tuple[float, float]
+    max_step: float
+    model: OnlineLinear
+    bandit: DiscreteThompsonSampler
+    history: deque
+
+    def propose_update(self, context: List[float], reward: float) -> float:
+        """Calcule une nouvelle valeur candidate bornée et limitée en vitesse."""
+
+        # Mise à jour du modèle linéaire sur la cible actuelle enrichie du signal de récompense
+        target = np.clip(self.value + reward, self.bounds[0], self.bounds[1])
+        self.model.update(context, target)
+        linear_proposal = self.model.predict(context)
+
+        # Echantillonnage Thompson discret pour favoriser l'exploration
+        bandit_choice = self.bandit.sample()
+
+        # Combinaison prudente des deux propositions
+        blended = 0.6 * linear_proposal + 0.4 * bandit_choice
+
+        # Application des contraintes
+        bounded = float(np.clip(blended, self.bounds[0], self.bounds[1]))
+        delta = bounded - self.value
+        if abs(delta) > self.max_step:
+            bounded = self.value + np.sign(delta) * self.max_step
+
+        return float(bounded)
+
+    def commit(self, new_value: float, reward: float):
+        self.value = float(np.clip(new_value, self.bounds[0], self.bounds[1]))
+        # Mise à jour du bandit autour de la meilleure option discrète proche
+        closest_candidate = min(self.bandit.candidates, key=lambda c: abs(c - self.value))
+        self.bandit.update(closest_candidate, reward)
+        self.history.append(self.value)
+        if len(self.history) > 100:
+            self.history.popleft()
+
+
+class AdaptiveParameterManager:
+    """Gestion centralisée des paramètres adaptatifs du module de perception."""
+
+    def __init__(self, parameter_store: Dict[str, float]):
+        self.parameter_store = parameter_store
+        self.parameters: Dict[str, AdaptiveParameter] = {}
+        self.last_context: Optional[List[float]] = None
+
+        definitions = {
+            "sensitivity_threshold": {
+                "bounds": (0.02, 0.5),
+                "candidates": [0.05, 0.1, 0.15, 0.25, 0.35],
+            },
+            "discrimination_threshold": {
+                "bounds": (0.01, 0.3),
+                "candidates": [0.02, 0.05, 0.1, 0.18, 0.25],
+            },
+            "integration_window": {
+                "bounds": (0.05, 0.5),
+                "candidates": [0.05, 0.1, 0.2, 0.35, 0.5],
+            },
+            "object_persistence": {
+                "bounds": (0.5, 5.0),
+                "candidates": [0.5, 1.0, 2.0, 3.5, 5.0],
+            },
+            "change_blindness_threshold": {
+                "bounds": (0.05, 0.8),
+                "candidates": [0.1, 0.2, 0.4, 0.6, 0.75],
+            },
+        }
+
+        for name, value in parameter_store.items():
+            meta = definitions.get(name)
+            if not meta:
+                continue
+
+            bounds = meta["bounds"]
+            candidates = meta["candidates"]
+            dimension = 5  # biais + 4 métriques principales
+            model = OnlineLinear(dimension=dimension, alpha=1.0, bounds=bounds)
+            bandit = DiscreteThompsonSampler(candidates)
+            max_step = (bounds[1] - bounds[0]) * 0.2
+            self.parameters[name] = AdaptiveParameter(
+                name=name,
+                value=float(np.clip(value, bounds[0], bounds[1])),
+                bounds=bounds,
+                max_step=max_step,
+                model=model,
+                bandit=bandit,
+                history=deque(maxlen=100)
+            )
+            self.parameter_store[name] = self.parameters[name].value
+
+    def context_vector(self, metrics: Dict[str, float]) -> List[float]:
+        context = [
+            1.0,
+            float(metrics.get("average_salience", 0.0)),
+            float(metrics.get("average_confidence", 0.0)),
+            float(metrics.get("object_density", 0.0)),
+            float(metrics.get("drift_magnitude", 0.0)),
+        ]
+        self.last_context = context
+        return context
+
+    def update(self, metrics: Dict[str, float]):
+        if not self.parameters:
+            return
+
+        context = self.context_vector(metrics)
+        reward = float(metrics.get("reward_signal", 0.0))
+
+        for name, adaptive_param in self.parameters.items():
+            proposed_value = adaptive_param.propose_update(context, reward)
+            adaptive_param.commit(proposed_value, reward)
+            self.parameter_store[name] = adaptive_param.value
+
+    def get_history(self, name: str) -> List[float]:
+        param = self.parameters.get(name)
+        return list(param.history) if param else []
 
 
 def _label_components(edge_data: np.ndarray) -> Tuple[np.ndarray, int]:
@@ -79,6 +271,57 @@ class FeatureType(Enum):
     RHYTHM = "rythme"
     PRESSURE = "pression"
     TEMPERATURE = "température"
+
+
+class StructuralEvolutionManager:
+    """Supervise l'évolution lente des structures perceptives."""
+
+    def __init__(self):
+        self.performance_window: deque = deque(maxlen=20)
+        self.last_innovation_step: int = 0
+        self.iteration: int = 0
+
+    def observe(self, metrics: Dict[str, float], perceptual_learning: Dict[str, Any]):
+        self.iteration += 1
+        confidence = float(metrics.get("average_confidence", 0.0))
+        self.performance_window.append(confidence)
+
+        if len(self.performance_window) < self.performance_window.maxlen:
+            return
+
+        rolling_mean = float(np.mean(self.performance_window))
+        drift = float(metrics.get("drift_magnitude", 0.0))
+
+        # Introduit de nouveaux détecteurs si la confiance moyenne reste faible
+        if rolling_mean < 0.55 and (self.iteration - self.last_innovation_step) > 10:
+            self._introduce_new_detector(perceptual_learning, drift)
+            self.last_innovation_step = self.iteration
+
+        # Allège les détecteurs inutilisés si la confiance est élevée mais stable
+        if rolling_mean > 0.8 and drift < 0.05:
+            self._prune_detectors(perceptual_learning)
+
+    def _introduce_new_detector(self, perceptual_learning: Dict[str, Any], drift: float):
+        detectors = perceptual_learning.setdefault("feature_detectors", {})
+        candidate_name = f"evolved_detector_{int(time.time())}"
+        if candidate_name in detectors:
+            return
+
+        detectors[candidate_name] = {
+            "type": "evolved_detector",
+            "feature_type": FeatureType.EDGE,
+            "sensitivity": 0.6 + min(drift, 0.3),
+            "specificity": 0.6,
+            "learning_examples": 0,
+        }
+
+    def _prune_detectors(self, perceptual_learning: Dict[str, Any]):
+        detectors = perceptual_learning.get("feature_detectors", {})
+        removable = [name for name, meta in detectors.items()
+                     if meta.get("learning_examples", 0) == 0 and meta.get("type") == "learned_detector"]
+
+        for name in removable[:2]:
+            detectors.pop(name, None)
 
 @dataclass
 class PerceptualObject:
@@ -178,13 +421,21 @@ class PerceptionSystem:
             "object_persistence": 2.0,  # Persistance des objets
             "change_blindness_threshold": 0.3
         }
-        
+
+        # Gestion adaptative des paramètres perceptifs (niveau rapide)
+        self.adaptive_parameters = AdaptiveParameterManager(self.perceptual_parameters)
+
+        # Evolution lente de la structure perceptive (niveau lent)
+        self.structural_evolution = StructuralEvolutionManager()
+        self._last_scene_metrics: Optional[Dict[str, float]] = None
+
         # === HISTORIQUE PERCEPTIF ===
         self.perceptual_history = {
             "recent_scenes": [],
             "object_tracking": {},
             "change_detection": {},
-            "prediction_errors": []
+            "prediction_errors": [],
+            "parameter_drifts": []
         }
         
         # === INNÉS PERCEPTIFS ===
@@ -273,10 +524,13 @@ class PerceptionSystem:
         
         # === PHASE 9: APPRENTISSAGE PERCEPTIF ===
         self._perceptual_learning_update(perceptual_scene)
-        
+
+        # === PHASE 10: ADAPTATIONS META-PERCEPTIVES ===
         processing_time = time.time() - processing_start
+        self._meta_adaptation_cycle(perceptual_scene, processing_time=processing_time)
+
         print(f"🔄 Scène perceptive formée en {processing_time:.3f}s - {len(integrated_objects)} objets")
-        
+
         return perceptual_scene
     
     def _extract_features(self, modality_results: Dict[Modality, Any]) -> Dict[Modality, Dict[FeatureType, Any]]:
@@ -874,19 +1128,74 @@ class PerceptionSystem:
     
     def _perceptual_learning_update(self, scene: PerceptualScene):
         """Met à jour les mécanismes d'apprentissage perceptif"""
-        
+
         # Apprentissage des détecteurs de caractéristiques
         for obj in scene.objects:
             for feature_type, features in obj.features.items():
                 self._update_feature_detector(feature_type, features, obj.confidence)
-        
+
         # Apprentissage des catégories perceptives
         self._update_categorical_perception(scene.objects)
-    
+
+    def _meta_adaptation_cycle(self, scene: PerceptualScene, processing_time: float):
+        """Orchestre les boucles d'adaptation rapide et lente."""
+
+        metrics = self._collect_scene_metrics(scene, processing_time)
+        self.adaptive_parameters.update(metrics)
+        self.structural_evolution.observe(metrics, self.perceptual_learning)
+
+        drift_entry = {
+            "timestamp": scene.timestamp,
+            "drift": metrics.get("drift_magnitude", 0.0),
+            "parameters": {k: float(v) for k, v in self.perceptual_parameters.items()},
+        }
+        self.perceptual_history["parameter_drifts"].append(drift_entry)
+        if len(self.perceptual_history["parameter_drifts"]) > 50:
+            self.perceptual_history["parameter_drifts"].pop(0)
+
+        self._last_scene_metrics = metrics
+
+    def _collect_scene_metrics(self, scene: PerceptualScene, processing_time: float) -> Dict[str, float]:
+        """Calcule les métriques nécessaires aux mécanismes d'adaptation."""
+
+        feature_stats = self._compute_feature_statistics(scene.objects)
+        average_confidence = float(feature_stats.get("average_confidence", 0.0))
+        average_salience = float(feature_stats.get("average_salience", 0.0))
+        object_count = float(feature_stats.get("object_count", 0))
+
+        previous = self._last_scene_metrics or {
+            "average_confidence": average_confidence,
+            "average_salience": average_salience,
+            "object_count": object_count,
+        }
+
+        drift_components = [
+            abs(average_confidence - previous.get("average_confidence", average_confidence)),
+            abs(average_salience - previous.get("average_salience", average_salience)),
+            abs(object_count - previous.get("object_count", object_count)) * 0.05,
+        ]
+        drift_magnitude = float(np.mean(drift_components))
+
+        prediction_error = max(0.0, 1.0 - average_confidence)
+        reward_signal = average_confidence - prediction_error - 0.1 * drift_magnitude
+
+        metrics = {
+            "average_confidence": average_confidence,
+            "average_salience": average_salience,
+            "object_count": object_count,
+            "object_density": object_count / max(1.0, processing_time * 10.0),
+            "processing_time": float(processing_time),
+            "prediction_error": prediction_error,
+            "reward_signal": reward_signal,
+            "drift_magnitude": drift_magnitude,
+        }
+
+        return metrics
+
     def _update_feature_detector(self, feature_type: FeatureType, features: Any, confidence: float):
         """Met à jour un détecteur de caractéristiques"""
         detector_key = f"{feature_type.value}_detector"
-        
+
         if detector_key not in self.perceptual_learning["feature_detectors"]:
             # Création d'un nouveau détecteur
             self.perceptual_learning["feature_detectors"][detector_key] = {
