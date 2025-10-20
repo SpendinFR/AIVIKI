@@ -99,7 +99,9 @@ class OnlineLinear:
             self.weights[idx] = max(self.bounds[0], min(self.bounds[1], new_weight))
         bias_grad = max(-self.max_grad, min(self.max_grad, error))
         self.bias -= self.lr * bias_grad
-        self.bias = max(self.bounds[0] * -1.0, min(self.bounds[1] * 2.0, self.bias))
+        max_abs = max(abs(self.bounds[0]), abs(self.bounds[1]))
+        bias_limit = 2.0 * max_abs if max_abs > 0.0 else 1.0
+        self.bias = max(-bias_limit, min(bias_limit, self.bias))
         self.update_count += 1
 
     def confidence(self) -> float:

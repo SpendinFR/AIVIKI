@@ -80,12 +80,12 @@ class UnderstandingAggregator:
         )
         self._model = OnlineLinear(
             base_features,
-            bounds=(0.0, 1.0),
+            bounds=(-0.75, 0.75),
             lr=0.045,
             l2=0.002,
             max_grad=0.28,
             warmup=24,
-            init_weight=0.06,
+            init_weight=0.0,
         )
 
     @staticmethod
