@@ -359,6 +359,7 @@ class MemoryStore:
         memories = payload.get("memories")
         if isinstance(memories, list):
             self.state["memories"] = list(memories)
+        self._index.rebuild(self.state.get("memories", []))
         self._dirty = 0
         try:
             self._save()

@@ -195,7 +195,7 @@ class TinyEncoder:
         self.doc_freq: Counter[str] = Counter()
         self.total_docs = 0
 
-    def encode(self, text: str) -> List[float]:
+    def encode(self, text: str, *, train: bool = True) -> List[float]:
         tokens, raw_tokens = self.tokenizer.tokenize(text, update=False)
         if not tokens:
             return [0.0] * self.dim
@@ -206,7 +206,8 @@ class TinyEncoder:
             for h, s in zip(hash_vec, semantic_vec)
         ]
         encoded = l2_normalize(combined)
-        self._after_encode(tokens, raw_tokens, hash_vec, semantic_vec)
+        if train:
+            self._after_encode(tokens, raw_tokens, hash_vec, semantic_vec)
         return encoded
 
     def log_similarity(self, cosine_similarity: float) -> None:

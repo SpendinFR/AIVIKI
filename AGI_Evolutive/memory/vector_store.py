@@ -214,7 +214,7 @@ class VectorStore:
     def search(self, query: str, k: int = 5) -> List[Tuple[str, float]]:
         if not self._documents:
             return []
-        q_vector = self._encoder.encode(query or "")
+        q_vector = self._encoder.encode(query or "", train=False)
         q_tokens, _ = self._encoder.tokenizer.tokenize(query or "", update=False)
         now = time.time()
 
