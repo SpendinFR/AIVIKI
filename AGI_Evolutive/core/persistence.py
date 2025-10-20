@@ -372,8 +372,9 @@ class PersistenceManager:
         if self.alert_hook:
             try:
                 self.alert_hook(message, payload)
-            except Exception:
-                self.logger.exception("Alert hook failure", extra={"message": message, **payload})
+            except Exception as exc:
+                extra = {"message": message, **payload}
+                self.logger.warning("Alert hook failure: %s", exc, extra=extra)
         else:
             self.logger.warning("Persistence alert", extra={"message": message, **payload})
 

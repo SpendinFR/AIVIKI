@@ -2,6 +2,7 @@ import math
 import random
 import re
 import resource
+import logging
 import statistics
 import time
 import unicodedata
@@ -52,6 +53,9 @@ from AGI_Evolutive.memory.episodic_linker import EpisodicLinker
 from AGI_Evolutive.memory.memory_store import MemoryStore
 from AGI_Evolutive.light_scheduler import LightScheduler
 from AGI_Evolutive.runtime.job_manager import JobManager
+
+
+logger = logging.getLogger(__name__)
 
 
 # --- seuils / cadence (tunable) ---
@@ -871,6 +875,10 @@ class Orchestrator:
     def __init__(self, arch):
         load_config()
         self.arch = arch
+        logger.info(
+            "Initialisation de l'Orchestrateur",
+            extra={"pipelines_registrees": len(REGISTRY)},
+        )
         self.telemetry = Telemetry()
         self._prediction_error_ema = AdaptiveEMA((0.2, 0.4, 0.6, 0.8))
         self._sj_config_model = AdaptiveSJConfig(_DEFAULT_SJ_CONF)
@@ -986,6 +994,19 @@ class Orchestrator:
         self._mission_tick = 0
         self._principles_tick = 0
         self._preferences_tick = 0
+
+        job_count = 0
+        scheduler = getattr(self, "scheduler", None)
+        jobs_attr = getattr(scheduler, "jobs", None) if scheduler is not None else None
+        if isinstance(jobs_attr, dict):
+            job_count = len(jobs_attr)
+        elif isinstance(jobs_attr, (list, tuple, set)):
+            job_count = len(jobs_attr)
+
+        logger.info(
+            "Orchestrateur prêt",
+            extra={"scheduler_jobs": job_count},
+        )
 
     def _register_jobs(self):
         self.scheduler.register_job("scan_inbox", 30, lambda: self.io.perception.scan_inbox())
