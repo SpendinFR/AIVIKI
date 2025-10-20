@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import random
 import re
 import time
-from typing import Any, Dict, List, Tuple
+import unicodedata
+from collections import defaultdict, deque
+from typing import Any, Dict, Iterable, List, Tuple
 
 Number = float
 
@@ -24,8 +28,211 @@ def _safe(d: Any, *keys, default=None):
     return cur
 
 
+def _normalize_text(s: str) -> str:
+    if not s:
+        return ""
+    norm = unicodedata.normalize("NFD", s)
+    norm = "".join(ch for ch in norm if unicodedata.category(ch) != "Mn")
+    return norm.lower()
+
+
 def _tok(s: str) -> List[str]:
-    return re.findall(r"[A-Za-zÀ-ÿ]{3,}", (s or "").lower())
+    return re.findall(r"[a-z]{3,}", _normalize_text(s))
+
+
+class OnlineWeightLearner:
+    """Online ridge-like learner with drift control."""
+
+    def __init__(self, base_weights: Dict[str, float], state: Dict[str, Any] | None = None):
+        self.base_weights = dict(base_weights)
+        self.weights: Dict[str, float] = dict(base_weights)
+        self.count: Dict[str, float] = defaultdict(lambda: 1.0)
+        self.ewma_short: Dict[str, float] = defaultdict(float)
+        self.ewma_long: Dict[str, float] = defaultdict(float)
+        self.lr = 0.2
+        self.l2 = 0.001
+        if state:
+            for k, v in state.get("weights", {}).items():
+                try:
+                    self.weights[k] = float(v)
+                except (TypeError, ValueError):
+                    continue
+            for k, v in state.get("count", {}).items():
+                try:
+                    self.count[k] = max(1.0, float(v))
+                except (TypeError, ValueError):
+                    continue
+            for k, v in state.get("ewma_short", {}).items():
+                try:
+                    self.ewma_short[k] = float(v)
+                except (TypeError, ValueError):
+                    continue
+            for k, v in state.get("ewma_long", {}).items():
+                try:
+                    self.ewma_long[k] = float(v)
+                except (TypeError, ValueError):
+                    continue
+
+    def get_weights(self, names: Iterable[str], fallback: Dict[str, float]) -> Dict[str, float]:
+        return {n: self.weights.get(n, fallback.get(n, 0.0)) for n in names}
+
+    def predict(self, features: Dict[str, float]) -> float:
+        return sum(self.weights.get(name, self.base_weights.get(name, 0.0)) * float(val)
+                   for name, val in features.items())
+
+    def update(self, features: Dict[str, float], reward: float | None) -> None:
+        if reward is None:
+            return
+        try:
+            reward = float(reward)
+        except (TypeError, ValueError):
+            return
+        pred = self.predict(features)
+        err = max(-1.0, min(1.0, reward - pred))
+        if not math.isfinite(err):
+            return
+        for name, raw_val in features.items():
+            if not isinstance(raw_val, (int, float)):
+                continue
+            val = float(raw_val)
+            if not math.isfinite(val):
+                continue
+            lr = self.lr / math.sqrt(self.count[name])
+            grad = err * val
+            w = self.weights.get(name, self.base_weights.get(name, 0.0))
+            w = (1.0 - self.l2 * lr) * w + lr * grad
+            self.weights[name] = w
+            self.count[name] += abs(val) + 1e-3
+            self._update_drift(name, val)
+
+    def _update_drift(self, name: str, val: float) -> None:
+        short_alpha = 0.3
+        long_alpha = 0.05
+        self.ewma_short[name] = (1 - short_alpha) * self.ewma_short[name] + short_alpha * val
+        self.ewma_long[name] = (1 - long_alpha) * self.ewma_long[name] + long_alpha * val
+        if abs(self.ewma_short[name] - self.ewma_long[name]) > 0.35:
+            self.weights[name] = self.weights.get(name, self.base_weights.get(name, 0.0)) * 0.8
+            self.count[name] = max(1.0, self.count[name] * 0.7)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "weights": self.weights,
+            "count": dict(self.count),
+            "ewma_short": dict(self.ewma_short),
+            "ewma_long": dict(self.ewma_long),
+        }
+
+
+class OnlineBanditTTL:
+    """Discrete Thompson Sampling over TTL candidates."""
+
+    def __init__(self, candidates: Iterable[float] | None = None, state: Dict[str, Any] | None = None):
+        default_candidates = [30 * 60, 3 * 3600, 7 * 3600, 14 * 3600, 30 * 3600]
+        self.candidates = [float(c) for c in (candidates or default_candidates)]
+        self.state: Dict[str, Dict[str, Dict[str, float]]] = {}
+        if state:
+            for key, options in state.items():
+                safe_opts: Dict[str, Dict[str, float]] = {}
+                for ttl, stats in options.items():
+                    try:
+                        ttl_f = str(float(ttl))
+                    except (TypeError, ValueError):
+                        continue
+                    safe_opts[ttl_f] = {
+                        "s": max(1.0, float(stats.get("s", 1.0))),
+                        "f": max(1.0, float(stats.get("f", 1.0))),
+                    }
+                if safe_opts:
+                    self.state[key] = safe_opts
+
+    def _ensure_key(self, key: str) -> Dict[str, Dict[str, float]]:
+        if key not in self.state:
+            self.state[key] = {
+                str(c): {"s": 1.0, "f": 1.0} for c in self.candidates
+            }
+        else:
+            # ensure new candidates exist
+            for c in self.candidates:
+                self.state[key].setdefault(str(c), {"s": 1.0, "f": 1.0})
+        return self.state[key]
+
+    def sample(self, key: str) -> float:
+        options = self._ensure_key(key)
+        best_ttl = None
+        best_draw = -1.0
+        for ttl, stats in options.items():
+            s = max(1.0, float(stats.get("s", 1.0)))
+            f = max(1.0, float(stats.get("f", 1.0)))
+            draw = random.betavariate(s, f)
+            if draw > best_draw:
+                best_draw = draw
+                best_ttl = float(ttl)
+        return best_ttl or self.candidates[0]
+
+    def update(self, key: str, ttl: float, success: bool) -> None:
+        options = self._ensure_key(key)
+        ttl_key = str(float(ttl))
+        stats = options.setdefault(ttl_key, {"s": 1.0, "f": 1.0})
+        if success:
+            stats["s"] = stats.get("s", 1.0) + 1.0
+        else:
+            stats["f"] = stats.get("f", 1.0) + 1.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return self.state
+
+
+class OnlineTextClassifier:
+    """Lightweight perceptron-style classifier for urgency detection."""
+
+    def __init__(self, state: Dict[str, Any] | None = None):
+        self.weights: Dict[str, float] = defaultdict(float)
+        self.bias = 0.0
+        self.lr = 0.08
+        self.decay = 0.995
+        if state:
+            for k, v in state.get("weights", {}).items():
+                try:
+                    self.weights[k] = float(v)
+                except (TypeError, ValueError):
+                    continue
+            try:
+                self.bias = float(state.get("bias", 0.0))
+            except (TypeError, ValueError):
+                self.bias = 0.0
+
+    def _features(self, text: str) -> List[str]:
+        norm = _normalize_text(text)
+        tokens = re.findall(r"[a-z]{2,}", norm)
+        feats = set(tokens)
+        for i in range(len(tokens) - 1):
+            feats.add(tokens[i] + "_" + tokens[i + 1])
+        return list(feats)
+
+    def predict(self, text: str) -> float:
+        feats = self._features(text)
+        score = self.bias + sum(self.weights.get(f, 0.0) for f in feats)
+        score = max(-20.0, min(20.0, score))
+        return 1.0 / (1.0 + math.exp(-score))
+
+    def update(self, text: str, label: float | int | bool) -> None:
+        if text is None:
+            return
+        feats = self._features(text)
+        if not feats:
+            return
+        y = 1.0 if label else 0.0
+        pred = self.predict(text)
+        err = y - pred
+        for f in feats:
+            self.weights[f] = self.weights.get(f, 0.0) * self.decay + self.lr * err
+        self.bias = self.bias * self.decay + self.lr * err
+
+    def to_dict(self) -> Dict[str, Any]:
+        items = sorted(self.weights.items(), key=lambda kv: -abs(kv[1]))
+        if len(items) > 1500:
+            items = items[:1500]
+        return {"weights": {k: v for k, v in items}, "bias": self.bias}
 
 
 class GoalPrioritizer:
@@ -52,6 +259,44 @@ class GoalPrioritizer:
                 "background_pr": 0.60,
             },
         )
+        self.state_path = getattr(
+            self.arch, "prioritizer_state_path", "data/prioritizer_state.json"
+        )
+        persisted = self._load_state()
+        base_weights = self.cfg.setdefault("weights", {})
+        self.weight_model = OnlineWeightLearner(base_weights, persisted.get("weight_model"))
+        self.ttl_bandit = OnlineBanditTTL(state=persisted.get("ttl_bandit"))
+        self.text_clf = OnlineTextClassifier(persisted.get("text_classifier"))
+        self._last_feedback_ts = float(persisted.get("last_feedback_ts", 0.0))
+        seen_ids = [str(s) for s in persisted.get("seen_feedback_ids", [])][:512]
+        self._seen_feedback_ids: deque[str] = deque(seen_ids, maxlen=512)
+        self._feature_history: Dict[str, Dict[str, float]] = {}
+        self._feature_fifo: deque[str] = deque()
+        self._ttl_assignments: Dict[str, Tuple[str, float, float]] = {}
+        self._dirty_state = False
+        self._last_state_flush = 0.0
+        # patterns renforcées pour capturer différentes tournures FR
+        self._urgency_patterns = [
+            (re.compile(r"\b(urgent|urgence|prioritaire|critique)\b"), "user_urgent"),
+            (
+                re.compile(
+                    r"\b(tout\s*(?:de\s*)?suite|sans\s+delai|imm?ediatement|maintenant)\b"
+                ),
+                "user_urgent",
+            ),
+            (
+                re.compile(r"\b(dans|avant)\s+(?:les?|la)\s+\d+\s*(minutes?|heures?|jours?)\b"),
+                "user_time_ref",
+            ),
+            (re.compile(r"\baujourd['’]?hui\b"), "user_time_ref"),
+            (re.compile(r"\bce\s+(soir|matin|week\s*end)\b"), "user_time_ref"),
+        ]
+        self._directive_patterns = [
+            re.compile(r"\bfais\s+preuve\s+d['e]\w+"),
+            re.compile(r"\bs(?:ois|oyons)\s+\w+"),
+            re.compile(r"\badopte\s+(?:un|une|le|la|l')\s+\w+"),
+        ]
+        self._urgency_classifier_threshold = 0.6
 
     # ---------- CONFIG ----------
     def _load_cfg(self) -> Dict[str, Any]:
@@ -86,6 +331,187 @@ class GoalPrioritizer:
             "background_period_sec": 5 * 60,  # utile si tu filtres ailleurs la fréquence BG
         }
 
+    def _load_state(self) -> Dict[str, Any]:
+        path = self.state_path
+        if not path:
+            return {}
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    return json.load(f) or {}
+        except Exception:
+            return {}
+        return {}
+
+    def _maybe_flush_state(self, force: bool = False) -> None:
+        if not self._dirty_state:
+            return
+        if not force and (_now() - self._last_state_flush) < 30.0:
+            return
+        payload = {
+            "weight_model": self.weight_model.to_dict(),
+            "ttl_bandit": self.ttl_bandit.to_dict(),
+            "text_classifier": self.text_clf.to_dict(),
+            "last_feedback_ts": self._last_feedback_ts,
+            "seen_feedback_ids": list(self._seen_feedback_ids),
+        }
+        path = self.state_path
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = f"{path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, path)
+            self._dirty_state = False
+            self._last_state_flush = _now()
+        except Exception:
+            pass
+
+    def _cache_features(self, goal_id: str, features: Dict[str, float]) -> None:
+        self._feature_history[goal_id] = dict(features)
+        try:
+            self._feature_fifo.remove(goal_id)
+        except ValueError:
+            pass
+        self._feature_fifo.append(goal_id)
+        while len(self._feature_fifo) > 256:
+            old = self._feature_fifo.popleft()
+            if old not in self._ttl_assignments:
+                self._feature_history.pop(old, None)
+
+    def _ttl_key(self, plan: Dict[str, Any]) -> str:
+        key = plan.get("kind") or plan.get("lane") or plan.get("category")
+        if isinstance(key, str) and key.strip():
+            return key.lower()
+        tags = plan.get("tags") or []
+        if tags:
+            return str(tags[0]).lower()
+        return "default"
+
+    def _detect_urgency(self, text: str, meta: Dict[str, Any] | None = None) -> Tuple[float, str]:
+        if not text:
+            return (0.0, "")
+        norm = _normalize_text(text)
+        for pattern, label in self._urgency_patterns:
+            if pattern.search(norm):
+                return (1.0, label)
+        for pattern in self._directive_patterns:
+            if pattern.search(norm):
+                return (0.65, "user_directive")
+        prob = 0.0
+        if self.text_clf:
+            prob = self.text_clf.predict(text)
+        if meta:
+            labels = set(map(str, meta.get("labels", []) or []))
+            labels.update(str(t) for t in meta.get("tags", []) or [])
+            urgent_flags = {"urgent", "rush", "haut_niveau"}
+            not_urgent = {"not_urgent", "background"}
+            if labels & urgent_flags:
+                return (1.0, "label_urgent")
+            if labels & not_urgent:
+                return (0.0, "")
+            explicit = meta.get("urgency_label")
+            if isinstance(explicit, str):
+                explicit = explicit.lower()
+                if explicit in ("urgent", "rush", "eleve"):
+                    return (1.0, "explicit_label")
+                if explicit in ("faible", "basse", "background"):
+                    return (0.0, "")
+        if prob >= self._urgency_classifier_threshold:
+            return (min(1.0, prob), f"clf:{prob:.2f}")
+        return (0.0, "")
+
+    def _update_from_reward(self, goal_id: str, reward: Any) -> None:
+        features = self._feature_history.get(goal_id)
+        if not features:
+            return
+        try:
+            reward_f = float(reward)
+        except (TypeError, ValueError):
+            return
+        self.weight_model.update(features, reward_f)
+        self._dirty_state = True
+
+    def _register_completion(self, goal_id: str, plan: Dict[str, Any]) -> None:
+        assign = self._ttl_assignments.pop(goal_id, None)
+        if not assign:
+            return
+        key, ttl, start_ts = assign
+        elapsed = plan.get("elapsed_sec") or plan.get("duration_sec")
+        if elapsed is None and start_ts:
+            done_ts = plan.get("completed_ts") or plan.get("last_tick_done")
+            if done_ts:
+                elapsed = max(0.0, float(done_ts) - float(start_ts))
+        if elapsed is None:
+            return
+        try:
+            elapsed = float(elapsed)
+        except (TypeError, ValueError):
+            return
+        success = elapsed <= float(ttl)
+        self.ttl_bandit.update(key, float(ttl), success)
+        self._dirty_state = True
+
+    def _ingest_feedback(self) -> None:
+        memory = getattr(self.arch, "memory", None)
+        if not memory or not hasattr(memory, "get_recent_memories"):
+            return
+        try:
+            recent = memory.get_recent_memories(limit=200)
+        except Exception:
+            return
+        max_ts = self._last_feedback_ts
+        dirty = False
+        for m in recent:
+            if not isinstance(m, dict):
+                continue
+            mid = m.get("id")
+            if mid is not None:
+                mid = str(mid)
+                if mid in self._seen_feedback_ids:
+                    continue
+            ts = float(m.get("ts") or 0.0)
+            if ts and ts <= self._last_feedback_ts:
+                continue
+            kind = m.get("kind")
+            if kind == "priority_feedback":
+                goal = m.get("goal") or m.get("goal_id")
+                reward = m.get("reward")
+                if goal is not None and reward is not None:
+                    self._update_from_reward(str(goal), reward)
+            elif kind in {"urgency_feedback", "interaction_feedback"}:
+                text = m.get("text") or m.get("sample")
+                label = (
+                    m.get("label")
+                    or m.get("urgency_label")
+                    or (m.get("tags") and ("urgent" in m.get("tags")))
+                )
+                if isinstance(label, str):
+                    label = label.lower() in ("urgent", "rush", "eleve")
+                elif isinstance(label, (list, tuple, set)):
+                    label = any(str(x).lower() in ("urgent", "rush", "eleve") for x in label)
+                if text:
+                    self.text_clf.update(text, bool(label))
+                    self._dirty_state = True
+            elif kind == "goal_completed":
+                goal = m.get("goal") or m.get("goal_id")
+                if goal:
+                    proxy_plan = {
+                        "elapsed_sec": m.get("elapsed_sec") or m.get("duration_sec"),
+                        "completed_ts": m.get("ts"),
+                    }
+                    self._register_completion(str(goal), proxy_plan)
+            if mid is not None:
+                self._seen_feedback_ids.append(mid)
+                dirty = True
+            if ts:
+                max_ts = max(max_ts, ts)
+        if max_ts > self._last_feedback_ts:
+            self._last_feedback_ts = max_ts
+            dirty = True
+        if dirty:
+            self._dirty_state = True
+
     # ---------- FEATURES (chacune retourne (score, reason)) ----------
     def feat_user_urgency(self) -> Tuple[Number, str]:
         # détecte "maintenant/urgent", directives NL récentes, etc.
@@ -98,15 +524,10 @@ class GoalPrioritizer:
                 continue
             if (m.get("role") or "") != "user":
                 continue
-            text = (m.get("text") or "").lower()
-            if re.search(r"\b(urgent|prioritaire|tout\s+de\s+suite|maintenant)\b", text):
-                return (1.0, "user_urgent")
-            # directives style (ex: fais preuve d’empathie)
-            if re.search(r"\bfais\s+preuve\s+d['e]?\w+", text):
-                return (0.65, "user_directive")
-            # demandes avec échéancier
-            if re.search(r"\b(demain|aujourd'hui|ce\s+soir|avant)\b", text):
-                return (0.5, "user_time_ref")
+            text = m.get("text") or ""
+            score, reason = self._detect_urgency(text, m)
+            if score > 0:
+                return (min(1.0, score), reason)
             break
         return (0.0, "")
 
@@ -179,6 +600,10 @@ class GoalPrioritizer:
         ]
         title = plan.get("title") or ""
         cs += [w for w in _tok(title)]
+        for text in (goal_id, title):
+            norm = _normalize_text(text)
+            for match in re.findall(r"est\s+(?:un|une|le|la|l')\s+([a-z]{3,})", norm):
+                cs.append(match)
         return list(dict.fromkeys(cs))[:10]
 
     def _value_aliases(self) -> Dict[str, List[str]]:
@@ -298,9 +723,15 @@ class GoalPrioritizer:
     def feat_staleness(self, goal_id: str, plan: Dict[str, Any]) -> Tuple[Number, str]:
         last = plan.get("last_tick_done") or plan.get("created_ts") or (_now() - 1800)
         age = _now() - last
-        # à 30 min sans progrès → +0.5 ; decay sinon
-        v = max(0.0, min(0.5, age / (30 * 60)))
-        return (v, f"stale:{int(age)}s")
+        key = self._ttl_key(plan)
+        assign = self._ttl_assignments.get(goal_id)
+        if assign and assign[0] == key:
+            ttl = float(assign[1])
+        else:
+            ttl = max(60.0, self.ttl_bandit.sample(key))
+            self._ttl_assignments[goal_id] = (key, ttl, plan.get("created_ts") or _now())
+        v = max(0.0, min(0.5, age / ttl))
+        return (v, f"stale:{int(age)}s<{int(ttl)}s")
 
     def feat_base_priority(self, plan: Dict[str, Any]) -> Tuple[Number, str]:
         bp = float(plan.get("priority", 0.5))
@@ -402,12 +833,12 @@ class GoalPrioritizer:
 
     # ---------- SCORING GLOBAL ----------
     def score_goal(self, goal_id: str, plan: Dict[str, Any]) -> Dict[str, Any]:
-        W = self.cfg["weights"]
-        parts: List[Tuple[str, float, str]] = []
+        base_weights = self.cfg.setdefault("weights", {})
+        feats: Dict[str, Tuple[float, str]] = {}
 
         def add(name: str, val_reason: Tuple[Number, str]):
             v, r = val_reason
-            parts.append((name, v, r))
+            feats[name] = (float(v), r)
 
         # calcule toutes les features (avec fallbacks)
         add("user_urgency", self.feat_user_urgency())
@@ -424,11 +855,13 @@ class GoalPrioritizer:
         add("action_cost", self.feat_action_cost(plan))
         add("risk_penalty", self.feat_risk_penalty(plan))
 
-        # somme pondérée
+        feature_values = {name: val for name, (val, _) in feats.items()}
+        weights = self.weight_model.get_weights(feature_values.keys(), base_weights)
+
         pr = 0.0
         reasons: List[str] = []
-        for name, v, r in parts:
-            w = float(W.get(name, 0.0))
+        for name, (v, r) in feats.items():
+            w = float(weights.get(name, 0.0))
             pr += w * v
             if r:
                 reasons.append(f"{name}:{r}({v:.2f}×{w:.2f})")
@@ -451,12 +884,16 @@ class GoalPrioritizer:
             pr = min(1.0, pr + 0.05)
             reasons.append("anti_famine:+0.05")
 
+        self._cache_features(goal_id, feature_values)
+
         return {"priority": pr, "tags": list(tags), "explain": reasons[:6]}
 
     def reprioritize_all(self):
         planner = getattr(self.arch, "planner", None)
         if not planner:
             return
+
+        self._ingest_feedback()
 
         plans: Dict[str, Dict[str, Any]] = {}
         state = getattr(planner, "state", None)
@@ -471,7 +908,21 @@ class GoalPrioritizer:
             return
         for gid, plan in plans.items():
             if plan.get("status") == "done":
+                self._register_completion(gid, plan)
+                self._feature_history.pop(gid, None)
+                try:
+                    self._feature_fifo.remove(gid)
+                except ValueError:
+                    pass
                 continue
+            reward = plan.get("priority_reward")
+            if reward is None:
+                metrics_candidate = plan.get("metrics")
+                metrics = metrics_candidate if isinstance(metrics_candidate, dict) else None
+                if metrics:
+                    reward = metrics.get("priority_reward") or metrics.get("reward")
+            if reward is not None:
+                self._update_from_reward(gid, reward)
             s = self.score_goal(gid, plan)
             plan["priority"] = s["priority"]
             plan["tags"] = s["tags"]
@@ -490,3 +941,4 @@ class GoalPrioritizer:
                 )
             except Exception:
                 pass
+        self._maybe_flush_state()
