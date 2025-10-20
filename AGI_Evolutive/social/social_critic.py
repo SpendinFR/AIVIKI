@@ -2,11 +2,11 @@
 # et met à jour les InteractionRule (postérieurs + ema_reward).
 from __future__ import annotations
 from typing import Any, Dict, Optional, List, Tuple
-import time, math, re, json
+import time, json, random
 
 from AGI_Evolutive.social.adaptive_lexicon import AdaptiveLexicon
 from AGI_Evolutive.social.interaction_rule import (
-    InteractionRule, ContextBuilder, clamp
+    InteractionRule, clamp
 )
 
 
@@ -45,6 +45,110 @@ def _acceptance_marker(s: str) -> bool:
 
 
 # ----------------- Critic -----------------
+class ContextualWeightLearner:
+    """Apprend des poids par contexte via descente de gradient en ligne.
+
+    On garde un dictionnaire de contextes -> poids (+ vitesse d'oubli) afin de
+    ne pas casser les heuristiques existantes. Les poids sont initialisés avec
+    les valeurs configurées et ré-encadrés dans [0, 1] sauf indication
+    contraire. Une légère injection de bruit permet de ré-explorer en cas de
+    dérive.
+    """
+
+    def __init__(self,
+                 base_weights: Dict[str, float],
+                 component_names: List[str],
+                 lr: float = 0.15,
+                 l2: float = 1e-3,
+                 forget: float = 0.02,
+                 noise: float = 0.03):
+        self._base = base_weights
+        self._components = component_names
+        self._lr = lr
+        self._l2 = l2
+        self._forget = forget
+        self._noise = noise
+        self._ctx_weights: Dict[Tuple[Any, ...], Dict[str, float]] = {}
+
+    # bornes douces pour garder des poids raisonnables
+    def _clamp(self, name: str, value: float) -> float:
+        if name == "identity_consist":
+            return clamp(value, 0.0, 0.4)
+        if name == "continue_dialogue":
+            return clamp(value, 0.0, 0.35)
+        if name == "valence":
+            return clamp(value, 0.0, 0.35)
+        if name == "uncertainty_delta":
+            return clamp(value, 0.0, 0.45)
+        if name == "explicit_feedback":
+            return clamp(value, 0.1, 0.65)
+        if name == "acceptance":
+            return clamp(value, 0.0, 0.35)
+        return clamp(value, -0.35, 0.35)
+
+    def _init_ctx(self, ctx_key: Tuple[Any, ...]) -> Dict[str, float]:
+        weights = {
+            name: float(self._base.get(name, 0.0))
+            for name in self._components
+        }
+        self._ctx_weights[ctx_key] = weights
+        return weights
+
+    def get(self, ctx_key: Optional[Tuple[Any, ...]]) -> Dict[str, float]:
+        if not ctx_key:
+            # renvoie une copie pour éviter les mutations externes
+            return {
+                name: float(self._base.get(name, 0.0))
+                for name in self._components
+            }
+        if ctx_key not in self._ctx_weights:
+            return dict(self._init_ctx(ctx_key))
+        return dict(self._ctx_weights[ctx_key])
+
+    def update(self,
+               ctx_key: Optional[Tuple[Any, ...]],
+               feature_vec: List[float],
+               reward: float,
+               confidence: float = 1.0) -> None:
+        if not feature_vec or len(feature_vec) != len(self._components):
+            return
+        if confidence <= 0.0:
+            return
+        ctx = ctx_key or tuple()
+        weights = self._ctx_weights.get(ctx)
+        if weights is None:
+            weights = self._init_ctx(ctx)
+        # produit scalaire estimé
+        est = sum(weights[name] * val for name, val in zip(self._components, feature_vec))
+        err = (reward - est)
+        scaled_lr = self._lr * clamp(confidence, 0.05, 1.0)
+        for name, val in zip(self._components, feature_vec):
+            grad = (-2.0 * err * val) + (self._l2 * weights[name])
+            update = -scaled_lr * grad
+            weights[name] = self._clamp(name, weights[name] + update)
+        # oubli doux vers la base
+        if self._forget > 0.0:
+            for name in self._components:
+                base = float(self._base.get(name, weights[name]))
+                weights[name] = (1.0 - self._forget) * weights[name] + self._forget * base
+
+    def inject_noise(self,
+                     ctx_key: Optional[Tuple[Any, ...]],
+                     component: Optional[str] = None,
+                     strength: Optional[float] = None) -> None:
+        ctx = ctx_key or tuple()
+        weights = self._ctx_weights.get(ctx)
+        if weights is None:
+            weights = self._init_ctx(ctx)
+        comps = [component] if component else self._components
+        amp = strength if strength is not None else self._noise
+        for name in comps:
+            if name not in weights:
+                continue
+            jitter = random.uniform(-amp, amp)
+            weights[name] = self._clamp(name, weights[name] + jitter)
+
+
 class SocialCritic:
     """
     Calcule un outcome post-réponse + reward multi-source avec incertitude.
@@ -104,6 +208,28 @@ class SocialCritic:
         self._reward_history: List[float] = []
         self._reward_perf_baseline: float = 0.6
         self._last_calibration_ts: float = 0.0
+        components = [
+            "explicit_feedback",
+            "uncertainty_delta",
+            "continue_dialogue",
+            "valence",
+            "acceptance",
+            "identity_consist",
+        ]
+        self._component_names = components
+        learner_cfg = self.cfg.get("weight_learner", {})
+        self._weight_learner = ContextualWeightLearner(
+            self.cfg.get("weights", {}),
+            component_names=components,
+            lr=float(learner_cfg.get("lr", 0.15)),
+            l2=float(learner_cfg.get("l2", 1e-3)),
+            forget=float(learner_cfg.get("forget", 0.02)),
+            noise=float(learner_cfg.get("exploration_noise", 0.03)),
+        )
+        self._component_stats: Dict[str, Dict[str, float]] = {
+            name: {"fast": 0.5, "slow": 0.5, "last_drift": 0.0}
+            for name in components
+        }
 
     def _load_cfg(self) -> Dict[str, Any]:
         path = getattr(self.arch, "social_critic_cfg_path", "data/social_critic_config.json")
@@ -164,7 +290,11 @@ class SocialCritic:
           }
         }
         """
-        W = self.cfg["weights"]
+        ctx_key = self._context_key(decision_trace or {}, post_ctx or {})
+        W = self._weight_learner.get(ctx_key)
+        # compléter avec les poids hors apprentissage
+        for name, value in self.cfg.get("weights", {}).items():
+            W.setdefault(name, value)
 
         # pré / post comptage des incertitudes
         pre_q  = int((pre_ctx or {}).get("pending_questions_count", self._pending_questions_count()))
@@ -250,15 +380,18 @@ class SocialCritic:
             except Exception:
                 pass
 
-        return {
+        outcome = {
             "reduced_uncertainty": reduced_unc,
             "continued": cont,
             "valence": round(val, 3),
             "accepted": acc,
             "reward": round(reward, 4),
             "confidence": round(confidence, 3),
-            "components": comp
+            "components": comp,
+            "context_key": ctx_key,
+            "features": {name: float(val) for name, val in parts},
         }
+        return outcome
 
     # ----------- application à la règle ----------
     def update_rule_with_outcome(self, rule_id: str, outcome: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -332,6 +465,49 @@ class SocialCritic:
                             0.22, float(weights.get("valence", 0.15)) + adjust * 0.5
                         )
                         self._last_calibration_ts = _now()
+            self._learn_from_outcome(outcome)
             return newd
         except Exception:
             return None
+
+    # ----------- apprentissage pondéré & dérive ----------
+    def _context_key(self, decision_trace: Dict[str, Any], post_ctx: Dict[str, Any]) -> Tuple[Any, ...]:
+        persona = (decision_trace or {}).get("persona_id") or getattr(self.arch, "persona_id", None)
+        channel = (decision_trace or {}).get("channel") or getattr(self.arch, "channel", None)
+        tactic = (decision_trace or {}).get("selected_tactic")
+        user_segment = post_ctx.get("user_segment") if isinstance(post_ctx, dict) else None
+        return (persona, channel, tactic, user_segment)
+
+    def _learn_from_outcome(self, outcome: Optional[Dict[str, Any]]) -> None:
+        if not outcome:
+            return
+        ctx_key = outcome.get("context_key")
+        try:
+            ctx_tuple = tuple(ctx_key) if ctx_key else tuple()
+        except TypeError:
+            ctx_tuple = tuple()
+        features_map = outcome.get("features") or {}
+        feature_vec = [float(features_map.get(name, 0.0)) for name in self._component_names]
+        reward = float(outcome.get("reward", 0.5))
+        confidence = float(outcome.get("confidence", 0.5))
+        self._weight_learner.update(ctx_tuple, feature_vec, reward, confidence)
+        self._update_component_stats(ctx_tuple, features_map, reward)
+
+    def _update_component_stats(self,
+                               ctx_key: Tuple[Any, ...],
+                               features: Dict[str, float],
+                               reward: float) -> None:
+        now = _now()
+        if not isinstance(features, dict):
+            return
+        for name, stats in self._component_stats.items():
+            val = float(features.get(name, 0.0)) * reward
+            fast = stats["fast"]
+            slow = stats["slow"]
+            stats["fast"] = fast + 0.35 * (val - fast)
+            stats["slow"] = slow + 0.08 * (val - slow)
+            drift = abs(stats["fast"] - stats["slow"])
+            if drift > 0.12 and (now - stats.get("last_drift", 0.0)) > 45.0:
+                # légère ré-exploration ciblée sur le composant qui dérive
+                self._weight_learner.inject_noise(ctx_key, component=name, strength=0.05)
+                stats["last_drift"] = now
