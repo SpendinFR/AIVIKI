@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import asdict
-from typing import Dict, Any, List, Tuple, Optional
+from dataclasses import asdict, dataclass
+from typing import Dict, Any, List, Tuple, Optional, Iterable
 
 import random
 import re
 import time
+import math
 
 from AGI_Evolutive.social.tactic_selector import TacticSelector
 from AGI_Evolutive.social.interaction_rule import ContextBuilder
@@ -15,8 +16,15 @@ from .nlg import NLGContext, apply_mai_bids_to_nlg, paraphrase_light, join_token
 from .style_critic import StyleCritic
 
 
+TOKEN_PATTERN = re.compile(r"[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’\-]{1,}")
+DIRECT_QUESTION_PATTERN = re.compile(r"\?\s*(?:$|[)\]»\"']?$)")
+
+
 def _tokens(s: str) -> set:
-    return set(re.findall(r"[A-Za-zÀ-ÿ]{3,}", (s or "").lower()))
+    """Return a normalized token set robust to accents/case."""
+
+    text = (s or "").casefold()
+    return {token for token in TOKEN_PATTERN.findall(text) if len(token) >= 3}
 
 
 def _build_language_state_snapshot(arch, ctx: Dict[str, Any]) -> Dict[str, Any]:
@@ -53,6 +61,105 @@ def _apply_action_hint(text: str, hint: str) -> str:
     return text
 
 
+class OnlineLogisticModel:
+    """Simple online logistic regression with bounded weights."""
+
+    def __init__(
+        self,
+        features: Iterable[str],
+        *,
+        learning_rate: float = 0.05,
+        weight_bounds: Tuple[float, float] = (-3.0, 3.0),
+        bias: float = 0.0,
+    ) -> None:
+        self.learning_rate = learning_rate
+        self.weight_bounds = weight_bounds
+        self.weights: Dict[str, float] = {name: 0.0 for name in features}
+        self.bias = bias
+
+    def _clip(self, value: float) -> float:
+        lo, hi = self.weight_bounds
+        return max(lo, min(hi, value))
+
+    def _linear(self, feats: Dict[str, float]) -> float:
+        score = self.bias
+        for name, value in feats.items():
+            score += self.weights.get(name, 0.0) * value
+        return score
+
+    def predict(self, feats: Dict[str, float]) -> float:
+        score = self._linear(feats)
+        try:
+            return 1.0 / (1.0 + math.exp(-score))
+        except OverflowError:
+            return 0.0 if score < 0 else 1.0
+
+    def update(self, feats: Dict[str, float], label: float, *, sample_weight: float = 1.0) -> None:
+        label = float(label)
+        pred = self.predict(feats)
+        grad = (pred - label) * sample_weight
+        lr = self.learning_rate
+        for name, value in feats.items():
+            w = self.weights.get(name, 0.0)
+            w -= lr * grad * value
+            self.weights[name] = self._clip(w)
+        self.bias = self._clip(self.bias - lr * grad)
+
+
+@dataclass
+class OrnamentDecision:
+    kind: str
+    decided: bool
+    probability: float
+    features: Dict[str, float]
+    meta: Dict[str, Any]
+
+
+class OnlineTextClassifier:
+    """Lightweight text openness classifier (online logistic)."""
+
+    FEATURE_NAMES = (
+        "bias",
+        "len_norm",
+        "has_question",
+        "exclam_density",
+        "emoji_density",
+        "has_bonjour",
+        "has_negation",
+        "contains_slash",
+    )
+
+    def __init__(self) -> None:
+        features = [name for name in self.FEATURE_NAMES if name != "bias"]
+        self.model = OnlineLogisticModel(features, learning_rate=0.03, weight_bounds=(-2.5, 2.5), bias=-0.3)
+
+    @staticmethod
+    def extract_features(text: str) -> Dict[str, float]:
+        text = (text or "").strip()
+        length = len(text)
+        words = len(text.split()) or 1
+        emojis = len(re.findall(r"[\U0001F300-\U0001FAFF]", text))
+        exclam = text.count("!")
+        features: Dict[str, float] = {
+            "len_norm": min(1.0, length / 220.0),
+            "has_question": 1.0 if re.search(r"\?\s*$", text) else 0.0,
+            "exclam_density": min(1.0, exclam / max(1, words)),
+            "emoji_density": min(1.0, emojis / max(1, words)),
+            "has_bonjour": 1.0 if re.search(r"\bbon(jour|soir)\b", text, re.IGNORECASE) else 0.0,
+            "has_negation": 1.0 if re.search(r"\b(pas|plus|jamais|rien)\b", text, re.IGNORECASE) else 0.0,
+            "contains_slash": 1.0 if "/" in text else 0.0,
+        }
+        return features
+
+    def predict(self, text: str) -> float:
+        feats = self.extract_features(text)
+        return self.model.predict(feats)
+
+    def update(self, text: str, liked: bool, weight: float = 1.0) -> None:
+        feats = self.extract_features(text)
+        self.model.update(feats, 1.0 if liked else 0.0, sample_weight=weight)
+
+
 class LanguageRenderer:
     def __init__(self, voice_profile, lexicon, ranker=None):
         self.voice = voice_profile
@@ -62,7 +169,7 @@ class LanguageRenderer:
         self._cooldown = {"past": 0.0, "colloc": 0.0}
         self._last_used = {"past": "", "colloc": ""}
 
-        # seuils réglables
+        # seuils réglables (valeurs par défaut, peuvent être apprises)
         self.THRESH = {
             "past_relevance": 0.25,   # pertinence mini lien passé
             "colloc_relevance": 0.20, # pertinence mini collocation
@@ -73,6 +180,62 @@ class LanguageRenderer:
 
         self.critic = StyleCritic(max_chars=1200)
         self._rand = random.Random()
+
+        # modèles adaptatifs
+        self._past_policy = OnlineLogisticModel(
+            [
+                "relevance",
+                "confidence",
+                "budget_ratio",
+                "cooldown",
+                "direct_question",
+                "duplication",
+                "openness",
+            ],
+            learning_rate=0.04,
+            weight_bounds=(-2.0, 2.5),
+            bias=0.1,
+        )
+        # initialise pour coller au comportement existant
+        self._past_policy.weights.update(
+            {
+                "relevance": 3.4,
+                "confidence": 0.9,
+                "budget_ratio": 0.4,
+                "cooldown": -0.8,
+                "direct_question": -1.2,
+                "duplication": -1.5,
+                "openness": 0.6,
+            }
+        )
+
+        self._colloc_policy = OnlineLogisticModel(
+            [
+                "relevance",
+                "confidence",
+                "budget_ratio",
+                "cooldown",
+                "randomized",
+                "openness",
+            ],
+            learning_rate=0.035,
+            weight_bounds=(-2.5, 2.5),
+            bias=-0.2,
+        )
+        self._colloc_policy.weights.update(
+            {
+                "relevance": 2.8,
+                "confidence": 0.6,
+                "budget_ratio": 0.5,
+                "cooldown": -1.1,
+                "randomized": 0.3,
+                "openness": 0.45,
+            }
+        )
+
+        self._text_classifier = OnlineTextClassifier()
+        self._pending_adaptive_events: List[OrnamentDecision] = []
+
 
     def rand(self) -> float:
         return self._rand.random()
@@ -190,29 +353,49 @@ class LanguageRenderer:
         budget = self._budget_chars(ctx)
 
         # Si la question est directe / l’utilisateur veut court → pas d’ornement
-        is_direct_question = "?" in (ctx.get("last_message") or "")
+        last_message = ctx.get("last_message") or ""
+        is_direct_question = bool(DIRECT_QUESTION_PATTERN.search(last_message))
+        openness_prob = self._text_classifier.predict(last_message)
         if conf < self.THRESH["conf_min"] or budget < 60 or (ctx.get("user_style") or {}).get("prefers_long") is False:
             return self._decorate_with_voice(base)
 
         # 1) Candidat lien au passé
-        past_txt, past_rel = self._pick_relevant_moment(ctx.get("last_message", ""), ctx)
+        past_txt, past_rel = self._pick_relevant_moment(last_message, ctx)
+        past_features = {
+            "relevance": float(past_rel),
+            "confidence": float(conf),
+            "budget_ratio": min(1.0, budget / 160.0),
+            "cooldown": float(cooldown["past"]),
+            "direct_question": 1.0 if is_direct_question else 0.0,
+            "duplication": 1.0 if past_txt == last_used["past"] else 0.0,
+            "openness": float(openness_prob),
+        }
+        past_policy_score = self._past_policy.predict(past_features) if past_txt else 0.0
         use_past = (
             past_txt
-            and past_rel >= self.THRESH["past_relevance"]
+            and past_rel >= self.THRESH["past_relevance"] * 0.8
             and cooldown["past"] <= 0.0
-            and past_txt != last_used["past"]
-            and not is_direct_question  # on évite de détourner une question courte
+            and past_policy_score >= 0.5
         )
 
         # 2) Candidat collocation aimée (faible proba, modulée par confiance)
         colloc_txt, colloc_rel = self._pick_collocation(ctx)
         p_try = self.THRESH["chance_colloc"] * (0.6 + 0.6 * conf)
+        colloc_features = {
+            "relevance": float(colloc_rel),
+            "confidence": float(conf),
+            "budget_ratio": min(1.0, budget / 160.0),
+            "cooldown": float(cooldown["colloc"]),
+            "randomized": self.rand(),
+            "openness": float(openness_prob),
+        }
+        colloc_policy_score = self._colloc_policy.predict(colloc_features) if colloc_txt else 0.0
         use_colloc = (
             colloc_txt
-            and random.random() < p_try
-            and colloc_rel >= self.THRESH["colloc_relevance"]
+            and (self.rand() < p_try or colloc_policy_score >= 0.65)
+            and colloc_rel >= self.THRESH["colloc_relevance"] * 0.85
             and cooldown["colloc"] <= 0.0
-            and colloc_txt != last_used["colloc"]
+            and colloc_policy_score >= 0.5
         )
 
         # Toujours max 1 ornement, priorité au passé s’il est pertinent
@@ -371,6 +554,16 @@ class LanguageRenderer:
                 if not dry_run:
                     self._cooldown = cooldown
                     self._last_used = last_used
+                    self._register_decision(
+                        OrnamentDecision(
+                            kind="past",
+                            decided=True,
+                            probability=past_policy_score,
+                            features=past_features,
+                            meta={"snippet_len": len(snippet)},
+                        ),
+                        ctx,
+                    )
                 return out  # on s’arrête ici
 
         if use_colloc:
@@ -382,6 +575,50 @@ class LanguageRenderer:
                 if not dry_run:
                     self._cooldown = cooldown
                     self._last_used = last_used
+                    self._register_decision(
+                        OrnamentDecision(
+                            kind="colloc",
+                            decided=True,
+                            probability=colloc_policy_score,
+                            features=colloc_features,
+                            meta={"snippet_len": len(snippet)},
+                        ),
+                        ctx,
+                    )
+            elif not dry_run:
+                self._register_decision(
+                    OrnamentDecision(
+                        kind="colloc",
+                        decided=False,
+                        probability=colloc_policy_score,
+                        features=colloc_features,
+                        meta={"reason": "budget", "snippet_len": len(snippet)},
+                    ),
+                    ctx,
+                )
+        elif not dry_run and colloc_txt:
+            self._register_decision(
+                OrnamentDecision(
+                    kind="colloc",
+                    decided=False,
+                    probability=colloc_policy_score,
+                    features=colloc_features,
+                    meta={"reason": "policy_block"},
+                ),
+                ctx,
+            )
+
+        if not dry_run and past_txt and not use_past:
+            self._register_decision(
+                OrnamentDecision(
+                    kind="past",
+                    decided=False,
+                    probability=past_policy_score,
+                    features=past_features,
+                    meta={"reason": "policy_block"},
+                ),
+                ctx,
+            )
 
         if not dry_run and ctx.get("omitted_content") and arch:
             payload = {
@@ -410,6 +647,16 @@ class LanguageRenderer:
         if not dry_run:
             self._cooldown = cooldown
             self._last_used = last_used
+            self._register_decision(
+                OrnamentDecision(
+                    kind="baseline",
+                    decided=True,
+                    probability=openness_prob,
+                    features=OnlineTextClassifier.extract_features(last_message),
+                    meta={"reason": "no_ornament"},
+                ),
+                ctx,
+            )
         return out
 
     # --- Génère K variantes (macros + paraphrases légères) ---
@@ -514,6 +761,11 @@ class LanguageRenderer:
 
         final_text, quote_meta = self._maybe_add_quote(best_text, ctx_local)
 
+        # ingest éventuel feedback post-rendu
+        feedback = ctx_local.get("ornament_feedback") or {}
+        if feedback:
+            self._apply_feedback(feedback, ctx_local)
+
         return {
             "text": final_text,
             "chosen": {
@@ -558,3 +810,71 @@ class LanguageRenderer:
                 text = f"{text}\n\n(Clin d’œil) {quote_used}".strip()
                 quote_meta = {"len": len(quote_used), "raw_len": len(quote)}
         return text, quote_meta
+
+    # ----- Adaptation & feedback -----
+    def _register_decision(self, decision: OrnamentDecision, ctx: Dict[str, Any]) -> None:
+        trace = {
+            "kind": decision.kind,
+            "decided": decision.decided,
+            "probability": decision.probability,
+            "features": decision.features,
+            "meta": decision.meta,
+            "ts": time.time(),
+        }
+        ctx.setdefault("language_trace", []).append(trace)
+        self._pending_adaptive_events.append(decision)
+        if len(self._pending_adaptive_events) > 64:
+            self._pending_adaptive_events = self._pending_adaptive_events[-32:]
+
+    def _apply_feedback(self, feedback: Dict[str, Any], ctx: Dict[str, Any]) -> None:
+        if not self._pending_adaptive_events:
+            return
+
+        decay = float(feedback.get("decay", 0.9))
+        satisfaction = feedback.get("satisfaction")
+        liked_override = feedback.get("liked")
+        user_message = ctx.get("last_message") or ""
+
+        weight = 1.0
+        if isinstance(satisfaction, (int, float)):
+            weight = max(0.1, min(2.0, (float(satisfaction) - 2.5) / 2.5))
+        if not math.isfinite(weight):
+            weight = 1.0
+
+        for event in self._pending_adaptive_events:
+            decision_feedback = feedback.get(event.kind)
+            if isinstance(decision_feedback, dict):
+                liked = decision_feedback.get("liked")
+                event_weight = float(decision_feedback.get("weight", weight))
+            else:
+                liked = decision_feedback
+                event_weight = weight
+
+            if liked is None and liked_override is not None:
+                liked = liked_override
+
+            if liked is None:
+                continue
+
+            if event.kind == "past":
+                self._past_policy.update(event.features, 1.0 if liked else 0.0, sample_weight=event_weight)
+            elif event.kind == "colloc":
+                self._colloc_policy.update(event.features, 1.0 if liked else 0.0, sample_weight=event_weight)
+
+        if liked_override is not None:
+            self._text_classifier.update(user_message, bool(liked_override), weight)
+
+        # légère décroissance des poids pour éviter dérive
+        if decay < 1.0:
+            for weights in (self._past_policy.weights, self._colloc_policy.weights):
+                for key in list(weights.keys()):
+                    weights[key] *= decay
+
+        self._pending_adaptive_events.clear()
+
+    def ingest_feedback(self, feedback: Dict[str, Any], ctx: Optional[Dict[str, Any]] = None) -> None:
+        """API externe pour appliquer un feedback manuel."""
+
+        context = ctx or {}
+        context.setdefault("last_message", context.get("last_user_msg", ""))
+        self._apply_feedback(feedback, context)
