@@ -8,6 +8,9 @@ import re
 import time
 import hashlib
 import math
+import unicodedata
+from collections import defaultdict
+
 
 from AGI_Evolutive.social.interaction_rule import (
     InteractionRule, Predicate, TacticSpec, ContextBuilder
@@ -18,16 +21,202 @@ def _now() -> float: return time.time()
 def _hash(s: str) -> str: return hashlib.sha1(s.encode("utf-8")).hexdigest()[:12]
 def clamp(x, a=0.0, b=1.0): return max(a, min(b, x))
 
+def _strip_accents(text: str) -> str:
+    if not text:
+        return ""
+    return "".join(c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c))
+
+
+def _normalize(text: str) -> str:
+    return _strip_accents(text.lower())
+
+
+class OnlineTextActClassifier:
+    """Simple online multinomial logistic classifier on hashed n-grams."""
+
+    def __init__(self, bucket_count: int = 2048, lr: float = 0.08, reg: float = 1e-5):
+        self.bucket_count = max(32, bucket_count)
+        self.lr = lr
+        self.reg = reg
+        self._weights: Dict[str, List[float]] = {}
+        self._bias: Dict[str, float] = defaultdict(float)
+        self._label_counts: Dict[str, int] = defaultdict(int)
+
+    # --------- feature extraction ---------
+    def _hash_feature(self, key: str) -> int:
+        return int(hashlib.sha1(key.encode("utf-8")).hexdigest(), 16) % self.bucket_count
+
+    def _vectorize(self, text: str) -> Dict[int, float]:
+        norm = _normalize(text)
+        tokens = re.findall(r"[\w']+", norm)
+        feats: Dict[int, float] = defaultdict(float)
+        # unigrams
+        for tok in tokens:
+            feats[self._hash_feature(f"uni:{tok}")] += 1.0
+        # bigrams
+        for i in range(len(tokens) - 1):
+            feats[self._hash_feature(f"bi:{tokens[i]}_{tokens[i+1]}")] += 1.0
+        # punctuation / emoji cues
+        feats[self._hash_feature("feat:question_mark")] += 1.0 if "?" in text else 0.0
+        feats[self._hash_feature("feat:exclam")] += text.count("!")
+        feats[self._hash_feature("feat:ellipsis")] += 1.0 if "..." in text else 0.0
+        feats[self._hash_feature("feat:emoji")] += len(re.findall(r"[\U0001F300-\U0001F6FF\u2600-\u26FF]", text))
+        feats[self._hash_feature("feat:length_bucket")] += min(5.0, len(text) / 80.0)
+        return feats
+
+    # --------- inference / training ---------
+    def _ensure_weights(self, label: str) -> None:
+        if label not in self._weights:
+            self._weights[label] = [0.0] * self.bucket_count
+            self._bias[label] = 0.0
+
+    def predict_with_conf(self, texts: List[str]) -> List[Tuple[str, float]]:
+        results: List[Tuple[str, float]] = []
+        for text in texts:
+            feats = self._vectorize(text)
+            best_label = "statement"
+            best_score = -float("inf")
+            for label, weights in self._weights.items():
+                z = self._bias[label]
+                for idx, val in feats.items():
+                    z += weights[idx] * val
+                if z > best_score:
+                    best_label = label
+                    best_score = z
+            # sigmoid for confidence; fallback to neutral 0.5 if no weights
+            conf = 1.0 / (1.0 + math.exp(-best_score)) if best_score != -float("inf") else 0.5
+            results.append((best_label, conf))
+        return results
+
+    def partial_fit(self, texts: List[str], labels: List[str]) -> None:
+        for text, label in zip(texts, labels):
+            if not label:
+                continue
+            feats = self._vectorize(text)
+            self._ensure_weights(label)
+            weights = self._weights[label]
+            bias = self._bias[label]
+            # one-vs-rest logistic update
+            z = bias + sum(weights[idx] * val for idx, val in feats.items())
+            pred = 1.0 / (1.0 + math.exp(-z))
+            target = 1.0
+            error = pred - target
+            for idx, val in feats.items():
+                weights[idx] -= self.lr * (error * val + self.reg * weights[idx])
+            self._bias[label] -= self.lr * error
+            # small negative update for other labels to keep separation
+            for other_label, other_weights in self._weights.items():
+                if other_label == label:
+                    continue
+                oz = self._bias[other_label] + sum(other_weights[idx] * val for idx, val in feats.items())
+                opred = 1.0 / (1.0 + math.exp(-oz))
+                oerror = opred - 0.0
+                for idx, val in feats.items():
+                    other_weights[idx] -= self.lr * (oerror * val + self.reg * other_weights[idx])
+                self._bias[other_label] -= self.lr * oerror
+            self._label_counts[label] += 1
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "bucket_count": self.bucket_count,
+            "lr": self.lr,
+            "reg": self.reg,
+            "weights": {lbl: list(wts) for lbl, wts in self._weights.items()},
+            "bias": dict(self._bias),
+            "label_counts": dict(self._label_counts),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> "OnlineTextActClassifier":
+        inst = cls(
+            bucket_count=int(payload.get("bucket_count", 2048)),
+            lr=float(payload.get("lr", 0.08)),
+            reg=float(payload.get("reg", 1e-5)),
+        )
+        weights = payload.get("weights") or {}
+        inst._weights = {lbl: list(vals) for lbl, vals in weights.items()}
+        inst._bias = defaultdict(float, payload.get("bias") or {})
+        inst._label_counts = defaultdict(int, payload.get("label_counts") or {})
+        return inst
+
+
+class OnlineScoreCalibrator:
+    """Online GLM used to adjust rule scores with mild non-linearity."""
+
+    def __init__(self, bucket_count: int = 256, lr: float = 0.05, reg: float = 1e-5):
+        self.bucket_count = max(32, bucket_count)
+        self.lr = lr
+        self.reg = reg
+        self._weights = [0.0] * self.bucket_count
+        self._bias = 0.0
+
+    def _hash_feature(self, key: str) -> int:
+        return int(hashlib.sha1(key.encode("utf-8")).hexdigest(), 16) % self.bucket_count
+
+    def _vectorize(self, metrics: Dict[str, float]) -> Dict[int, float]:
+        feats: Dict[int, float] = {}
+        for key, value in metrics.items():
+            feats[self._hash_feature(f"linear:{key}")] = value
+            feats[self._hash_feature(f"quad:{key}")] = value * value
+        # pairwise interactions
+        keys = list(metrics.keys())
+        for i in range(len(keys)):
+            for j in range(i + 1, len(keys)):
+                prod = metrics[keys[i]] * metrics[keys[j]]
+                feats[self._hash_feature(f"cross:{keys[i]}:{keys[j]}")] = prod
+        return feats
+
+    def predict(self, metrics: Dict[str, float], default_score: float) -> float:
+        feats = self._vectorize(metrics)
+        z = self._bias
+        for idx, val in feats.items():
+            z += self._weights[idx] * val
+        calibrated = 1.0 / (1.0 + math.exp(-z))
+        # Blend learned calibration with heuristic default for stability
+        return clamp(0.5 * calibrated + 0.5 * default_score)
+
+    def update(self, metrics: Dict[str, float], target: float) -> None:
+        feats = self._vectorize(metrics)
+        z = self._bias + sum(self._weights[idx] * val for idx, val in feats.items())
+        pred = 1.0 / (1.0 + math.exp(-z))
+        error = pred - clamp(target)
+        for idx, val in feats.items():
+            self._weights[idx] -= self.lr * (error * val + self.reg * self._weights[idx])
+        self._bias -= self.lr * error
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "bucket_count": self.bucket_count,
+            "lr": self.lr,
+            "reg": self.reg,
+            "weights": list(self._weights),
+            "bias": self._bias,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> "OnlineScoreCalibrator":
+        inst = cls(
+            bucket_count=int(payload.get("bucket_count", 256)),
+            lr=float(payload.get("lr", 0.05)),
+            reg=float(payload.get("reg", 1e-5)),
+        )
+        weights = payload.get("weights")
+        if isinstance(weights, list):
+            inst._weights = list(weights)
+        inst._bias = float(payload.get("bias", 0.0))
+        return inst
+
+
 # Détections rapides FR (tu peux enrichir sans rien casser)
-RE_QMARK = re.compile(r"\?\s*$")
-RE_COMPLIMENT = re.compile(r"\b(bravo|bien joué|trop fort|j'adore|excellent|génial|super)\b", re.I)
-RE_THANKS     = re.compile(r"\b(merci|thanks|thx)\b", re.I)
-RE_DISAGREE   = re.compile(r"\b(je ne suis pas d'accord|pas d'accord|non|je pense pas|pas sûr|bof)\b", re.I)
-RE_EXPLAIN    = re.compile(r"\b(parce que|car|en fait|la raison|explication|voilà pourquoi)\b", re.I)
-RE_CONFUSED   = re.compile(r"\b(je ne comprends pas|c'est quoi|hein\??|pardon\??|qu'est-ce que|explique)\b", re.I)
-RE_CLARIFY    = re.compile(r"\b(alors|donc|autrement dit|en clair|pour être clair|ça veut dire)\b", re.I)
-RE_INSINUATE  = re.compile(r"\b(si tu le dis|bien sûr+|okayyy+|hmm+|hum+|lol+|mdr+|ouais c'est ça)\b", re.I)
-RE_ACK        = re.compile(r"\b(ok|d'accord|noté|je vois|ça marche|compris)\b", re.I)
+RE_QMARK = re.compile(r"(\?\s*$|(?:est\s+(?:ce|ce\s+que|un|une|le|la|l'|ceci|cela))|(?:qui|quoi|ou|où|quand|comment|pourquoi)\b)", re.I)
+RE_COMPLIMENT = re.compile(r"\b(bravo|bien\s+jou[ée]|trop\s+fort|j[' ]adore|excellent|g[ée]nial|super|incroyable|magnifique)\b", re.I)
+RE_THANKS     = re.compile(r"\b(merci|thanks?|thx|gratitude|remercie)\b", re.I)
+RE_DISAGREE   = re.compile(r"\b(je\s+ne\s+suis\s+pas\s+d[' ]accord|pas\s+d[' ]accord|non|je\s+pense\s+pas|pas\s+s[uû]r|bof|je\s+refuse)\b", re.I)
+RE_EXPLAIN    = re.compile(r"\b(parce\s+que|car|en\s+fait|la\s+raison|explication|voil[aà]\s+pou?rquoi|j[' ]explique)\b", re.I)
+RE_CONFUSED   = re.compile(r"\b(je\s+ne\s+comprends?\s+pas|c[' ]est\s+quoi|hein+\??|pardon+\??|qu[' ]est[- ]ce\s+que|explique|signifie)\b", re.I)
+RE_CLARIFY    = re.compile(r"\b(alors|donc|autrement\s+dit|en\s+clair|pour\s+[êe]tre\s+clair|c[aç]a\s+veut\s+dire|clarifie|r[eé]sumons)\b", re.I)
+RE_INSINUATE  = re.compile(r"\b(si\s+tu\s+le\s+dis|bien\s+s[uû]r+|okay+y+|h?m+m+|lol+|mdr+|ouais\s+c[' ]est\s+c[aç]a|genre)\b", re.I)
+RE_ACK        = re.compile(r"\b(ok(?:ay)?|d[' ]accord|not[eé]|je\s+vois|c[aç]a\s+marche|compris|vu|entendu)\b", re.I)
 
 # ---------------------- structures ----------------------
 @dataclass
@@ -46,6 +235,46 @@ class InteractionMiner:
     """
     def __init__(self, arch):
         self.arch = arch
+        self._fallback_classifier = self._init_fallback_classifier()
+        self._score_calibrator = self._init_score_calibrator()
+
+    def _init_fallback_classifier(self) -> OnlineTextActClassifier:
+        existing = getattr(self.arch, "_interaction_miner_act_classifier", None)
+        if isinstance(existing, OnlineTextActClassifier):
+            return existing
+        state = getattr(self.arch, "_interaction_miner_act_classifier_state", None)
+        clf = OnlineTextActClassifier.from_dict(state) if isinstance(state, dict) else OnlineTextActClassifier()
+        setattr(self.arch, "_interaction_miner_act_classifier", clf)
+        return clf
+
+    def _init_score_calibrator(self) -> OnlineScoreCalibrator:
+        existing = getattr(self.arch, "_interaction_miner_score_calibrator", None)
+        if isinstance(existing, OnlineScoreCalibrator):
+            return existing
+        state = getattr(self.arch, "_interaction_miner_score_calibrator_state", None)
+        calibrator = OnlineScoreCalibrator.from_dict(state) if isinstance(state, dict) else OnlineScoreCalibrator()
+        setattr(self.arch, "_interaction_miner_score_calibrator", calibrator)
+        return calibrator
+
+    def _persist_learners(self) -> None:
+        try:
+            setattr(self.arch, "_interaction_miner_act_classifier_state", self._fallback_classifier.to_dict())
+            setattr(self.arch, "_interaction_miner_score_calibrator_state", self._score_calibrator.to_dict())
+            mem = getattr(self.arch, "memory", None)
+            if mem and hasattr(mem, "update_memory"):
+                payload = {
+                    "kind": "interaction_miner_models",
+                    "act_classifier": self._fallback_classifier.to_dict(),
+                    "score_calibrator": self._score_calibrator.to_dict(),
+                    "ts": _now(),
+                }
+                try:
+                    mem.update_memory(payload)
+                except Exception:
+                    if hasattr(mem, "add_memory"):
+                        mem.add_memory(payload)
+        except Exception:
+            pass
 
     # ----------- API publique -----------
     def mine_file(self, path: str) -> List[InteractionRule]:
@@ -86,10 +315,25 @@ class InteractionMiner:
         support = len(getattr(rule, "evidence", []) or [])
         predicate_weight = sum(float(getattr(pred, "confidence", 0.6) or 0.6) for pred in rule.predicates)
         predicate_weight = predicate_weight / max(1, len(rule.predicates)) if rule.predicates else 0.5
+        provenance = getattr(rule, "provenance", {}) or {}
+        last_outcome = (provenance.get("evidence") or {}).get("auto_score")
+
         # heuristique: plus de support & predicates cohérents => meilleur score
         base = 0.45 + (conf * 0.35) + (predicate_weight * 0.2)
         support_boost = math.tanh(support / 4.0) * 0.1
-        score = max(0.0, min(1.0, base + support_boost))
+        heuristic_score = clamp(base + support_boost)
+
+        calibrator_metrics = {
+            "conf": conf,
+            "support": float(support),
+            "predicate_weight": predicate_weight,
+            "base": base,
+            "support_boost": support_boost,
+            "evidence_len": float(len((provenance.get("evidence_multi") or []))),
+            "has_prev_outcome": 1.0 if last_outcome is not None else 0.0,
+        }
+        score = self._score_calibrator.predict(calibrator_metrics, heuristic_score)
+        self._score_calibrator.update(calibrator_metrics, heuristic_score if last_outcome is None else float(last_outcome))
         risk = max(0.0, 1.0 - score)
         action = "deploy" if score >= 0.62 else ("review" if score >= 0.5 else "hold")
         counterexamples: List[Dict[str, Any]] = []
@@ -109,6 +353,7 @@ class InteractionMiner:
             "timestamp": now,
             "counterexamples": counterexamples,
         }
+        self._persist_learners()
         return outcome
 
     def _persist_evaluation(self, rule: InteractionRule, outcome: Dict[str, Any], arch) -> None:
@@ -191,29 +436,65 @@ class InteractionMiner:
         if used_external:
             return
 
-        # Heuristique locale
+        # Fallback classifier pre-pass
+        fallback = self._fallback_classifier
+        if fallback and turns:
+            try:
+                texts = [tr.text for tr in turns]
+                for t, (label, conf) in zip(turns, fallback.predict_with_conf(texts)):
+                    if conf >= 0.55 and not t.act:
+                        t.act = label
+            except Exception:
+                pass
+
+        # Heuristique locale enrichie
+        fallback_fit_texts: List[str] = []
+        fallback_fit_labels: List[str] = []
         for t in turns:
             low = t.text.lower()
-            if RE_QMARK.search(low):
-                t.act = t.act or "question"
-            elif RE_COMPLIMENT.search(low):
-                t.act = t.act or "compliment"
-            elif RE_DISAGREE.search(low):
-                t.act = t.act or "disagreement"
-            elif RE_CONFUSED.search(low):
-                t.act = t.act or "confusion"
-            elif RE_INSINUATE.search(low):
-                t.act = t.act or "insinuation"
-            elif RE_THANKS.search(low):
-                t.act = t.act or "thanks"
-            elif RE_ACK.search(low):
-                t.act = t.act or "ack"
-            elif RE_EXPLAIN.search(low):
-                t.act = t.act or "explain"
-            elif RE_CLARIFY.search(low):
-                t.act = t.act or "clarify"
+            norm = _normalize(t.text)
+            assigned_before = t.act
+            heuristic_hit = False
+            if RE_QMARK.search(t.text) or RE_QMARK.search(norm):
+                t.act = "question"
+                heuristic_hit = True
+            elif RE_COMPLIMENT.search(low) or RE_COMPLIMENT.search(norm):
+                t.act = "compliment"
+                heuristic_hit = True
+            elif RE_DISAGREE.search(low) or RE_DISAGREE.search(norm):
+                t.act = "disagreement"
+                heuristic_hit = True
+            elif RE_CONFUSED.search(low) or RE_CONFUSED.search(norm):
+                t.act = "confusion"
+                heuristic_hit = True
+            elif RE_INSINUATE.search(low) or RE_INSINUATE.search(norm):
+                t.act = "insinuation"
+                heuristic_hit = True
+            elif RE_THANKS.search(low) or RE_THANKS.search(norm):
+                t.act = "thanks"
+                heuristic_hit = True
+            elif RE_ACK.search(low) or RE_ACK.search(norm):
+                t.act = "ack"
+                heuristic_hit = True
+            elif RE_EXPLAIN.search(low) or RE_EXPLAIN.search(norm):
+                t.act = "explain"
+                heuristic_hit = True
+            elif RE_CLARIFY.search(low) or RE_CLARIFY.search(norm):
+                t.act = "clarify"
+                heuristic_hit = True
             else:
                 t.act = t.act or "statement"
+
+            if heuristic_hit or (assigned_before and assigned_before != "statement"):
+                fallback_fit_texts.append(t.text)
+                fallback_fit_labels.append(t.act)
+
+        if fallback and fallback_fit_texts:
+            try:
+                fallback.partial_fit(fallback_fit_texts, fallback_fit_labels)
+            except Exception:
+                pass
+        self._persist_learners()
 
     # ----------- Extraction de règles (paires + implicatures) ----------
     def _extract_rules(self, turns: List[DialogueTurn], source: str) -> List[InteractionRule]:
