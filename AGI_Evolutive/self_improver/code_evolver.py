@@ -4,13 +4,17 @@ import ast
 import contextlib
 import difflib
 import importlib
+import json
 import random
 import shutil
 import tempfile
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
 
 from .quality import QualityGateRunner
 
@@ -23,15 +27,87 @@ class CodePatch:
     original_source: str
     patched_source: str
     summary: str
+    target_id: str = ""
+
+
+class OnlineHeuristicLearner:
+    """Simple online learner to adapt heuristic weights from feedback."""
+
+    def __init__(
+        self,
+        key: str,
+        state: Optional[Dict[str, Any]] = None,
+        *,
+        lower: float = 0.0,
+        upper: float = 2.0,
+    ) -> None:
+        self.key = key
+        self.lower = lower
+        self.upper = upper
+        state = state or {}
+        span = max(upper - lower, 1e-6)
+        self.mu: float = float(state.get("mu", (lower + upper) / 2))
+        self.sigma: float = float(state.get("sigma", span / 4))
+        self.learning_rate: float = float(state.get("lr", 0.2))
+        self.successes: int = int(state.get("success", 0))
+        self.failures: int = int(state.get("failure", 0))
+        self._last_proposal: Optional[Dict[str, float]] = None
+
+    @property
+    def confidence(self) -> float:
+        total = self.successes + self.failures + 1
+        return self.successes / total
+
+    def propose(self, current_value: float) -> float:
+        center = 0.7 * self.mu + 0.3 * current_value
+        candidate = random.gauss(center, self.sigma)
+        candidate = max(self.lower, min(self.upper, candidate))
+        self._last_proposal = {
+            "original": float(current_value),
+            "candidate": float(candidate),
+        }
+        return candidate
+
+    def update(self, success: bool) -> None:
+        if not self._last_proposal:
+            return
+        candidate = self._last_proposal["candidate"]
+        error = candidate - self.mu
+        direction = 1.0 if success else -1.0
+        self.mu = max(self.lower, min(self.upper, self.mu + self.learning_rate * direction * error))
+        span = max(self.upper - self.lower, 1e-6)
+        adjust = 0.85 if success else 1.15
+        self.sigma = min(max(self.sigma * adjust, span * 0.02), span)
+        if success:
+            self.successes += 1
+        else:
+            self.failures += 1
+        self._last_proposal = None
+
+    def to_state(self) -> Dict[str, Any]:
+        return {
+            "mu": self.mu,
+            "sigma": self.sigma,
+            "lr": self.learning_rate,
+            "success": self.successes,
+            "failure": self.failures,
+        }
 
 
 class _ScoreHeuristicTweaker(ast.NodeTransformer):
     """Mutate numeric constants in the abduction score heuristic."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        learner: Optional[OnlineHeuristicLearner] = None,
+        *,
+        learner_key: Optional[str] = None,
+    ) -> None:
         self._context: List[str] = []
         self._changed: bool = False
         self._metadata: Dict[str, Any] = {}
+        self._learner = learner
+        self._learner_key = learner_key or (learner.key if learner else None)
 
     @property
     def metadata(self) -> Dict[str, Any]:
@@ -53,8 +129,11 @@ class _ScoreHeuristicTweaker(ast.NodeTransformer):
         original = float(node.value)
         if original <= 0.0 or original > 2.0:
             return node
-        delta = random.uniform(-0.08, 0.08)
-        candidate = max(0.0, min(2.0, original + delta))
+        if self._learner:
+            candidate = self._learner.propose(original)
+        else:
+            delta = random.uniform(-0.08, 0.08)
+            candidate = max(0.0, min(2.0, original + delta))
         if candidate == original:
             return node
         self._changed = True
@@ -64,7 +143,14 @@ class _ScoreHeuristicTweaker(ast.NodeTransformer):
             "from": original,
             "to": rounded,
             "delta": round(rounded - original, 3),
+            "learner_key": self._learner_key,
         }
+        if self._learner:
+            self._metadata["confidence"] = round(self._learner.confidence, 4)
+            self._metadata["proposal"] = {
+                "original": round(original, 4),
+                "candidate": round(candidate, 4),
+            }
         return ast.copy_location(ast.Constant(value=rounded), node)
 
 
@@ -82,28 +168,176 @@ class CodeEvolver:
         self.sandbox = sandbox
         self.quality = quality
         self.arch_factory = arch_factory
-        self._targets: List[Dict[str, str]] = [
+        self._state_dir = self.repo_root / "data" / "self_improve"
+        self._state_dir.mkdir(parents=True, exist_ok=True)
+        self._state_path = self._state_dir / "code_evolver_state.json"
+        self._history_path = self._state_dir / "code_evolver_history.jsonl"
+        self._state: Dict[str, Any] = self._load_state()
+        self._targets: List[Dict[str, str]] = self._initialise_targets()
+        self._bandit_state: Dict[str, Dict[str, int]] = dict(self._state.get("bandit", {}))
+        self._learners: Dict[str, OnlineHeuristicLearner] = {}
+        for target in self._targets:
+            learner_key = target.get("learner_key")
+            if not learner_key:
+                continue
+            self._learners[learner_key] = OnlineHeuristicLearner(
+                learner_key, self._state.get("learners", {}).get(learner_key, {})
+            )
+
+    # ------------------------------------------------------------------
+    def _initialise_targets(self) -> List[Dict[str, str]]:
+        defaults: List[Dict[str, str]] = [
             {
-                "file": "reasoning/abduction.py",
+                "id": "reasoning_abduction_score",
+                "file": "AGI_Evolutive/reasoning/abduction.py",
                 "module": "AGI_Evolutive.reasoning.abduction",
+                "learner_key": "AGI_Evolutive.reasoning.abduction._score",
+                "summary": "Ajustement automatique d'un poids heuristique dans abduction._score",
             }
         ]
+        resolved: List[Dict[str, str]] = []
+        for target in defaults:
+            file_path = self.repo_root / target["file"]
+            if not file_path.exists() and target["file"].startswith("AGI_Evolutive/"):
+                alt = target["file"].split("AGI_Evolutive/", 1)[1]
+                if (self.repo_root / alt).exists():
+                    target = dict(target)
+                    target["file"] = alt
+                    file_path = self.repo_root / target["file"]
+            if file_path.exists():
+                resolved.append(target)
+
+        config_path = self.repo_root / "configs" / "evolution_targets.json"
+        if config_path.exists():
+            try:
+                with open(config_path, "r", encoding="utf-8") as handle:
+                    config_targets = json.load(handle)
+            except Exception:
+                config_targets = []
+            for entry in config_targets or []:
+                if not isinstance(entry, dict):
+                    continue
+                file_rel = entry.get("file")
+                module = entry.get("module")
+                if not file_rel or not module:
+                    continue
+                file_path = self.repo_root / str(file_rel)
+                if not file_path.exists():
+                    continue
+                target: Dict[str, str] = {
+                    "id": str(entry.get("id") or file_rel),
+                    "file": str(file_rel),
+                    "module": str(module),
+                }
+                if entry.get("learner_key"):
+                    target["learner_key"] = str(entry["learner_key"])
+                if entry.get("summary"):
+                    target["summary"] = str(entry["summary"])
+                resolved.append(target)
+
+        unique: Dict[str, Dict[str, str]] = {}
+        for target in resolved:
+            unique[target.get("id", target["file"])] = target
+        final_targets = list(unique.values())
+        if not final_targets:
+            raise RuntimeError("No valid targets configured for CodeEvolver")
+        return final_targets
+
+    def _load_state(self) -> Dict[str, Any]:
+        if not self._state_path.exists():
+            return {}
+        try:
+            with open(self._state_path, "r", encoding="utf-8") as handle:
+                return json.load(handle)
+        except Exception:
+            return {}
+
+    def _save_state(self) -> None:
+        payload = {
+            "bandit": self._bandit_state,
+            "learners": {k: learner.to_state() for k, learner in self._learners.items()},
+        }
+        with open(self._state_path, "w", encoding="utf-8") as handle:
+            json.dump(json_sanitize(payload), handle, indent=2, sort_keys=True)
+
+    def _select_target(self) -> Dict[str, str]:
+        best: Optional[Dict[str, str]] = None
+        best_score = -1.0
+        for target in self._targets:
+            stats = self._bandit_state.get(target.get("id", target["file"]), {})
+            success = int(stats.get("success", 0))
+            failure = int(stats.get("failure", 0))
+            sample = random.betavariate(success + 1, failure + 1)
+            if sample > best_score or best is None:
+                best_score = sample
+                best = target
+        return best or self._targets[0]
+
+    def _update_bandit_state(self, target_id: Optional[str], success: bool) -> None:
+        if not target_id:
+            return
+        stats = self._bandit_state.setdefault(target_id, {"success": 0, "failure": 0})
+        if success:
+            stats["success"] = int(stats.get("success", 0)) + 1
+        else:
+            stats["failure"] = int(stats.get("failure", 0)) + 1
+
+    def _update_learner(self, metadata: Dict[str, Any], success: bool) -> None:
+        learner_key = metadata.get("learner_key") if metadata else None
+        if not learner_key:
+            return
+        learner = self._learners.get(learner_key)
+        if learner is None:
+            learner = OnlineHeuristicLearner(learner_key)
+            self._learners[learner_key] = learner
+        learner.update(success)
+
+    def _record_patch_outcome(self, patch: CodePatch, report: Dict[str, Any]) -> None:
+        entry = {
+            "timestamp": time.time(),
+            "patch_id": patch.patch_id,
+            "target_id": patch.target_id or report.get("metadata", {}).get("target_id"),
+            "module": patch.module_name,
+            "file": self._relative_to_repo(patch.target_file),
+            "summary": report.get("summary"),
+            "passed": report.get("passed", False),
+            "quality_passed": report.get("quality", {}).get("passed"),
+            "security_passed": report.get("evaluation", {}).get("security", {}).get("passed"),
+            "canary_passed": report.get("canary", {}).get("passed"),
+            "metadata": report.get("metadata", {}),
+        }
+        with open(self._history_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(json_sanitize(entry)) + "\n")
+        target_id = patch.target_id or report.get("metadata", {}).get("target_id")
+        self._update_bandit_state(target_id, report.get("passed", False))
+        self._update_learner(report.get("metadata", {}), report.get("passed", False))
+        self._save_state()
 
     # ------------------------------------------------------------------
     def _load_source(self, file_path: Path) -> str:
         with open(file_path, "r", encoding="utf-8") as handle:
             return handle.read()
 
-    def _patch_source(self, source: str) -> Optional[CodePatch]:
+    def _relative_to_repo(self, path: Path) -> str:
+        try:
+            return str(path.relative_to(self.repo_root))
+        except ValueError:
+            return str(path)
+
+    def _patch_source(self, source: str, target: Dict[str, str]) -> Optional[CodePatch]:
         tree = ast.parse(source)
-        mutator = _ScoreHeuristicTweaker()
+        learner_key = target.get("learner_key")
+        mutator = _ScoreHeuristicTweaker(
+            self._learners.get(learner_key), learner_key=learner_key
+        )
         patched = mutator.visit(tree)
         if not mutator.metadata:
             return None
         ast.fix_missing_locations(patched)
         patched_source = ast.unparse(patched)
-        summary = (
-            "Ajustement automatique d'un poids heuristique dans abduction._score"
+        summary = target.get(
+            "summary",
+            "Ajustement automatique d'un poids heuristique dans abduction._score",
         )
         patch = CodePatch(
             patch_id=str(uuid.uuid4()),
@@ -113,8 +347,12 @@ class CodeEvolver:
             patched_source=patched_source,
             summary=summary,
         )
+        patch.target_id = target.get("id", "")
         # Attach metadata onto object for reporting
-        setattr(patch, "_metadata", mutator.metadata)
+        metadata = dict(mutator.metadata)
+        if patch.target_id and "target_id" not in metadata:
+            metadata["target_id"] = patch.target_id
+        setattr(patch, "_metadata", metadata)
         return patch
 
     def _prepare_patch(self, target: Dict[str, str]) -> Optional[CodePatch]:
@@ -122,7 +360,7 @@ class CodeEvolver:
         if not path.exists():
             return None
         source = self._load_source(path)
-        candidate = self._patch_source(source)
+        candidate = self._patch_source(source, target)
         if not candidate:
             return None
         candidate.target_file = path
@@ -132,7 +370,7 @@ class CodeEvolver:
     def generate_candidates(self, n: int = 2) -> List[CodePatch]:
         candidates: List[CodePatch] = []
         for _ in range(max(1, n)):
-            target = random.choice(self._targets)
+            target = self._select_target()
             patch = self._prepare_patch(target)
             if patch:
                 candidates.append(patch)
@@ -206,34 +444,45 @@ class CodeEvolver:
     ) -> Dict[str, Any]:
         lint_report = self._lint_patch(patch)
         static_report = self._static_analysis(patch)
+        diff = self._build_diff(patch)
+        metadata = getattr(patch, "_metadata", {})
+        file_rel = self._relative_to_repo(patch.target_file)
+        base_report: Dict[str, Any] = {
+            "lint": lint_report,
+            "static": static_report,
+            "diff": diff,
+            "summary": patch.summary,
+            "metadata": metadata,
+            "module": patch.module_name,
+            "file": file_rel,
+            "target_id": patch.target_id,
+        }
         if not lint_report["passed"] or not static_report["passed"]:
-            return {
+            report = {
+                **base_report,
                 "passed": False,
-                "lint": lint_report,
-                "static": static_report,
+                "quality": {},
+                "evaluation": {},
+                "canary": {},
             }
+            self._record_patch_outcome(patch, report)
+            return report
 
         with self._apply_patch(patch):
             quality_report = self.quality.run({})
             evaluation = self.sandbox.run_all({})
             canary = self.sandbox.run_canary({}, baseline_metrics or {})
 
-        diff = self._build_diff(patch)
         report = {
-            "passed": quality_report["passed"]
-            and evaluation.get("security", {}).get("passed", True)
-            and canary.get("passed", False),
-            "lint": lint_report,
-            "static": static_report,
+            **base_report,
             "quality": quality_report,
             "evaluation": evaluation,
             "canary": canary,
-            "diff": diff,
-            "summary": patch.summary,
-            "metadata": getattr(patch, "_metadata", {}),
-            "module": patch.module_name,
-            "file": str(patch.target_file.relative_to(self.repo_root)),
+            "passed": quality_report.get("passed", False)
+            and evaluation.get("security", {}).get("passed", True)
+            and canary.get("passed", False),
         }
+        self._record_patch_outcome(patch, report)
         return report
 
     # ------------------------------------------------------------------
@@ -257,10 +506,11 @@ class CodeEvolver:
     def serialise_patch(self, patch: CodePatch) -> Dict[str, Any]:
         return {
             "patch_id": patch.patch_id,
-            "file": str(patch.target_file.relative_to(self.repo_root)),
+            "file": self._relative_to_repo(patch.target_file),
             "module": patch.module_name,
             "patched_source": patch.patched_source,
             "summary": patch.summary,
             "metadata": getattr(patch, "_metadata", {}),
             "diff": self._build_diff(patch),
+            "target_id": patch.target_id,
         }
