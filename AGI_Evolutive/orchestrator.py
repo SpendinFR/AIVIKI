@@ -28,7 +28,7 @@ from AGI_Evolutive.cognition.pipelines_registry import (
 )
 from AGI_Evolutive.core.config import load_config
 from AGI_Evolutive.core.decision_journal import DecisionJournal
-from AGI_Evolutive.core.evaluation import unified_priority
+from AGI_Evolutive.core.evaluation import get_last_priority_token, unified_priority
 from AGI_Evolutive.core.reasoning_ledger import ReasoningLedger
 from AGI_Evolutive.core.policy import PolicyEngine
 from AGI_Evolutive.core.selfhood_engine import SelfhoodEngine
@@ -1370,6 +1370,9 @@ class Orchestrator:
                         uncertainty=trigger.meta.get("uncertainty", 0.0),
                         valence=getattr(emo, "valence", 0.0) if emo else 0.0,
                     )
+                    priority_token = get_last_priority_token()
+                    if priority_token:
+                        ctx.setdefault("scratch", {})["priority_token"] = priority_token
                     ctx["scratch"]["priority"] = prio
                 elif stg is Stage.REFLECT:
                     if monitor:
