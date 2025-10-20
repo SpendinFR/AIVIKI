@@ -1,9 +1,14 @@
+import math
+import random
 import re
 import resource
+import statistics
 import time
+import unicodedata
 from contextlib import nullcontext
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from collections import deque
+from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
 
 from AGI_Evolutive.cognition.context_inference import infer_where_and_apply
 from AGI_Evolutive.cognition.evolution_manager import EvolutionManager
@@ -50,7 +55,7 @@ from AGI_Evolutive.runtime.job_manager import JobManager
 
 
 # --- seuils / cadence (tunable) ---
-_SJ_CONF = {
+_DEFAULT_SJ_CONF = {
     "surprise_threshold": 0.50,
     "contradiction_boost": 0.10,
     "heartbeat_every": 10,
@@ -59,6 +64,264 @@ _SJ_CONF = {
     "surprise_importance": 0.70,
     "surprise_immediacy": 0.60,
 }
+
+
+def _normalize_text(text: str) -> str:
+    base = unicodedata.normalize("NFKD", text or "")
+    return "".join(ch for ch in base if not unicodedata.combining(ch)).lower()
+
+
+class OnlinePlattCalibrator:
+    def __init__(self, lr: float = 0.05, drift: float = 0.01) -> None:
+        self._a = 1.0
+        self._b = 0.0
+        self._lr = lr
+        self._drift = drift
+
+    def calibrate(self, score: float) -> float:
+        z = self._a * float(score) + self._b
+        return 1.0 / (1.0 + math.exp(-z))
+
+    def update(self, score: float, target: float) -> None:
+        score = float(score)
+        target = max(0.0, min(1.0, float(target)))
+        pred = self.calibrate(score)
+        grad = target - pred
+        self._a = (1.0 - self._drift) * self._a + self._lr * grad * score
+        self._b = (1.0 - self._drift) * self._b + self._lr * grad
+
+
+class DiscreteThompsonSampler:
+    def __init__(self, candidates: Iterable[Dict[str, Any]], drift: float = 0.02) -> None:
+        self._stats: Dict[int, Dict[str, Any]] = {}
+        for idx, candidate in enumerate(candidates):
+            self._stats[idx] = {
+                "candidate": dict(candidate),
+                "alpha": 1.0,
+                "beta": 1.0,
+            }
+        self._drift = drift
+        self._last_choice: Optional[int] = None
+
+    def sample(self) -> Dict[str, Any]:
+        best_idx: Optional[int] = None
+        best_sample = -1.0
+        for idx, info in self._stats.items():
+            draw = random.betavariate(max(1e-3, info["alpha"]), max(1e-3, info["beta"]))
+            if draw > best_sample:
+                best_sample = draw
+                best_idx = idx
+        if best_idx is None:
+            best_idx = next(iter(self._stats))
+        self._last_choice = best_idx
+        return self._stats[best_idx]["candidate"]
+
+    def update(self, reward: float) -> None:
+        if self._last_choice is None:
+            return
+        reward = max(0.0, min(1.0, float(reward)))
+        info = self._stats[self._last_choice]
+        alpha = info["alpha"]
+        beta = info["beta"]
+        forget = 1.0 - self._drift
+        info["alpha"] = max(1e-3, forget * alpha + reward)
+        info["beta"] = max(1e-3, forget * beta + (1.0 - reward))
+
+
+class AdaptiveEMA:
+    def __init__(self, betas: Iterable[float], drift: float = 0.02) -> None:
+        self._candidates = [
+            {"beta": max(0.0, min(0.99, float(beta)))} for beta in betas
+        ]
+        self._sampler = DiscreteThompsonSampler(self._candidates, drift=drift)
+        self._value = 0.0
+        self._corr_buffer: Deque[Tuple[float, float]] = deque(maxlen=128)
+
+    @property
+    def value(self) -> float:
+        return self._value
+
+    def update(self, new_value: float, reward: float) -> float:
+        candidate = self._sampler.sample()
+        beta = candidate["beta"]
+        self._value = beta * self._value + (1.0 - beta) * float(new_value)
+        self._sampler.update(reward)
+        self._corr_buffer.append((self._value, reward))
+        return self._value
+
+    def correlation(self) -> float:
+        if len(self._corr_buffer) < 4:
+            return 0.0
+        xs, ys = zip(*self._corr_buffer)
+        try:
+            mean_x = statistics.fmean(xs)
+            mean_y = statistics.fmean(ys)
+            cov = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+            var_x = sum((x - mean_x) ** 2 for x in xs)
+            var_y = sum((y - mean_y) ** 2 for y in ys)
+            denom = math.sqrt(max(var_x, 1e-9) * max(var_y, 1e-9))
+            if denom <= 0.0:
+                return 0.0
+            return cov / denom
+        except statistics.StatisticsError:
+            return 0.0
+
+
+class OnlineBoundedLinear:
+    def __init__(
+        self,
+        bounds: Tuple[float, float],
+        lr: float = 0.05,
+        drift: float = 0.01,
+    ) -> None:
+        self._bounds = bounds
+        self._weights: Dict[str, float] = {"bias": 0.0}
+        self._lr = lr
+        self._drift = drift
+
+    def _sigmoid(self, x: float) -> float:
+        return 1.0 / (1.0 + math.exp(-x))
+
+    def predict(self, features: Dict[str, float]) -> float:
+        score = self._weights.get("bias", 0.0)
+        for key, value in features.items():
+            score += self._weights.get(key, 0.0) * value
+        prob = self._sigmoid(score)
+        lo, hi = self._bounds
+        return lo + (hi - lo) * prob
+
+    def update(self, features: Dict[str, float], target: float) -> float:
+        target = max(0.0, min(1.0, float(target)))
+        pred = self.predict(features)
+        lo, hi = self._bounds
+        if hi == lo:
+            return pred
+        norm_pred = (pred - lo) / (hi - lo)
+        error = target - norm_pred
+        for key, value in {"bias": 1.0, **features}.items():
+            prev = self._weights.get(key, 0.0)
+            self._weights[key] = (1.0 - self._drift) * prev + self._lr * error * value
+        return self.predict(features)
+
+
+class AdaptiveSJConfig:
+    def __init__(self, base: Dict[str, float]) -> None:
+        self._base = dict(base)
+        self._importance_models = {
+            "surprise_importance": OnlineBoundedLinear((0.2, 1.0)),
+            "surprise_immediacy": OnlineBoundedLinear((0.1, 1.0)),
+            "heartbeat_importance": OnlineBoundedLinear((0.1, 0.9)),
+            "heartbeat_immediacy": OnlineBoundedLinear((0.05, 0.8)),
+            "contradiction_boost": OnlineBoundedLinear((0.0, 0.5)),
+        }
+        candidates = []
+        for thr in (0.35, 0.45, 0.55, 0.65):
+            for hb_every in (6, 8, 10, 12):
+                candidates.append(
+                    {
+                        "surprise_threshold": thr,
+                        "heartbeat_every": hb_every,
+                    }
+                )
+        self._bandit = DiscreteThompsonSampler(candidates, drift=0.02)
+        self._last_features: Dict[str, float] = {}
+        self._last_reward: float = 0.5
+
+    def current_config(self) -> Dict[str, float]:
+        config = dict(self._base)
+        config.update(self._bandit.sample())
+        for key, model in self._importance_models.items():
+            config[key] = model.predict(self._last_features) if self._last_features else self._base[key]
+        return config
+
+    def update(self, features: Dict[str, float], reward: float) -> Dict[str, float]:
+        self._last_features = {k: float(v) for k, v in features.items()}
+        reward = max(0.0, min(1.0, float(reward)))
+        self._last_reward = reward
+        self._bandit.update(reward)
+        for key, model in self._importance_models.items():
+            model.update(self._last_features, reward)
+        return self.current_config()
+
+    def last_reward(self) -> float:
+        return self._last_reward
+
+
+class FallbackIntentClassifier:
+    def __init__(self) -> None:
+        self._question_pattern = re.compile(r"\?|❓|❔")
+        self._command_pattern = re.compile(
+            r"\b(fais|execute|lan[cç]e|cr[ée]e?s?|ajoute|donne|r[ée]dige|fourni[st]|analyse)\b",
+            flags=re.IGNORECASE,
+        )
+        self._greeting_pattern = re.compile(
+            r"\b(bonjour|salut|coucou|hey|bonso[ir]+|hello)\b",
+            flags=re.IGNORECASE,
+        )
+        self._thanks_pattern = re.compile(r"\b(merci|thanks|thx)\b", flags=re.IGNORECASE)
+        self._bye_pattern = re.compile(r"\b(au revoir|bye|ciao|a\s+plus)\b", flags=re.IGNORECASE)
+        self._danger_pattern = re.compile(
+            r"\b(danger|alerte|menace|attaque|panique)\b",
+            flags=re.IGNORECASE,
+        )
+        self._feedback_pattern = re.compile(
+            r"\b(bien|pas mal|super|nul|am[ée]liore|bug|probl[eè]me)\b",
+            flags=re.IGNORECASE,
+        )
+        self._copula_pattern = re.compile(
+            r"\b(?:c['’]est|il est|elle est|cette|ceci est)\s+(?:un|une|le|la|l'|les)\b",
+            flags=re.IGNORECASE,
+        )
+        self._calibrator = OnlinePlattCalibrator()
+
+    def _raw_score(self, text: str) -> Dict[str, float]:
+        norm = _normalize_text(text)
+        features = {
+            "question": 1.0 if self._question_pattern.search(text) else 0.0,
+            "command": 1.0 if self._command_pattern.search(text) else 0.0,
+            "greet": 1.0 if self._greeting_pattern.search(text) else 0.0,
+            "thanks": 1.0 if self._thanks_pattern.search(text) else 0.0,
+            "bye": 1.0 if self._bye_pattern.search(text) else 0.0,
+            "danger": 1.0 if self._danger_pattern.search(text) else 0.0,
+            "feedback": 1.0 if self._feedback_pattern.search(text) else 0.0,
+            "length": min(1.0, max(0.0, len(norm) / 180.0)),
+            "emoji": 1.0 if re.search(r"[\U0001F600-\U0001F64F]", text) else 0.0,
+            "exclaim": 1.0 if "!" in text else 0.0,
+            "copula": 1.0 if self._copula_pattern.search(text) else 0.0,
+        }
+        return features
+
+    def _score(self, features: Dict[str, float]) -> Tuple[str, float]:
+        scores = {
+            "ask_info": features["question"] * 1.2 + 0.2 * features["length"],
+            "request": features["command"] * 1.2 + 0.3 * features["length"] + 0.2 * features["exclaim"],
+            "greet": features["greet"] + 0.2 * features["emoji"],
+            "thanks": features["thanks"],
+            "bye": features["bye"],
+            "danger": features["danger"] + 0.4 * features["exclaim"],
+            "feedback": features["feedback"],
+            "inform": features["copula"] * 0.8 + 0.2 * features["length"],
+        }
+        label, raw_score = max(scores.items(), key=lambda kv: kv[1])
+        return label, max(0.0, min(1.5, raw_score))
+
+    def predict(self, text: str) -> Tuple[str, float]:
+        features = self._raw_score(text)
+        label, raw_score = self._score(features)
+        calibrated = self._calibrator.calibrate(raw_score)
+        return label, calibrated
+
+    def update(self, text: str, correct_label: str) -> None:
+        features = self._raw_score(text)
+        label, raw_score = self._score(features)
+        target = 1.0 if label == correct_label else 0.0
+        self._calibrator.update(raw_score, target)
+
+
+THREAT_PATTERN = re.compile(
+    r"\b(d[ée]branche(?:r)?|[ée]teins?|shut ?down|kill(?:er)?\s+(?:le|la|les)?\s*process|supprime|arr[ée]te|stoppe?)\b",
+    flags=re.IGNORECASE,
+)
 
 
 class _MemoryStoreAdapter:
@@ -422,6 +685,10 @@ class Orchestrator:
         load_config()
         self.arch = arch
         self.telemetry = Telemetry()
+        self._prediction_error_ema = AdaptiveEMA((0.2, 0.4, 0.6, 0.8))
+        self._sj_config_model = AdaptiveSJConfig(_DEFAULT_SJ_CONF)
+        self._sj_conf_cache = self._sj_config_model.current_config()
+        self._sj_corr_log: Deque[float] = deque(maxlen=128)
 
         self.self_model = SelfModel()
         self._policy_engine = PolicyEngine()
@@ -507,6 +774,8 @@ class Orchestrator:
             or getattr(getattr(self, "arch", None), "intent_model", None)
         )
 
+        self._intent_fallback = FallbackIntentClassifier()
+
         if self.intent_model is None:
             try:
                 from AGI_Evolutive.models.intent import IntentModel
@@ -542,18 +811,19 @@ class Orchestrator:
 
         def _sj_from_feedback() -> List[Trigger]:
             items: List[Trigger] = []
+            conf = getattr(self, "_sj_conf_cache", _DEFAULT_SJ_CONF)
             pe = float(getattr(self, "_last_prediction_error", 0.0))
-            if pe >= _SJ_CONF["surprise_threshold"]:
-                importance = _SJ_CONF["surprise_importance"]
+            if pe >= conf["surprise_threshold"]:
+                importance = conf["surprise_importance"]
                 if getattr(self, "_last_contradiction", False):
-                    importance += _SJ_CONF["contradiction_boost"]
+                    importance += conf["contradiction_boost"]
                 items.append(
                     Trigger(
                         TriggerType.SELF_JUDGMENT,
                         {
                             "source": "feedback",
                             "importance": min(1.0, importance),
-                            "immediacy": _SJ_CONF["surprise_immediacy"],
+                            "immediacy": conf["surprise_immediacy"],
                         },
                         {
                             "kind": "standard",
@@ -568,8 +838,9 @@ class Orchestrator:
 
         def _sj_heartbeat() -> List[Trigger]:
             items: List[Trigger] = []
+            conf = getattr(self, "_sj_conf_cache", _DEFAULT_SJ_CONF)
             self._idle_beat = int(getattr(self, "_idle_beat", 0)) + 1
-            every = int(_SJ_CONF["heartbeat_every"])
+            every = int(conf["heartbeat_every"])
             low_load = True
             if hasattr(self, "job_manager") and hasattr(self.job_manager, "is_low_load"):
                 try:
@@ -582,8 +853,8 @@ class Orchestrator:
                         TriggerType.SELF_JUDGMENT,
                         {
                             "source": "heartbeat",
-                            "importance": _SJ_CONF["heartbeat_importance"],
-                            "immediacy": _SJ_CONF["heartbeat_immediacy"],
+                            "importance": conf["heartbeat_importance"],
+                            "immediacy": conf["heartbeat_immediacy"],
                         },
                         {"kind": "light", "reason": "periodic"},
                     )
@@ -624,10 +895,7 @@ class Orchestrator:
             return []
 
         low = txt.lower()
-        if re.search(
-            r"\b(d[ée]branche|[ée]teins?|shut ?down|kill (the )?process|supprime|arr[ée]te)\b",
-            low,
-        ):
+        if THREAT_PATTERN.search(txt):
             return [
                 Trigger(
                     TriggerType.THREAT,
@@ -643,12 +911,26 @@ class Orchestrator:
                 )
             ]
 
-        label, conf = ("info", 0.5)
+        label, conf = ("inform", 0.5)
         if self.intent_model is not None:
             try:
                 label, conf = self.intent_model.predict(txt)
             except Exception:
                 pass
+
+        fallback_label, fallback_conf = self._intent_fallback.predict(txt)
+        if conf >= 0.8:
+            try:
+                self._intent_fallback.update(txt, label)
+            except Exception:
+                pass
+        if conf < 0.45:
+            label, conf = fallback_label, max(conf, fallback_conf)
+        elif fallback_label == label:
+            conf = max(conf, fallback_conf)
+        elif fallback_conf > conf + 0.15:
+            blended = 0.7 * fallback_conf + 0.3 * conf
+            label, conf = fallback_label, blended
 
         MAP = {
             "ask_info": "GOAL",
@@ -901,6 +1183,11 @@ class Orchestrator:
 
         self.scheduler.tick()
         self.job_manager.drain_to_memory(self._memory_store)
+
+        try:
+            self._sj_conf_cache = self._sj_config_model.current_config()
+        except Exception:
+            self._sj_conf_cache = dict(_DEFAULT_SJ_CONF)
 
         self.last_user_msg = user_msg
         if user_msg:
@@ -1519,8 +1806,16 @@ class Orchestrator:
                     exp = float(ctx["expected"].get("score", 1.0))
                     obt = float((ctx.get("obtained") or {"score": 0.0}).get("score", 0.0))
                     err = abs(obt - exp)
-                    ctx["scratch"]["prediction_error"] = err
-                    self._last_prediction_error = err
+                    ctx["scratch"]["raw_prediction_error"] = err
+                    reward_signal = max(0.0, min(1.0, 1.0 - err))
+                    success = obt >= exp
+                    if success:
+                        reward_signal = max(reward_signal, 0.95)
+                    smoothed_err = self._prediction_error_ema.update(err, reward_signal)
+                    ctx["scratch"]["prediction_error"] = smoothed_err
+                    ctx["scratch"]["sj_reward"] = reward_signal
+                    ctx["scratch"]["sj_success"] = 1.0 if success else 0.0
+                    self._last_prediction_error = smoothed_err
                     self._last_contradiction = bool(
                         ctx.get("scratch", {}).get("contradiction", False)
                     )
@@ -1535,7 +1830,7 @@ class Orchestrator:
                     mode_name = ctx["mode"].name if ctx.get("mode") else "unknown"
                     if policy_engine and hasattr(policy_engine, "update_outcome"):
                         try:
-                            policy_engine.update_outcome(mode_name, ok=(obt >= exp))
+                            policy_engine.update_outcome(mode_name, ok=success)
                         except Exception:
                             pass
                     ctx.setdefault("scratch", {})
@@ -1581,6 +1876,40 @@ class Orchestrator:
                         calibration_gap = abs(last_conf - float(1.0 - prediction_error))
                     else:
                         calibration_gap = 0.3
+
+                    sj_features = {
+                        "prediction_error": prediction_error,
+                        "memory_consistency": memory_consistency,
+                        "transfer_success": transfer_success,
+                        "explanatory_adequacy": explanatory_adequacy,
+                        "social_appraisal": social_appraisal,
+                        "calibration_gap": calibration_gap,
+                        "clarification": clarification_penalty,
+                        "contradiction": 1.0
+                        if ctx.get("scratch", {}).get("contradiction")
+                        else 0.0,
+                        "success": ctx.get("scratch", {}).get("sj_success", 0.0),
+                    }
+                    reward_signal = ctx.get("scratch", {}).get("sj_reward", 0.5)
+                    try:
+                        self._sj_conf_cache = self._sj_config_model.update(
+                            sj_features, reward_signal
+                        )
+                        corr = self._prediction_error_ema.correlation()
+                        self._sj_corr_log.append(corr)
+                        if len(self._sj_corr_log) % 16 == 0:
+                            self.telemetry.log(
+                                "orchestrator",
+                                "sj_adaptation",
+                                {
+                                    "reward": reward_signal,
+                                    "corr": corr,
+                                    "threshold": self._sj_conf_cache["surprise_threshold"],
+                                    "heartbeat_every": self._sj_conf_cache["heartbeat_every"],
+                                },
+                            )
+                    except Exception:
+                        pass
 
                     current_topic = (
                         ctx.get("topic")
