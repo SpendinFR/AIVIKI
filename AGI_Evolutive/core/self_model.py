@@ -233,7 +233,12 @@ class SelfModel:
         social.setdefault("appraisal", {"global": 0.5, "by_topic": {}})
 
         ident.setdefault("architecture", {"modules": [], "config": {}, "capabilities": []})
-        ident.setdefault("commitments", {"by_key": {}})
+        commitments = ident.setdefault("commitments", {"by_key": {}})
+        commitments.setdefault("impact", {})
+        ident.setdefault(
+            "principles_history",
+            {"recent": [], "by_key": {}, "max_len": 30, "runs": 0, "last_success_rate": None},
+        )
         ident.setdefault("safety", {"constraints": [], "guardrails": {}, "last_violations": []})
         ident.setdefault("telemetry", {"counters": {}, "latency": {}, "health": {}})
         ident.setdefault("last_update_ts", self._now_ts())
