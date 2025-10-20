@@ -204,6 +204,7 @@ class ConceptExtractor:
 
         self.period_s = 15.0
         self._last_step = 0.0
+        self._last_batch_score = 0.0
 
     # ---------- binding ----------
     def bind(self, memory: Any = None, emotions=None, metacog=None, language=None) -> None:
@@ -288,6 +289,7 @@ class ConceptExtractor:
         top_global = aggregated.most_common(20)
         batch_score = sum(score for _, score in top_global) / max(1, len(top_global))
         self._update_profile_stats(profile.identifier, batch_score)
+        self._last_batch_score = float(batch_score)
         self._update_score_history(batch_score)
         return top_global
 
@@ -625,3 +627,28 @@ class ConceptExtractor:
             if not text:
                 continue
             yield mem_id, text, memory
+
+    # ---------- diagnostics ----------
+    def pending_backlog(self, memory: Any = None, max_batch: int = 400) -> int:
+        """Estimate the number of unprocessed memories awaiting extraction."""
+
+        source = memory if memory is not None else self.bound.get("memory")
+        candidates = list(self._prepare_documents(self._collect_memories(source, limit=max_batch)))
+        return len(candidates)
+
+    @property
+    def last_batch_score(self) -> float:
+        return float(getattr(self, "_last_batch_score", 0.0))
+
+    def quality_signal(self, window: int = 5) -> float:
+        """Return a normalized quality indicator derived from recent batches."""
+
+        history: List[float] = self.state.get("score_history", [])
+        if not history:
+            return 0.0
+        window = max(1, min(window, len(history)))
+        recent = history[-window:]
+        baseline = max(max(history[-20:]), 1e-6)
+        avg_recent = sum(recent) / float(window)
+        normalized = max(0.0, min(1.0, avg_recent / baseline))
+        return normalized
