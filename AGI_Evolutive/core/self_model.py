@@ -1,8 +1,9 @@
 import copy
 import json
+import math
 import os
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from AGI_Evolutive.core.config import cfg
 from AGI_Evolutive.utils import now_iso, safe_write_json
@@ -130,6 +131,8 @@ class SelfModel:
     _MAX_RECENT_DECISIONS = 100
     _MAX_RECENT_JOBS = 200
     _MAX_RECENT_INTERACTIONS = 100
+    _DEFAULT_LEARNING_RATE = 0.05
+    _DEFAULT_WEIGHT_DECAY = 0.995
 
     @staticmethod
     def _now_ts() -> float:
@@ -153,6 +156,22 @@ class SelfModel:
         lst.append(item)
         if len(lst) > max_len:
             del lst[:-max_len]
+
+    @staticmethod
+    def _sigmoid(x: float) -> float:
+        try:
+            return 1.0 / (1.0 + math.exp(-x))
+        except OverflowError:
+            return 1.0 if x > 0 else 0.0
+
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        try:
+            if isinstance(value, bool):
+                return 1.0 if value else 0.0
+            return float(value)
+        except (TypeError, ValueError):
+            return default
 
     # ===================== SelfIdentity v2 – structure & migration =====================
 
@@ -205,7 +224,25 @@ class SelfModel:
 
         choices = ident.setdefault("choices", {})
         choices.setdefault("recent", [])
-        choices.setdefault("policies", {"abstention": 0.0, "last_confidence": 0.5, "stats": {"success": 0, "fail": 0}})
+        policies = choices.setdefault(
+            "policies",
+            {"abstention": 0.0, "last_confidence": 0.5, "stats": {"success": 0, "fail": 0}},
+        )
+        policies.setdefault("stats", {"success": 0, "fail": 0})
+        policies.setdefault("adaptive", {})
+        adaptive = policies["adaptive"]
+        adaptive.setdefault("weights", {})
+        adaptive.setdefault("bias", 0.0)
+        adaptive.setdefault("learning_rate", self._DEFAULT_LEARNING_RATE)
+        adaptive.setdefault("weight_decay", self._DEFAULT_WEIGHT_DECAY)
+        adaptive.setdefault("last_features", {})
+        adaptive.setdefault("last_score", 0.5)
+        adaptive.setdefault("last_context", {})
+        adaptive.setdefault("last_update_ts", self._now_ts())
+
+        # compat : last_confidence reste en dehors du bloc adaptatif
+        if "last_confidence" not in policies:
+            policies["last_confidence"] = 0.5
 
         sj = ident.setdefault("self_judgment", {})
         sj.setdefault("understanding", {"global": 0.5, "topics": {}, "calibration_gap": 0.0})
@@ -372,6 +409,7 @@ class SelfModel:
             if "ts" not in dr:
                 dr["ts"] = self._now_ts()
             SelfModel._bounded_append(rec, dr, self._MAX_RECENT_DECISIONS)
+            self._update_policy_learning_from_decision(dr)
         self.identity["last_update_ts"] = self._now_ts()
         self._sync_identity()
         self.save()
@@ -501,5 +539,215 @@ class SelfModel:
         x = 0.6 * base + 0.3 * coherence + 0.1 * (1.0 - calib_gap)
         x = max(0.01, min(0.99, x))
         return x
+
+    # ===================== Politique adaptative – extraction & apprentissage =====================
+
+    def _policy_learning_state(self) -> Dict[str, Any]:
+        self.ensure_identity_paths()
+        return self.identity["choices"]["policies"]["adaptive"]
+
+    def _policy_stats(self) -> Dict[str, Any]:
+        self.ensure_identity_paths()
+        policies = self.identity["choices"].setdefault("policies", {})
+        return policies.setdefault("stats", {"success": 0, "fail": 0})
+
+    def _policy_feature_sources(self) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        ident = self.identity
+        history = self.state.get("history", [])
+        return ident, {"history": history}
+
+    def _build_policy_features(self, context: Optional[Dict[str, Any]]) -> Dict[str, float]:
+        ident, extra = self._policy_feature_sources()
+        context = context or {}
+
+        def norm_len(container: Any, cap: int) -> float:
+            try:
+                return min(float(len(container)), float(cap)) / float(cap)
+            except Exception:
+                return 0.0
+
+        features: Dict[str, float] = {}
+        try:
+            comp = self.identity_completeness()
+            features["identity_completeness"] = SelfModel._safe_float(comp.get("score", 0.0))
+        except Exception:
+            features["identity_completeness"] = 0.0
+
+        choices = ident.get("choices", {})
+        policies = choices.get("policies", {})
+        stats = self._policy_stats()
+        success = stats.get("success", 0)
+        fail = stats.get("fail", 0)
+        total = success + fail
+        success_rate = (success / total) if total else 0.5
+        features["policy_success_rate"] = float(max(0.0, min(1.0, success_rate)))
+        features["policy_confidence"] = SelfModel._safe_float(policies.get("last_confidence", 0.5), 0.5)
+
+        work = ident.get("work", {})
+        features["recent_job_density"] = norm_len(work.get("recent", []), self._MAX_RECENT_JOBS)
+        features["active_jobs"] = norm_len(work.get("current", {}).get("jobs_running", []), 25)
+
+        commitments = ident.get("commitments", {}).get("by_key", {})
+        active_commitments = sum(1 for v in commitments.values() if isinstance(v, dict) and v.get("active"))
+        features["active_commitments"] = min(active_commitments / 10.0, 1.0)
+
+        state = ident.get("state", {})
+        emotions = state.get("emotions", {})
+        features["emotion_valence"] = SelfModel._safe_float(emotions.get("valence", 0.5), 0.5)
+        features["emotion_arousal"] = SelfModel._safe_float(emotions.get("arousal", 0.5), 0.5)
+        cognition = state.get("cognition", {})
+        features["cognitive_load"] = min(SelfModel._safe_float(cognition.get("load", 0.0), 0.0), 1.0)
+
+        sj = ident.get("self_judgment", {})
+        traits = sj.get("traits", {})
+        features["self_trust"] = SelfModel._safe_float(traits.get("self_trust", 0.5), 0.5)
+        features["self_efficacy"] = SelfModel._safe_float(traits.get("self_efficacy", 0.5), 0.5)
+
+        history = extra.get("history", [])
+        features["history_volume"] = norm_len(history, 500)
+
+        # indices dérivés du contexte immédiat
+        features["context_complexity"] = SelfModel._safe_float(context.get("complexity"), 0.0)
+        features["context_expected_gain"] = SelfModel._safe_float(context.get("expected_gain"), 0.0)
+        features["context_risk"] = SelfModel._safe_float(context.get("risk"), 0.0)
+
+        return features
+
+    @staticmethod
+    def _expand_features(features: Dict[str, float]) -> Dict[str, float]:
+        expanded: Dict[str, float] = {}
+        for key, value in features.items():
+            expanded[key] = value
+            expanded[f"{key}^2"] = value * value
+        expanded["bias"] = 1.0
+        return expanded
+
+    def policy_decision_score(self, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        self.ensure_identity_paths()
+        adaptive = self._policy_learning_state()
+        features = self._build_policy_features(context)
+        expanded = SelfModel._expand_features(features)
+
+        weights = adaptive.setdefault("weights", {})
+        bias = adaptive.get("bias", 0.0)
+        raw = bias
+        for name, value in expanded.items():
+            if name == "bias":
+                continue
+            raw += weights.get(name, 0.0) * value
+        score = SelfModel._sigmoid(raw)
+
+        policies = self.identity["choices"]["policies"]
+        policies["last_confidence"] = float(score)
+
+        adaptive["last_features"] = {"base": features, "expanded": expanded}
+        adaptive["last_score"] = float(score)
+        adaptive["last_context"] = context or {}
+        adaptive["last_update_ts"] = self._now_ts()
+        self._sync_identity()
+        self.save()
+        return {"score": score, "raw": raw, "features": features, "expanded_features": expanded}
+
+    def update_policy_feedback(
+        self,
+        outcome: Any,
+        *,
+        context: Optional[Dict[str, Any]] = None,
+        expected: Optional[Any] = None,
+        obtained: Optional[Any] = None,
+    ) -> float:
+        """Met à jour les poids adaptatifs à partir d'un signal de feedback.
+
+        :param outcome: Booléen ou valeur [0..1] représentant le succès obtenu.
+        :param context: Contexte utilisé pour reconstruire les features (optionnel si un appel
+                        récent à ``policy_decision_score`` a déjà stocké les features).
+        :param expected: Signal facultatif (utilisé uniquement pour enrichir les stats).
+        :param obtained: Valeur facultative documentant le résultat obtenu.
+        :return: Nouvelle confiance prédictive après mise à jour.
+        """
+
+        self.ensure_identity_paths()
+        adaptive = self._policy_learning_state()
+        stats = self._policy_stats()
+
+        if isinstance(outcome, bool):
+            target = 1.0 if outcome else 0.0
+        else:
+            target = SelfModel._safe_float(outcome, 0.5)
+            target = max(0.0, min(1.0, target))
+
+        feature_bundle = adaptive.get("last_features") if context is None else None
+        if feature_bundle:
+            expanded = feature_bundle.get("expanded", {})
+            features = feature_bundle.get("base", {})
+            score = adaptive.get("last_score", 0.5)
+        else:
+            computation = self.policy_decision_score(context or adaptive.get("last_context"))
+            expanded = computation["expanded_features"]
+            features = computation["features"]
+            score = computation["score"]
+
+        error = target - score
+        lr = adaptive.get("learning_rate", self._DEFAULT_LEARNING_RATE)
+        decay = adaptive.get("weight_decay", self._DEFAULT_WEIGHT_DECAY)
+
+        weights = adaptive.setdefault("weights", {})
+        bias = adaptive.get("bias", 0.0)
+        bias = bias * decay + lr * error * expanded.get("bias", 1.0)
+        adaptive["bias"] = bias
+
+        for name, value in expanded.items():
+            if name == "bias":
+                continue
+            prev = weights.get(name, 0.0) * decay
+            weights[name] = prev + lr * error * value
+
+        adaptive["last_features"] = {"base": features, "expanded": expanded}
+        adaptive["last_score"] = float(SelfModel._sigmoid(bias + sum(weights.get(n, 0.0) * v for n, v in expanded.items() if n != "bias")))
+        adaptive["last_update_ts"] = self._now_ts()
+
+        if target >= 0.5:
+            stats["success"] = stats.get("success", 0) + 1
+        else:
+            stats["fail"] = stats.get("fail", 0) + 1
+
+        recent = self.identity["choices"].setdefault("recent", [])
+        if recent:
+            recent[-1].setdefault("learning", {})
+            recent[-1]["learning"].update(
+                {
+                    "target": target,
+                    "error": error,
+                    "expected": expected,
+                    "obtained": obtained,
+                }
+            )
+
+        self._sync_identity()
+        self.save()
+        return adaptive["last_score"]
+
+    def _update_policy_learning_from_decision(self, decision_ref: Dict[str, Any]) -> None:
+        if not isinstance(decision_ref, dict):
+            return
+
+        obtained = decision_ref.get("obtained")
+        expected = decision_ref.get("expected")
+
+        if isinstance(obtained, (int, float)) and isinstance(expected, (int, float)):
+            target = 1.0 if obtained >= expected else 0.0
+        elif isinstance(obtained, bool):
+            target = 1.0 if obtained else 0.0
+        else:
+            # fallback : si aucune mesure claire, ne pas mettre à jour
+            return
+
+        context = {
+            "complexity": SelfModel._safe_float(decision_ref.get("complexity"), 0.0),
+            "expected_gain": SelfModel._safe_float(decision_ref.get("expected_gain"), 0.0),
+            "risk": SelfModel._safe_float(decision_ref.get("risk"), 0.0),
+        }
+
+        self.update_policy_feedback(target, context=context, expected=expected, obtained=obtained)
 
     # ===================== Fin du patch SelfIdentity v2 =====================
