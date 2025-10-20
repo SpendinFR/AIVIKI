@@ -7,7 +7,11 @@ import random
 import time
 
 from AGI_Evolutive.core.trigger_types import Trigger, TriggerType
-from AGI_Evolutive.core.evaluation import unified_priority
+from AGI_Evolutive.core.evaluation import (
+    get_last_priority_token,
+    record_priority_feedback,
+    unified_priority,
+)
 
 
 Collector = Callable[[], List[Trigger]]
@@ -173,7 +177,14 @@ class TriggerBus:
         self._adaptive_blend = 0.5
         self._pending_feedback_limit = 1024
         self._pending_feedback: Dict[
-            str, Tuple[Dict[str, float], Optional[int], Optional[str], Optional[str]]
+            str,
+            Tuple[
+                Dict[str, float],
+                Optional[int],
+                Optional[str],
+                Optional[str],
+                Optional[str],
+            ],
         ] = {}
 
     def register(self, fn: Collector):
@@ -269,7 +280,7 @@ class TriggerBus:
         payload = self._pending_feedback.pop(token, None)
         if not payload:
             return
-        features, ts_idx, alias, origin = payload
+        features, ts_idx, alias, origin, priority_token = payload
         reward = max(0.0, min(1.0, float(reward)))
         self._adaptive_model.update(features, reward)
         if ts_idx is not None:
@@ -278,6 +289,8 @@ class TriggerBus:
             self._pending_feedback.pop(alias, None)
         if origin and origin != token:
             self._pending_feedback.pop(origin, None)
+        if priority_token:
+            record_priority_feedback(priority_token, reward)
 
     def _lookup_habit_strength(self, key: Any) -> float:
         if key is None or self._habit_strength_source is None:
@@ -308,6 +321,7 @@ class TriggerBus:
                         pr = 1.0
                         features: Dict[str, float] = self._build_features(t)
                         ts_idx: Optional[int] = None
+                        priority_token: Optional[str] = None
                     else:
                         base_priority = unified_priority(
                             impact=t.meta["importance"],
@@ -317,6 +331,7 @@ class TriggerBus:
                             uncertainty=t.meta["uncertainty"],
                             valence=valence,
                         )
+                        priority_token = get_last_priority_token()
                         adaptive_priority, features, ts_idx = self._compute_adaptive_priority(
                             t, base_priority, sampled_weights
                         )
@@ -335,9 +350,21 @@ class TriggerBus:
                     )
                     t.meta["_feedback_token"] = token
                     alias = key if key is not None else None
-                    self._pending_feedback[token] = (features, ts_idx, alias, token)
+                    self._pending_feedback[token] = (
+                        features,
+                        ts_idx,
+                        alias,
+                        token,
+                        priority_token,
+                    )
                     if alias is not None:
-                        self._pending_feedback[alias] = (features, ts_idx, alias, token)
+                        self._pending_feedback[alias] = (
+                            features,
+                            ts_idx,
+                            alias,
+                            token,
+                            priority_token,
+                        )
                     if len(self._pending_feedback) > self._pending_feedback_limit:
                         # prune the oldest inserted token (approximate)
                         oldest = next(iter(self._pending_feedback))
