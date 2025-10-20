@@ -19,7 +19,7 @@ Points clés :
 from __future__ import annotations
 import time, math, random, hashlib
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 
 # ============================================================
@@ -52,6 +52,187 @@ class LearningEpisode:
     emotional_valence: float = 0.0
     confidence_gain: float = 0.0
     integration_level: float = 0.0
+    contextual_features: List[float] = field(default_factory=list)
+    contextual_metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+class ContextFeatureEncoder:
+    """Encode les expériences en un vecteur de caractéristiques compact."""
+
+    def __init__(self, cognitive_architecture: Any = None):
+        self.cognitive_architecture = cognitive_architecture
+        self._feature_names: List[str] = [
+            "bias",
+            "summary_length",
+            "has_error",
+            "has_success",
+            "has_time",
+            "concept_count",
+            "reflection_count",
+            "novelty_signal",
+            "emotion_valence",
+            "confidence_bias",
+        ]
+
+    @property
+    def feature_names(self) -> List[str]:
+        return list(self._feature_names)
+
+    def encode(
+        self,
+        raw: Dict[str, Any],
+        reflections: Iterable[str],
+        concepts: Iterable[str],
+        emotional_valence: float = 0.0,
+        confidence_gain: float = 0.0,
+    ) -> Tuple[List[float], Dict[str, Any]]:
+        summary = str(raw.get("summary", raw))
+        summary_len = min(len(summary) / 100.0, 5.0)
+        lower_summary = summary.lower()
+        has_error = 1.0 if ("erreur" in lower_summary or "error" in lower_summary) else 0.0
+        has_success = 1.0 if ("succès" in lower_summary or "success" in lower_summary) else 0.0
+        has_time = 1.0 if ("temps" in lower_summary or "delai" in lower_summary or "delay" in lower_summary) else 0.0
+        concept_count = float(len(list(concepts)))
+        reflection_count = float(len(list(reflections)))
+
+        novelty_signal = 0.0
+        arch = self.cognitive_architecture
+        if arch and getattr(arch, "memory", None) and hasattr(arch.memory, "novelty_score"):
+            try:
+                novelty_signal = float(arch.memory.novelty_score(summary))
+            except Exception:
+                novelty_signal = 0.0
+
+        emotion_valence = emotional_valence
+        if arch and getattr(arch, "emotions", None):
+            try:
+                emotion_valence = float(getattr(arch.emotions, "current_valence", emotion_valence))
+            except Exception:
+                emotion_valence = emotional_valence
+
+        confidence_bias = confidence_gain
+        meta = {
+            "summary_length": summary_len,
+            "concept_count": concept_count,
+            "reflection_count": reflection_count,
+            "novelty_signal": novelty_signal,
+        }
+        features = [
+            1.0,
+            summary_len,
+            has_error,
+            has_success,
+            has_time,
+            concept_count,
+            reflection_count,
+            novelty_signal,
+            emotion_valence,
+            confidence_bias,
+        ]
+        return features, meta
+
+
+class OnlineLinearModel:
+    """Régression linéaire online bornée (GLM simplifié)."""
+
+    def __init__(
+        self,
+        feature_dim: int,
+        learning_rate: float = 0.05,
+        l2: float = 1e-3,
+        bounds: Tuple[float, float] = (0.0, 1.0),
+        activation: Optional[Callable[[float], float]] = None,
+    ):
+        self.learning_rate = learning_rate
+        self.l2 = l2
+        self.bounds = bounds
+        self.weights: List[float] = [0.0] * max(1, feature_dim)
+        self.bias: float = 0.0
+        self.activation = activation or (lambda x: 1.0 / (1.0 + math.exp(-max(-50.0, min(50.0, x)))))
+
+    def _ensure_dim(self, n: int):
+        if n <= len(self.weights):
+            return
+        self.weights.extend([0.0] * (n - len(self.weights)))
+
+    def predict(self, features: Iterable[float]) -> float:
+        feats = list(features)
+        self._ensure_dim(len(feats))
+        z = self.bias
+        for w, x in zip(self.weights, feats):
+            z += w * x
+        activated = self.activation(z)
+        lo, hi = self.bounds
+        return max(lo, min(hi, activated))
+
+    def update(self, features: Iterable[float], target: float) -> Tuple[float, float]:
+        feats = list(features)
+        self._ensure_dim(len(feats))
+        prediction = self.predict(feats)
+        lo, hi = self.bounds
+        clipped_target = max(lo, min(hi, float(target)))
+        error = clipped_target - prediction
+        lr = self.learning_rate
+        for i, x in enumerate(feats):
+            self.weights[i] += lr * (error * x - self.l2 * self.weights[i])
+        self.bias += lr * (error - self.l2 * self.bias)
+        return prediction, error
+
+    def reset(self):
+        for i in range(len(self.weights)):
+            self.weights[i] = 0.0
+        self.bias = 0.0
+
+    def feature_importances(self) -> List[float]:
+        return [abs(w) for w in self.weights]
+
+
+class ThompsonBandit:
+    """Thompson Sampling Beta-Bernoulli pour l'exploration contextuelle."""
+
+    def __init__(self, prior_alpha: float = 1.0, prior_beta: float = 1.0):
+        self.prior_alpha = prior_alpha
+        self.prior_beta = prior_beta
+        self.parameters: Dict[str, Tuple[float, float]] = {}
+
+    def _params(self, action: str) -> Tuple[float, float]:
+        if action not in self.parameters:
+            self.parameters[action] = (self.prior_alpha, self.prior_beta)
+        return self.parameters[action]
+
+    def select(
+        self,
+        actions: Iterable[str],
+        priors: Optional[Dict[str, float]] = None,
+        fallback: Optional[Callable[[], str]] = None,
+    ) -> str:
+        best_action = None
+        best_score = -float("inf")
+        for action in actions:
+            alpha, beta = self._params(action)
+            sample = random.betavariate(alpha, beta)
+            if priors and action in priors:
+                # moyenne pondérée : moitié exploitation, moitié exploration
+                sample = 0.5 * sample + 0.5 * float(priors[action])
+            if sample > best_score:
+                best_score = sample
+                best_action = action
+        if best_action is None:
+            return fallback() if fallback else ""
+        return best_action
+
+    def update(self, action: Optional[str], reward: float):
+        if not action:
+            return
+        alpha, beta = self._params(action)
+        reward = max(0.0, min(1.0, float(reward)))
+        alpha += reward
+        beta += (1.0 - reward)
+        self.parameters[action] = (alpha, beta)
+
+    def expected(self, action: str) -> float:
+        alpha, beta = self._params(action)
+        return alpha / (alpha + beta)
 
 
 class ExperientialLearning:
@@ -84,8 +265,17 @@ class ExperientialLearning:
             "skills_compiled": 0,
             "errors_corrected": 0,
             "insights": 0,
+            "feature_updates": 0,
+            "prediction_error": 0.0,
         }
         self.learning_rate: float = 0.1
+        self.feature_encoder = ContextFeatureEncoder(cognitive_architecture)
+        self.contextual_model = OnlineLinearModel(
+            feature_dim=len(self.feature_encoder.feature_names),
+            learning_rate=0.08,
+            bounds=(0.0, 1.0),
+        )
+        self._recent_prediction_error: List[float] = []
 
         # auto-wiring (lecture uniquement, pas d'import croisé)
         ca = self.cognitive_architecture
@@ -110,12 +300,29 @@ class ExperientialLearning:
         emotional_valence = self._valence(outcomes)
         confidence_gain = self._confidence(outcomes)
         integration = self._integration(concepts, outcomes)
+        features, feature_meta = self.feature_encoder.encode(
+            raw,
+            reflections,
+            concepts,
+            emotional_valence=emotional_valence,
+            confidence_gain=confidence_gain,
+        )
+        prediction, error = self.contextual_model.update(features, integration)
+        self._recent_prediction_error.append(error)
+        if len(self._recent_prediction_error) > 50:
+            self._recent_prediction_error.pop(0)
+        self.metrics["feature_updates"] += 1
+        self.metrics["prediction_error"] = float(
+            _safe_mean([abs(e) for e in self._recent_prediction_error], 0.0)
+        )
+        self._adjust_states_from_prediction(prediction, error)
 
         episode = LearningEpisode(
             id=eid, timestamp=_now(), raw=raw, reflections=reflections,
             concepts=concepts, experiments=experiments, outcomes=outcomes,
             emotional_valence=emotional_valence, confidence_gain=confidence_gain,
-            integration_level=integration
+            integration_level=integration, contextual_features=features,
+            contextual_metadata=feature_meta,
         )
         self.learning_episodes.append(episode)
         self.metrics["episodes_completed"] += 1
@@ -125,6 +332,7 @@ class ExperientialLearning:
 
         # consolidation minimale en mémoire
         self._consolidate_episode(episode)
+        self._bridge_with_meta_learning(episode, prediction, error)
         # feedback à la méta-cognition
         if getattr(self, "metacognition", None) and hasattr(self.metacognition, "register_learning_event"):
             try:
@@ -198,6 +406,48 @@ class ExperientialLearning:
         vals = [o.get("learning_gain", 0.0) for o in outcomes.values()]
         return _safe_mean(vals, 0.0) * 0.8
 
+    def _adjust_states_from_prediction(self, prediction: float, error: float):
+        # momentum suit la qualité de la prédiction (peu d'erreur => plus de momentum)
+        delta = max(-0.05, min(0.05, -error))
+        self.learning_states["momentum"] = max(
+            0.0,
+            min(1.0, self.learning_states.get("momentum", 0.5) + delta),
+        )
+        self.learning_states["engagement"] = max(
+            0.0,
+            min(1.0, self.learning_states.get("engagement", 0.65) + delta * 0.5),
+        )
+        # Ajuste légèrement les compétences en fonction de la qualité du modèle
+        impact = max(-0.02, min(0.02, prediction - 0.5))
+        for key in ("reflection", "abstraction", "experimentation"):
+            if key in self.learning_competencies:
+                self.learning_competencies[key] = max(
+                    0.1,
+                    min(1.0, self.learning_competencies[key] + impact),
+                )
+
+    def _bridge_with_meta_learning(
+        self,
+        episode: LearningEpisode,
+        prediction: float,
+        error: float,
+    ):
+        arch = self.cognitive_architecture
+        if not arch:
+            return
+        meta = getattr(arch, "meta_learning", None) or getattr(arch, "metalearning", None)
+        if meta and hasattr(meta, "register_feedback"):
+            try:
+                meta.register_feedback(
+                    module="experiential",
+                    score=float(episode.integration_level),
+                    prediction=float(prediction),
+                    error=float(error),
+                    context=episode.contextual_metadata,
+                )
+            except Exception:
+                pass
+
     def _integration(self, concepts: List[str], outcomes: Dict[str, Dict[str, float]]) -> float:
         if not concepts or not outcomes:
             return 0.0
@@ -236,6 +486,10 @@ class ExperientialLearning:
             "learning_states": self.learning_states,
             "metrics": self.metrics,
             "episodes": [ep.__dict__ for ep in self.learning_episodes[-200:]],  # limite snapshot
+            "contextual_model": {
+                "weights": self.contextual_model.weights,
+                "bias": self.contextual_model.bias,
+            },
         }
 
     def from_state(self, state: Dict[str, Any]):
@@ -249,6 +503,11 @@ class ExperientialLearning:
                 self.learning_episodes.append(LearningEpisode(**d))
             except Exception:
                 continue
+        model_state = state.get("contextual_model", {})
+        if model_state:
+            self.contextual_model._ensure_dim(len(model_state.get("weights", [])))
+            self.contextual_model.weights[: len(model_state.get("weights", []))] = list(model_state.get("weights", []))
+            self.contextual_model.bias = float(model_state.get("bias", 0.0))
 
     def summarize(self) -> str:
         return f"{self.metrics.get('episodes_completed',0)} épisodes, {self.metrics.get('concepts_formed',0)} concepts."
@@ -343,12 +602,32 @@ class MetaLearning:
         self.performance: List[float] = []  # scores 0..1
         self.adjustment_rate: float = 0.05
         self.last_adjust_ts: float = 0.0
+        self.performance_window: int = 200
+        self.module_feedback: Dict[str, Dict[str, Any]] = {}
+        self.curriculum_history: List[Dict[str, Any]] = []
 
     def register_performance(self, score: float):
         self.performance.append(max(0.0, min(1.0, float(score))))
-        if len(self.performance) > 200:
+        if len(self.performance) > self.performance_window:
             self.performance.pop(0)
         self._maybe_adjust()
+
+    def register_feedback(
+        self,
+        module: str,
+        score: float,
+        prediction: float,
+        error: float,
+        context: Optional[Dict[str, Any]] = None,
+    ):
+        self.module_feedback[module] = {
+            "score": max(0.0, min(1.0, float(score))),
+            "prediction": max(0.0, min(1.0, float(prediction))),
+            "error": float(error),
+            "context": dict(context or {}),
+            "timestamp": _now(),
+        }
+        self.register_performance(score)
 
     def _maybe_adjust(self):
         now = _now()
@@ -364,19 +643,81 @@ class MetaLearning:
             base = float(getattr(xl, "learning_rate", 0.1))
             delta = self.adjustment_rate * (0.5 - avg)
             setattr(xl, "learning_rate", max(0.01, min(1.0, base + delta)))
+            # Ajuste aussi l'état momentum via feedback récent
+            feedback = self.module_feedback.get("experiential")
+            if feedback and hasattr(xl, "learning_states"):
+                momentum_target = feedback["score"]
+                xl.learning_states["momentum"] = max(
+                    0.0,
+                    min(
+                        1.0,
+                        0.7 * xl.learning_states.get("momentum", 0.5)
+                        + 0.3 * momentum_target,
+                    ),
+                )
         # Ajuste aussi la curiosité si présente
         cur = getattr(ca, "curiosity", None) or getattr(ca, "learning", None)
         if cur and hasattr(cur, "curiosity_level"):
             cur.curiosity_level = max(0.1, min(1.0, cur.curiosity_level + (0.5 - avg) * 0.05))
+        # Coordonne le transfert de connaissances en fonction des erreurs
+        transfer = getattr(ca, "transfer", None) or getattr(ca, "transfer_learning", None)
+        feedback = self.module_feedback.get("transfer")
+        if transfer and feedback and hasattr(transfer, "success_rate"):
+            if feedback["error"] > 0:
+                transfer.success_rate = max(
+                    0.0,
+                    min(1.0, transfer.success_rate * 0.95),
+                )
+            else:
+                transfer.success_rate = max(
+                    transfer.success_rate,
+                    feedback["score"],
+                )
         self.last_adjust_ts = now
 
     # aide à la persistance
     def to_state(self) -> Dict[str, Any]:
-        return {"performance": self.performance, "last_adjust_ts": self.last_adjust_ts}
+        return {
+            "performance": self.performance,
+            "last_adjust_ts": self.last_adjust_ts,
+            "module_feedback": self.module_feedback,
+            "curriculum_history": self.curriculum_history[-50:],
+        }
 
     def from_state(self, state: Dict[str, Any]):
         self.performance = state.get("performance", [])
         self.last_adjust_ts = state.get("last_adjust_ts", 0.0)
+        self.module_feedback = state.get("module_feedback", {})
+        self.curriculum_history = state.get("curriculum_history", [])
+
+    def propose_curriculum(self) -> Dict[str, Any]:
+        """Génère un plan simple basé sur les erreurs récentes des modules."""
+        modules_sorted = sorted(
+            self.module_feedback.items(),
+            key=lambda kv: abs(kv[1].get("error", 0.0)),
+            reverse=True,
+        )
+        focus_modules = [m for m, _ in modules_sorted[:3]]
+        curriculum = {
+            "focus_modules": focus_modules,
+            "timestamp": _now(),
+            "recommendations": [],
+        }
+        for module_name in focus_modules:
+            fb = self.module_feedback.get(module_name, {})
+            if not fb:
+                continue
+            curriculum["recommendations"].append(
+                {
+                    "module": module_name,
+                    "target_score": fb.get("score", 0.5) + 0.1,
+                    "context": fb.get("context", {}),
+                }
+            )
+        self.curriculum_history.append(curriculum)
+        if len(self.curriculum_history) > 50:
+            self.curriculum_history.pop(0)
+        return curriculum
 
 
 # ============================================================
@@ -400,6 +741,7 @@ class TransferLearning:
         self.domains: Dict[str, KnowledgeDomain] = {}
         self.transfer_log: List[Dict[str, Any]] = []
         self.success_rate: float = 0.0
+        self.mapping_model = OnlineLinearModel(feature_dim=6, learning_rate=0.06)
 
     def register_domain(self, domain_name: str, concepts: Dict[str, Any],
                         procedures: Optional[List[str]] = None,
@@ -416,38 +758,86 @@ class TransferLearning:
         union = len(a_c | b_c)
         return inter / union
 
+    def _domain_features(
+        self, source: KnowledgeDomain, target: KnowledgeDomain, similarity: float
+    ) -> List[float]:
+        shared_proc = len(set(source.procedures) & set(target.procedures))
+        shared_principles = len(set(source.principles) & set(target.principles))
+        features = [
+            1.0,
+            similarity,
+            float(len(source.concepts)),
+            float(len(target.concepts)),
+            float(shared_proc),
+            float(shared_principles),
+        ]
+        return features
+
+    def learn_mapping(
+        self,
+        source: str,
+        target: str,
+        success: float,
+    ):
+        if source not in self.domains or target not in self.domains:
+            return
+        src, tgt = self.domains[source], self.domains[target]
+        sim = self._similarity(src, tgt)
+        feats = self._domain_features(src, tgt, sim)
+        prediction, error = self.mapping_model.update(feats, success)
+        arch = self.cognitive_architecture
+        if arch:
+            meta = getattr(arch, "meta_learning", None) or getattr(arch, "metalearning", None)
+            if meta and hasattr(meta, "register_feedback"):
+                try:
+                    meta.register_feedback(
+                        module="transfer",
+                        score=success,
+                        prediction=prediction,
+                        error=error,
+                        context={"source": source, "target": target},
+                    )
+                except Exception:
+                    pass
+
     def attempt_transfer(self, source: str, target: str, kinds: Optional[List[str]] = None) -> Dict[str, Any]:
         if source not in self.domains or target not in self.domains:
             raise ValueError("Domaines inconnus")
         src, tgt = self.domains[source], self.domains[target]
         sim = self._similarity(src, tgt)
+        features = self._domain_features(src, tgt, sim)
+        predicted = self.mapping_model.predict(features)
         kinds = kinds or ["concepts", "procedures", "principles"]
         transferred: List[str] = []
         difficulty: List[str] = []
 
         if "concepts" in kinds:
             for k, v in src.concepts.items():
-                if k not in tgt.concepts and sim > 0.3:
+                threshold = 0.25 + 0.35 * predicted
+                if k not in tgt.concepts and sim > threshold:
                     tgt.concepts[k] = {"adapted_from": source, "desc": str(v)[:200]}
                     transferred.append(f"concept::{k}")
                 else:
                     difficulty.append(f"concept::{k}")
         if "procedures" in kinds:
             for p in src.procedures:
-                if p not in tgt.procedures and sim > 0.2:
+                threshold = 0.2 + 0.3 * predicted
+                if p not in tgt.procedures and sim > threshold:
                     tgt.procedures.append(p + " (adapté)")
                     transferred.append(f"procedure::{p}")
                 else:
                     difficulty.append(f"procedure::{p}")
         if "principles" in kinds:
             for pr in src.principles:
-                if pr not in tgt.principles and sim > 0.1:
+                threshold = 0.15 + 0.25 * predicted
+                if pr not in tgt.principles and sim > threshold:
                     tgt.principles.append(pr + " (généralisé)")
                     transferred.append(f"principle::{pr}")
                 else:
                     difficulty.append(f"principle::{pr}")
 
         overall_success = max(0.0, min(1.0, 0.5 * sim + 0.5 * (len(transferred) / max(1, len(transferred) + len(difficulty)))))
+        self.learn_mapping(source, target, overall_success)
         self.transfer_log.append({
             "when": _now(),
             "source": source, "target": target,
@@ -463,6 +853,10 @@ class TransferLearning:
             "domains": {k: {"concepts": v.concepts, "procedures": v.procedures, "principles": v.principles} for k, v in self.domains.items()},
             "transfer_log": self.transfer_log,
             "success_rate": self.success_rate,
+            "mapping_model": {
+                "weights": self.mapping_model.weights,
+                "bias": self.mapping_model.bias,
+            },
         }
 
     def from_state(self, state: Dict[str, Any]):
@@ -471,6 +865,11 @@ class TransferLearning:
             self.domains[name] = KnowledgeDomain(name, d.get("concepts", {}), d.get("procedures", []), d.get("principles", []))
         self.transfer_log = state.get("transfer_log", [])
         self.success_rate = state.get("success_rate", 0.0)
+        mapping_state = state.get("mapping_model", {})
+        if mapping_state:
+            self.mapping_model._ensure_dim(len(mapping_state.get("weights", [])))
+            self.mapping_model.weights[: len(mapping_state.get("weights", []))] = list(mapping_state.get("weights", []))
+            self.mapping_model.bias = float(mapping_state.get("bias", 0.0))
 
 
 # ============================================================
@@ -489,23 +888,101 @@ class ReinforcementLearning:
         self.gamma: float = 0.9
         self.last_state: Optional[str] = None
         self.last_action: Optional[str] = None
+        self.last_option: Optional[str] = None
+        self.last_context: Optional[List[float]] = None
+        self.bandit = ThompsonBandit()
+        self.option_bandit = ThompsonBandit()
+        self.options: Dict[str, Dict[str, Any]] = {}
+        self.context_model = OnlineLinearModel(feature_dim=12, learning_rate=0.07)
 
-    def update_value(self, state: str, reward: float, next_state: Optional[str] = None) -> float:
-        old = self.value_table.get(state, 0.0)
-        next_val = self.value_table.get(next_state, 0.0) if next_state else 0.0
+    def register_option(self, name: str, actions: List[str]):
+        if not actions:
+            return
+        self.options[name] = {
+            "actions": list(dict.fromkeys(actions)),
+            "model": OnlineLinearModel(feature_dim=len(self.context_model.weights), learning_rate=0.05),
+        }
+
+    def _action_features(self, action: str, context_features: Optional[List[float]]) -> List[float]:
+        features = [1.0]
+        if context_features:
+            features.extend(list(context_features))
+        h = int(hashlib.sha1(action.encode("utf-8", errors="ignore")).hexdigest(), 16)
+        features.append((h % 997) / 997.0)
+        features.append(((h // 997) % 997) / 997.0)
+        return features
+
+    def update_value(
+        self,
+        state: str,
+        reward: float,
+        next_state: Optional[str] = None,
+        context_features: Optional[List[float]] = None,
+    ) -> float:
+        state_key = f"{state}|{self.last_action}" if self.last_action else state
+        old = self.value_table.get(state_key, 0.0)
+        next_key = f"{next_state}|{self.last_action}" if next_state and self.last_action else next_state
+        next_val = self.value_table.get(next_key, 0.0) if next_state else 0.0
         new = old + self.alpha * (reward + self.gamma * next_val - old)
-        self.value_table[state] = new
+        self.value_table[state_key] = new
         self.last_state = state
+        norm_reward = max(0.0, min(1.0, (reward + 1.0) / 2.0))
+        self.bandit.update(self.last_action, norm_reward)
+        if context_features is None:
+            context_features = self.last_context
+        if self.last_action and context_features is not None:
+            self.context_model.update(self._action_features(self.last_action, context_features), norm_reward)
+        if self.last_option and self.last_option in self.options:
+            option = self.options[self.last_option]
+            option_model = option.get("model")
+            if option_model and context_features is not None:
+                option_model.update(context_features, norm_reward)
+            self.option_bandit.update(self.last_option, norm_reward)
         return new
 
-    def choose_action(self, state: str, actions: List[str], eps: float = 0.2) -> str:
+    def choose_action(
+        self,
+        state: str,
+        actions: List[str],
+        eps: float = 0.2,
+        context_features: Optional[List[float]] = None,
+    ) -> str:
         if not actions:
             return ""
+        if context_features is not None:
+            self.last_context = list(context_features)
+        context_features = context_features if context_features is not None else self.last_context
+        option_name = None
+        if self.options:
+            option_names = list(self.options.keys())
+            priors: Dict[str, float] = {}
+            if context_features is not None:
+                for name, payload in self.options.items():
+                    option_model = payload.get("model")
+                    if option_model:
+                        priors[name] = option_model.predict(context_features)
+            option_name = self.option_bandit.select(
+                option_names,
+                priors=priors if priors else None,
+                fallback=lambda: option_names[0],
+            )
+            candidate_actions = self.options.get(option_name, {}).get("actions", [])
+            if candidate_actions:
+                actions = list(candidate_actions)
         if random.random() < eps:
             act = random.choice(actions)
         else:
-            act = max(actions, key=lambda a: self.value_table.get(f"{state}|{a}", 0.0))
+            priors: Dict[str, float] = {}
+            if context_features is not None:
+                for a in actions:
+                    priors[a] = self.context_model.predict(self._action_features(a, context_features))
+            act = self.bandit.select(
+                actions,
+                priors=priors if priors else None,
+                fallback=lambda: max(actions, key=lambda a: self.value_table.get(f"{state}|{a}", 0.0)),
+            )
         self.last_action = act
+        self.last_option = option_name
         return act
 
     def to_state(self) -> Dict[str, Any]:
@@ -536,6 +1013,7 @@ class CuriosityEngine:
         self.curiosity_level: float = 0.5
         self.seen_hashes: Dict[str, int] = {}
         self.history: List[Tuple[float, str, float]] = []  # (time, stimulus, reward)
+        self.prediction_model = OnlineLinearModel(feature_dim=5, learning_rate=0.05)
 
     def _novelty(self, stimulus: str) -> float:
         h = _hash_str(stimulus, 8)
@@ -544,10 +1022,30 @@ class CuriosityEngine:
         # nouveauté: décroît avec répétition
         return 1.0 / (1.0 + c)
 
+    def _stimulus_features(self, stimulus: str) -> List[float]:
+        text = stimulus or ""
+        length = min(len(text) / 80.0, 5.0)
+        digits = sum(ch.isdigit() for ch in text) / max(1, len(text))
+        uppercase = sum(ch.isupper() for ch in text) / max(1, len(text))
+        entropy = 0.0
+        if text:
+            seen: Dict[str, int] = {}
+            for ch in text[:200]:
+                seen[ch] = seen.get(ch, 0) + 1
+            total = sum(seen.values())
+            for count in seen.values():
+                p = count / total
+                entropy -= p * math.log(p + 1e-9)
+        return [1.0, length, digits, uppercase, entropy]
+
     def stimulate(self, stimulus: str) -> float:
         n = self._novelty(stimulus)
-        reward = self.curiosity_level * n
+        features = self._stimulus_features(stimulus)
+        prediction = self.prediction_model.predict(features)
+        surprise = abs(n - prediction)
+        reward = self.curiosity_level * (0.6 * n + 0.4 * surprise)
         self.history.append((_now(), stimulus[:120], reward))
+        self.prediction_model.update(features, n)
         # hook facultatif : booster la motivation des goals si présent
         ca = self.cognitive_architecture
         if ca and getattr(ca, "goals", None) and hasattr(ca.goals, "motivation_system"):
@@ -555,18 +1053,44 @@ class CuriosityEngine:
                 ca.goals.motivation_system.boost_motivation(reward)
             except Exception:
                 pass
+        if ca:
+            meta = getattr(ca, "meta_learning", None) or getattr(ca, "metalearning", None)
+            if meta and hasattr(meta, "register_feedback"):
+                try:
+                    meta.register_feedback(
+                        module="curiosity",
+                        score=max(0.0, min(1.0, reward)),
+                        prediction=prediction,
+                        error=n - prediction,
+                        context={"stimulus_len": len(stimulus or "")},
+                    )
+                except Exception:
+                    pass
         return reward
 
     def adjust(self, success_rate: float):
         self.curiosity_level = max(0.1, min(1.0, self.curiosity_level + (0.5 - success_rate) * 0.05))
 
     def to_state(self) -> Dict[str, Any]:
-        return {"curiosity_level": self.curiosity_level, "seen_hashes": self.seen_hashes, "history": self.history[-200:]}
+        return {
+            "curiosity_level": self.curiosity_level,
+            "seen_hashes": self.seen_hashes,
+            "history": self.history[-200:],
+            "prediction_model": {
+                "weights": self.prediction_model.weights,
+                "bias": self.prediction_model.bias,
+            },
+        }
 
     def from_state(self, state: Dict[str, Any]):
         self.curiosity_level = float(state.get("curiosity_level", 0.5))
         self.seen_hashes = dict(state.get("seen_hashes", {}))
         self.history = list(state.get("history", []))
+        model_state = state.get("prediction_model", {})
+        if model_state:
+            self.prediction_model._ensure_dim(len(model_state.get("weights", [])))
+            self.prediction_model.weights[: len(model_state.get("weights", []))] = list(model_state.get("weights", []))
+            self.prediction_model.bias = float(model_state.get("bias", 0.0))
 
 
 # ============================================================
