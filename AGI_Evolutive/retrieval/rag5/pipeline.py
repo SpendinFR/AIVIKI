@@ -31,12 +31,15 @@ class RAGPipeline:
             qvec = encode_query(q)
             dense_all += self.ann.topk(qvec, k=self.cfg['retrieval']['topk_dense'])
             sparse_all += self.bm25.topk(q, k=self.cfg['retrieval']['topk_sparse'])
-        fused = fuse(dense_all, sparse_all,
-                     alpha=self.cfg['retrieval']['alpha_dense'],
-                     beta=self.cfg['retrieval']['beta_sparse'],
-                     meta=self.meta,
-                     recency_weight=self.cfg['retrieval'].get('recency_boost', 0.0),
-                     half_life_days=self.cfg['retrieval'].get('recency_half_life_days', 14.0))[: self.cfg['retrieval']['topk_fused']]
+        fused = fuse(
+            dense_all,
+            sparse_all,
+            alpha=self.cfg['retrieval']['alpha_dense'],
+            beta=self.cfg['retrieval']['beta_sparse'],
+            meta=self.meta,
+            recency_weight=self.cfg['retrieval'].get('recency_boost', 0.0),
+            half_life_days=self.cfg['retrieval'].get('recency_half_life_days', 14.0),
+        )[: self.cfg['retrieval']['topk_fused']]
         t_retr = time.perf_counter()
         payload = [(doc_id, self.docs.get(doc_id, ''), score) for doc_id, score in fused]
         ranked = rerank(question, payload, topk=self.cfg['rerank']['topk'])
@@ -48,6 +51,17 @@ class RAGPipeline:
                                        snippet_chars=self.cfg['compose']['snippet_chars'],
                                        tokenizer=self.cfg['compose'].get('tokenizer'))
         t_comp = time.perf_counter()
+        diagnostics = {
+            "dense_hits": len(dense_all),
+            "sparse_hits": len(sparse_all),
+            "fused_hits": len(fused),
+            "top_scores": [float(score) for _, score in ranked[:3]],
+            "latency_ms": {
+                "retrieval": (t_retr - t0) * 1000,
+                "rerank": (t_rer - t_retr) * 1000,
+                "compose": (t_comp - t_rer) * 1000,
+            },
+        }
         if should_refuse(citations,
                          min_docs=self.cfg['guards']['min_support_docs'],
                          min_score=self.cfg['guards']['min_support_score'],
@@ -55,10 +69,12 @@ class RAGPipeline:
             log_event({"type":"rag_result","status":"refused","q":question,"expanded":len(q_exp),
                        "retrieval":{"dense":len(dense_all),"sparse":len(sparse_all),"fused":len(fused)},
                        "latency_ms":{"retrieval":(t_retr-t0)*1000,"rerank":(t_rer-t_retr)*1000,"compose":(t_comp-t_rer)*1000}})
-            return refusal_message(self.cfg['guards']['refuse_message'])
+            diagnostics["decision"] = "refused"
+            return refusal_message(self.cfg['guards']['refuse_message'], diagnostics=diagnostics)
         answer = " ".join(c['snippet'] for c in citations[:3])
         log_event({"type":"rag_result","status":"ok","q":question,"expanded":len(q_exp),
                    "retrieval":{"dense":len(dense_all),"sparse":len(sparse_all),"fused":len(fused)},
                    "top_docs":[c['doc_id'] for c in citations[:5]],
                    "latency_ms":{"retrieval":(t_retr-t0)*1000,"rerank":(t_rer-t_retr)*1000,"compose":(t_comp-t_rer)*1000}})
-        return {"answer": answer, "citations": citations, "status": "ok"}
+        diagnostics["decision"] = "ok"
+        return {"answer": answer, "citations": citations, "status": "ok", "diagnostics": diagnostics}

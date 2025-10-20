@@ -1,13 +1,15 @@
 import json
 import re
 import time
-from typing import Any, Dict, Optional, List, Tuple, Callable
+from collections import deque
+from copy import deepcopy
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from AGI_Evolutive.autonomy import AutonomyManager
 from AGI_Evolutive.beliefs.graph import BeliefGraph, Evidence
 from AGI_Evolutive.knowledge.ontology_facade import EntityLinker, Ontology
 from AGI_Evolutive.cognition.evolution_manager import EvolutionManager
-from AGI_Evolutive.cognition.reward_engine import RewardEngine
+from AGI_Evolutive.cognition.reward_engine import RewardEngine, RewardEvent
 from AGI_Evolutive.core.telemetry import Telemetry
 from AGI_Evolutive.core.question_manager import QuestionManager
 from AGI_Evolutive.creativity import CreativitySystem
@@ -26,6 +28,7 @@ from AGI_Evolutive.memory import MemorySystem
 from AGI_Evolutive.memory.concept_extractor import ConceptExtractor
 from AGI_Evolutive.memory.episodic_linker import EpisodicLinker
 from AGI_Evolutive.memory.vector_store import VectorStore
+from AGI_Evolutive.retrieval.adaptive_controller import RAGAdaptiveController
 from AGI_Evolutive.metacog.calibration import CalibrationMeter, NoveltyDetector
 from AGI_Evolutive.metacognition import MetacognitiveSystem
 from AGI_Evolutive.models import IntentModel, UserModel
@@ -67,6 +70,9 @@ class CognitiveArchitecture:
         self.reflective_mode = True
         self.last_output_text = "OK"
         self.last_user_id = "default"
+        self.rag_adaptive: Optional[RAGAdaptiveController] = None
+        self._rag_last_context: Optional[Dict[str, Any]] = None
+        self._rag_feedback_queue = deque(maxlen=24)
 
         # Core subsystems
         self.telemetry.log("init", "core", {"stage": "memory"})
@@ -88,8 +94,6 @@ class CognitiveArchitecture:
         self.rag = None
         self.rag_cfg = None
         try:
-            import json
-
             try:
                 with open("configs/rag.json", "r", encoding="utf-8") as fh:
                     self.rag_cfg = json.load(fh)
@@ -125,11 +129,26 @@ class CognitiveArchitecture:
                     },
                 }
 
+            try:
+                self.rag_adaptive = RAGAdaptiveController(self.rag_cfg)
+                self.rag_cfg = self.rag_adaptive.current_config()
+            except Exception as adaptive_exc:
+                self.rag_adaptive = None
+                if hasattr(self, "logger"):
+                    try:
+                        self.logger.warning(
+                            "RAG adaptatif désactivé: %s", adaptive_exc
+                        )
+                    except Exception:
+                        pass
+
             # Import du pipeline uniquement ici, et seulement si on va l’utiliser
             try:
                 from AGI_Evolutive.retrieval.rag5.pipeline import RAGPipeline
 
                 self.rag = RAGPipeline(self.rag_cfg)
+                if self.rag_adaptive:
+                    self._apply_rag_config(self.rag_cfg)
                 # Seed initial depuis la mémoire (non bloquant)
                 try:
                     for m in self.memory.get_recent_memories(n=2000):
@@ -220,6 +239,10 @@ class CognitiveArchitecture:
             metacognition=self.metacognition,
             persist_dir="data",
         )
+        try:
+            self.reward_engine.register_listener(self._on_reward_event)
+        except Exception:
+            pass
 
         self.autonomy = AutonomyManager(
             architecture=self,
@@ -361,6 +384,126 @@ class CognitiveArchitecture:
             metacog=self.metacognition,
             emotions=self.emotions,
         )
+
+    def _apply_rag_config(self, config: Dict[str, Any]) -> None:
+        if not isinstance(config, dict):
+            return
+        try:
+            cfg = deepcopy(config)
+        except Exception:
+            cfg = config
+        self.rag_cfg = cfg
+        if self.rag is not None:
+            try:
+                self.rag.cfg = cfg
+            except Exception:
+                pass
+
+    def prepare_rag_query(self, question: str) -> Optional[Dict[str, Any]]:
+        if not self.rag_adaptive:
+            return None
+        try:
+            context = self.rag_adaptive.prepare_query(question)
+            cfg = context.get("config")
+            if isinstance(cfg, dict):
+                self._apply_rag_config(cfg)
+            self._rag_last_context = context
+            return context
+        except Exception as exc:
+            self._rag_last_context = None
+            if hasattr(self, "logger"):
+                try:
+                    self.logger.warning("RAG adaptatif – préparation échouée: %s", exc)
+                except Exception:
+                    pass
+            return None
+
+    def observe_rag_outcome(
+        self,
+        question: str,
+        rag_out: Dict[str, Any],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not self.rag_adaptive:
+            return
+        ctx = context or self._rag_last_context
+        if not isinstance(ctx, dict):
+            return
+        payload = dict(ctx)
+        payload["question"] = question
+        try:
+            self.rag_adaptive.observe_outcome(payload, rag_out)
+            self._rag_feedback_queue.append({"ts": time.time()})
+        except Exception as exc:
+            if hasattr(self, "logger"):
+                try:
+                    self.logger.warning("RAG adaptatif – observation échouée: %s", exc)
+                except Exception:
+                    pass
+        finally:
+            self._rag_last_context = None
+
+    def _on_reward_event(self, event: RewardEvent) -> None:
+        if not self.rag_adaptive:
+            return
+        if not isinstance(event, RewardEvent):
+            return
+        if getattr(event, "channel", "") != "chat":
+            return
+        now = float(getattr(event, "timestamp", time.time()))
+        while self._rag_feedback_queue and now - self._rag_feedback_queue[0]["ts"] > 60.0:
+            self._rag_feedback_queue.popleft()
+        if not self._rag_feedback_queue:
+            return
+        intensity = getattr(event, "intensity", 0.0)
+        try:
+            intensity = float(intensity)
+        except Exception:
+            intensity = 0.0
+        multiplier = max(0.2, min(1.0, intensity)) if intensity > 0 else 0.2
+        reward = getattr(event, "extrinsic_reward", 0.0)
+        try:
+            reward = float(reward)
+        except Exception:
+            reward = 0.0
+        reward = max(0.0, min(1.0, (reward + 1.0) / 2.0))
+        reward *= multiplier
+        try:
+            self.rag_adaptive.apply_feedback(reward)
+        except Exception as exc:
+            if hasattr(self, "logger"):
+                try:
+                    self.logger.warning("RAG adaptatif – feedback rejeté: %s", exc)
+                except Exception:
+                    pass
+        finally:
+            if self._rag_feedback_queue:
+                self._rag_feedback_queue.popleft()
+
+    def bump_global_activation(self, delta: float, reinforce: Optional[float] = None) -> None:
+        base = max(0.0, min(1.0, float(self.global_activation) + float(delta)))
+        if self.rag_adaptive:
+            try:
+                self.global_activation = self.rag_adaptive.update_global_activation(base, reinforce=reinforce)
+                return
+            except Exception:
+                pass
+        self.global_activation = base
+
+    def on_affect_modulators(self, mods: Dict[str, Any]) -> None:
+        if not isinstance(mods, dict):
+            return
+        delta = mods.get("activation_delta", 0.0)
+        try:
+            delta = float(delta)
+        except Exception:
+            delta = 0.0
+        feedback = mods.get("activation_feedback")
+        reinforce = None
+        if isinstance(feedback, (int, float)):
+            reinforce = max(0.0, min(1.0, 0.5 + 0.5 * float(feedback)))
+        self.bump_global_activation(delta, reinforce=reinforce)
+        mods["_activation_handled"] = True
 
     def _language_state_snapshot(self) -> Dict[str, Any]:
         language = getattr(self, "language", None)
