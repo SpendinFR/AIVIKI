@@ -2131,6 +2131,12 @@ class Orchestrator:
                     except Exception:
                         pass
 
+                    current_topic = (
+                        ctx.get("topic")
+                        or getattr(self, "_current_topic", None)
+                        or "__generic__"
+                    )
+
                     try:
                         decision_info = ctx.get("decision") or {}
                         ema_context = {
@@ -2148,12 +2154,6 @@ class Orchestrator:
                         )
                     except Exception:
                         pass
-
-                    current_topic = (
-                        ctx.get("topic")
-                        or getattr(self, "_current_topic", None)
-                        or "__generic__"
-                    )
 
                     if understanding_agg:
                         try:
