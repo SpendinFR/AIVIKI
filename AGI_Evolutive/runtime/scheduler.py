@@ -18,11 +18,13 @@ and using the fully qualified package path fixes the scheduler logic.
 """
 
 import json
+import math
 import os
+import random
 import threading
 import time
 import traceback
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
 from AGI_Evolutive.core.global_workspace import GlobalWorkspace
@@ -54,6 +56,182 @@ def _append_jsonl(path: str, obj: Dict[str, Any]):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(json_sanitize(obj), ensure_ascii=False) + "\n")
+
+
+def _clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
+
+
+class AdaptiveTaskPolicy:
+    """Adapte les intervalles à partir d'un signal de récompense en ligne.
+
+    La politique combine deux mécanismes :
+
+    * Une moyenne mobile exponentielle avec dérive dont le facteur d'oubli est
+      sélectionné par Thompson Sampling parmi ``beta_options``.
+    * Une transformation tanh du score pour ajuster l'intervalle dans des
+      bornes raisonnables (``min_scale``/``max_scale``).
+    """
+
+    beta_options: Sequence[float] = (0.2, 0.4, 0.6, 0.8)
+
+    @staticmethod
+    def _beta_key(beta: float) -> str:
+        return f"{beta:.1f}"
+
+    def __init__(
+        self,
+        base_interval: float,
+        *,
+        min_scale: float = 0.3,
+        max_scale: float = 2.5,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.base_interval = float(max(0.5, base_interval))
+        self.min_scale = float(max(0.1, min_scale))
+        self.max_scale = float(max(self.min_scale, max_scale))
+
+        self.score = 0.0
+        self.current_interval = self.base_interval
+        self.current_beta = 0.4
+        self._beta_stats: Dict[str, Dict[str, float]] = {
+            self._beta_key(beta): {"alpha": 1.0, "beta": 1.0} for beta in self.beta_options
+        }
+
+        if state:
+            self.score = float(state.get("score", 0.0))
+            self.current_interval = float(state.get("current_interval", self.base_interval))
+            self.current_beta = float(state.get("current_beta", self.current_beta))
+            stored_stats = state.get("beta_stats") or {}
+            for key, val in stored_stats.items():
+                if key in self._beta_stats and isinstance(val, dict):
+                    alpha = float(val.get("alpha", 1.0))
+                    beta = float(val.get("beta", 1.0))
+                    self._beta_stats[key]["alpha"] = max(1e-3, alpha)
+                    self._beta_stats[key]["beta"] = max(1e-3, beta)
+
+        self._update_interval()
+
+    # Thompson sampling over the beta (forgetting factor) candidates ------------
+    def _sample_beta(self) -> float:
+        draws = {}
+        for beta in self.beta_options:
+            stats = self._beta_stats[self._beta_key(beta)]
+            a = max(1e-3, stats["alpha"])
+            b = max(1e-3, stats["beta"])
+            try:
+                draws[beta] = random.betavariate(a, b)
+            except Exception:
+                draws[beta] = a / (a + b)
+        chosen = max(draws, key=draws.get) if draws else self.current_beta
+        self.current_beta = float(chosen)
+        return self.current_beta
+
+    def _update_interval(self) -> None:
+        # Score -> tanh -> scale in [min_scale, max_scale]
+        norm = math.tanh(self.score)
+        scale = 1.0 - norm * 0.8  # high score -> faster (smaller interval)
+        scale = _clamp(scale, self.min_scale, self.max_scale)
+        self.current_interval = self.base_interval * scale
+
+    def update(self, reward: float, duration: float, success: bool) -> None:
+        forget = self._sample_beta()
+        stats = self._beta_stats[self._beta_key(forget)]
+        pos = max(0.0, reward)
+        neg = max(0.0, -reward)
+        # Apprentissage online des stats du TS avec dérive
+        stats["alpha"] = (1.0 - forget) * stats["alpha"] + forget * (1.0 + pos)
+        stats["beta"] = (1.0 - forget) * stats["beta"] + forget * (1.0 + neg)
+
+        signed = reward
+        if not success:
+            signed -= 0.3
+        # durée plus longue que prévu => légère pénalité
+        ratio = duration / max(1e-3, self.base_interval)
+        if ratio > 1.2:
+            signed -= min(0.5, ratio - 1.0)
+        elif ratio < 0.8:
+            signed += min(0.3, 1.0 - ratio)
+
+        self.score = (1.0 - forget) * self.score + forget * signed
+        self._update_interval()
+
+    def to_state(self) -> Dict[str, Any]:
+        return {
+            "score": self.score,
+            "current_interval": self.current_interval,
+            "current_beta": self.current_beta,
+            "beta_stats": self._beta_stats,
+            "base_interval": self.base_interval,
+            "min_scale": self.min_scale,
+            "max_scale": self.max_scale,
+        }
+
+
+class OnlineLogistic:
+    """Régression logistique online simple avec décroissance légère."""
+
+    def __init__(self, n_features: int, lr: float = 0.1, l2: float = 1e-3, state: Optional[Dict[str, Any]] = None):
+        self.n_features = int(n_features)
+        self.lr = float(lr)
+        self.l2 = float(max(0.0, l2))
+        self.weights = [0.0] * self.n_features
+        if state and isinstance(state.get("weights"), list):
+            stored = list(state["weights"])
+            for i in range(min(len(stored), self.n_features)):
+                self.weights[i] = float(stored[i])
+
+    def _logit(self, features: Sequence[float]) -> float:
+        z = 0.0
+        for w, x in zip(self.weights, features):
+            z += w * float(x)
+        return z
+
+    def predict(self, features: Sequence[float]) -> float:
+        z = _clamp(self._logit(features), -20.0, 20.0)
+        return 1.0 / (1.0 + math.exp(-z))
+
+    def update(self, features: Sequence[float], label: float) -> None:
+        label = _clamp(float(label), 0.0, 1.0)
+        pred = self.predict(features)
+        error = pred - label
+        for idx in range(self.n_features):
+            grad = error * float(features[idx]) + self.l2 * self.weights[idx]
+            self.weights[idx] -= self.lr * grad
+
+    def to_state(self) -> Dict[str, Any]:
+        return {"weights": list(self.weights), "lr": self.lr, "l2": self.l2}
+
+
+class OnlinePlattCalibrator:
+    """Calibration probabiliste style Platt en mise à jour en ligne."""
+
+    def __init__(self, lr: float = 0.05, state: Optional[Dict[str, Any]] = None):
+        self.lr = float(lr)
+        self.a = 1.0
+        self.b = 0.0
+        if state:
+            self.a = float(state.get("a", self.a))
+            self.b = float(state.get("b", self.b))
+
+    def transform(self, p: float) -> float:
+        p = _clamp(p, 1e-4, 1.0 - 1e-4)
+        logit = math.log(p / (1.0 - p))
+        z = _clamp(self.a * logit + self.b, -20.0, 20.0)
+        return 1.0 / (1.0 + math.exp(-z))
+
+    def update(self, p: float, label: float) -> None:
+        label = _clamp(label, 0.0, 1.0)
+        p = _clamp(p, 1e-4, 1.0 - 1e-4)
+        logit = math.log(p / (1.0 - p))
+        z = _clamp(self.a * logit + self.b, -20.0, 20.0)
+        pred = 1.0 / (1.0 + math.exp(-z))
+        error = pred - label
+        self.a -= self.lr * error * logit
+        self.b -= self.lr * error
+
+    def to_state(self) -> Dict[str, Any]:
+        return {"a": self.a, "b": self.b, "lr": self.lr}
 class Scheduler:
     """
     Orchestrateur de cycles :
@@ -83,11 +261,33 @@ class Scheduler:
             "last_runs": {},   # task_name -> ts
             "enabled": True
         })
+        self.state.setdefault("policies", {})
+        self.state.setdefault("models", {})
+        self.state["models"].setdefault("reflection", {})
         self.running = False
         self.thread = None
 
         # registre des tâches (nom -> dict)
         self.tasks: Dict[str, Dict[str, Any]] = {}
+        self._policies: Dict[str, AdaptiveTaskPolicy] = {}
+        self._pending_reflection_update: Optional[Dict[str, Any]] = None
+
+        reflection_state = self.state["models"].get("reflection", {})
+        self._reflection_model = OnlineLogistic(
+            n_features=6,
+            state=reflection_state.get("logistic"),
+        )
+        self._reflection_calibrator = OnlinePlattCalibrator(
+            state=reflection_state.get("calibrator"),
+        )
+        self._last_planning_outcome: Dict[str, Any] = {}
+        self._last_metrics_snapshot: Dict[str, Any] = {}
+        self._prev_metrics_value: float = 0.0
+        self._last_metrics_value: float = 0.0
+        self._last_metrics_delta: float = 0.0
+        self._metrics_ready: bool = False
+        self._last_applicable_mais: List[Any] = []
+
         self._register_default_tasks()
 
         self.workspace = getattr(self.arch, "global_workspace", None)
@@ -135,7 +335,6 @@ class Scheduler:
             self._tick_counter = int(getattr(self, "_tick_counter", self._tick))
         except Exception:
             self._tick_counter = self._tick
-        self._last_applicable_mais: List[Any] = []
 
     # ---------- helpers ----------
     def _build_state_snapshot(self) -> Dict[str, Any]:
@@ -251,10 +450,27 @@ class Scheduler:
                 pass
 
     # ---------- registration ----------
+    def _init_policy(self, name: str, interval_s: float) -> AdaptiveTaskPolicy:
+        stored = self.state["policies"].get(name)
+        policy_state: Optional[Dict[str, Any]] = None
+        base_interval = float(interval_s)
+        if isinstance(stored, dict):
+            policy_state = dict(stored)
+            policy_state["base_interval"] = base_interval
+        policy = AdaptiveTaskPolicy(base_interval=base_interval, state=policy_state)
+        self._policies[name] = policy
+        return policy
+
     def register(self, name: str, fn: Callable[[], None], interval_s: float, jitter_s: float = 0.0):
+        policy = self._init_policy(name, float(interval_s))
         self.tasks[name] = {
-            "fn": fn, "interval": float(interval_s), "jitter": float(jitter_s)
+            "fn": fn,
+            "interval": policy.current_interval,
+            "jitter": float(jitter_s),
+            "policy": policy,
+            "base_interval": float(interval_s),
         }
+        self.state["policies"][name] = policy.to_state()
 
     def _register_default_tasks(self):
         # Les fonctions sont toutes robustifiées (attr checks)
@@ -265,6 +481,96 @@ class Scheduler:
         self.register("planning", self._task_planning, interval_s=90.0, jitter_s=8.0)
         self.register("reflection", self._task_reflection, interval_s=120.0, jitter_s=10.0)
         self.register("evolution", self._task_evolution, interval_s=120.0, jitter_s=10.0)
+
+    # ---------- adaptation helpers ----------
+    def _scalarize_metrics(self, metrics: Dict[str, Any]) -> float:
+        values: List[float] = []
+
+        def _collect(obj: Any) -> None:
+            if isinstance(obj, dict):
+                for val in obj.values():
+                    _collect(val)
+            elif isinstance(obj, (int, float)):
+                values.append(float(obj))
+
+        _collect(metrics or {})
+        if not values:
+            return 0.0
+        return sum(values) / float(len(values))
+
+    def _compute_task_reward(self, name: str, ok: bool, duration: float) -> float:
+        reward = 0.6 if ok else -0.9
+        if name == "planning":
+            outcome = self._last_planning_outcome or {}
+            trust = float(outcome.get("trust_delta", 0.0))
+            harm = float(outcome.get("harm_delta", 0.0))
+            regret = float(outcome.get("regret", 0.0))
+            reward += _clamp(trust - harm, -1.5, 1.5)
+            reward -= _clamp(regret, 0.0, 1.5) * 0.5
+        elif name == "evolution":
+            reward += _clamp(self._last_metrics_delta, -2.0, 2.0) * 0.4
+            if self._metrics_ready:
+                reward += 0.2
+        elif name == "episodes":
+            applicable = len(self._last_applicable_mais or [])
+            reward += _clamp(applicable / 5.0, 0.0, 1.0) * 0.3
+        elif name == "reflection":
+            reward += (self._derive_reflection_label(self._last_planning_outcome) - 0.5) * 0.8
+        return _clamp(reward, -2.5, 2.5)
+
+    def _update_task_policy(self, name: str, policy: AdaptiveTaskPolicy, ok: bool, duration: float) -> None:
+        try:
+            reward = self._compute_task_reward(name, ok, duration)
+            policy.update(reward, duration, ok)
+        except Exception:
+            return
+        self.state["policies"][name] = policy.to_state()
+
+    def _build_reflection_features(self) -> List[float]:
+        outcome = self._last_planning_outcome or {}
+        trust = float(outcome.get("trust_delta", 0.0))
+        harm = float(outcome.get("harm_delta", 0.0))
+        regret = float(outcome.get("regret", 0.0))
+        metrics_delta = float(self._last_metrics_delta)
+        applicable = len(self._last_applicable_mais or [])
+        norm_applicable = _clamp(applicable / 10.0, 0.0, 1.0)
+        return [
+            1.0,
+            trust,
+            -harm,
+            regret,
+            metrics_delta,
+            norm_applicable,
+        ]
+
+    def _derive_reflection_label(self, outcome: Optional[Dict[str, Any]]) -> float:
+        if not outcome:
+            return 0.5
+        trust = float(outcome.get("trust_delta", 0.0))
+        harm = float(outcome.get("harm_delta", 0.0))
+        regret = float(outcome.get("regret", 0.0))
+        score = trust - harm - 0.5 * regret
+        return 1.0 if score >= 0.0 else 0.0
+
+    def _update_reflection_model(self, outcome: Dict[str, Any]) -> None:
+        if not self._pending_reflection_update:
+            return
+        features = self._pending_reflection_update.get("features")
+        raw_prob = self._pending_reflection_update.get("raw_prob")
+        if not isinstance(features, list) or raw_prob is None:
+            self._pending_reflection_update = None
+            return
+        label = self._derive_reflection_label(outcome)
+        try:
+            self._reflection_model.update(features, label)
+            self._reflection_calibrator.update(raw_prob, label)
+        except Exception:
+            pass
+        self.state["models"]["reflection"] = {
+            "logistic": self._reflection_model.to_state(),
+            "calibrator": self._reflection_calibrator.to_state(),
+        }
+        self._pending_reflection_update = None
 
     # ---------- run loop ----------
     def start(self):
@@ -284,7 +590,11 @@ class Scheduler:
             now = _now()
             for name, cfg in self.tasks.items():
                 last = float(self.state["last_runs"].get(name, 0.0))
-                due = last + cfg["interval"]
+                policy = cfg.get("policy")
+                interval = cfg.get("interval", 0.0)
+                if policy is not None:
+                    interval = policy.current_interval
+                due = last + interval
                 if now >= due:
                     # jitter léger
                     j = cfg["jitter"]
@@ -302,9 +612,17 @@ class Scheduler:
                     t1 = _now()
 
                     self.state["last_runs"][name] = t1
+                    duration = t1 - t0
+                    if policy is not None:
+                        self._update_task_policy(name, policy, ok, duration)
+                        cfg["interval"] = policy.current_interval
+                    if policy is not None:
+                        self.state["policies"][name] = policy.to_state()
                     _write_json(self.paths["state"], self.state)
                     _append_jsonl(self.paths["log"], {
-                        "t0": t0, "t1": t1, "dt": t1 - t0, "task": name, "ok": ok, "err": err
+                        "t0": t0, "t1": t1, "dt": duration, "task": name, "ok": ok, "err": err,
+                        "interval": interval,
+                        "next_interval": cfg.get("interval"),
                     })
             time.sleep(0.5)
 
@@ -450,17 +768,20 @@ class Scheduler:
                     self._render_and_emit(decision, state)
 
                 applicable_mais = list(getattr(self, "_last_applicable_mais", []))
+                self._last_planning_outcome = {}
                 if applicable_mais:
                     try:
                         from AGI_Evolutive.social.social_critic import SocialCritic
 
                         critic = SocialCritic()
-                        outcome = {}
+                        outcome: Dict[str, Any] = {}
                         if hasattr(critic, "last_outcome"):
                             try:
                                 outcome = critic.last_outcome() or {}
                             except Exception:
                                 outcome = {}
+                        self._last_planning_outcome = outcome
+                        self._update_reflection_model(outcome)
                         for mechanism in applicable_mais:
                             try:
                                 wins = 1.0 if any(getattr(bid, "source", "") == f"MAI:{mechanism.id}" for bid in winners) else 0.0
@@ -481,21 +802,32 @@ class Scheduler:
                                 continue
                     except Exception:
                         pass
+                elif self._pending_reflection_update:
+                    self._update_reflection_model({})
 
     def _task_reflection(self):
         mc = getattr(self.arch, "metacognition", None) or getattr(self.arch, "metacognitive_system", None)
-        if mc and hasattr(mc, "trigger_reflection"):
-            try:
-                # réflexion légère récurrente (domain REASONING par défaut)
-                from AGI_Evolutive.metacognition import CognitiveDomain
-                mc.trigger_reflection(
-                    trigger="periodic_scheduler",
-                    domain=CognitiveDomain.REASONING,
-                    urgency=0.3,
-                    depth=1
-                )
-            except Exception:
-                pass
+        if not mc or not hasattr(mc, "trigger_reflection"):
+            self._pending_reflection_update = None
+            return
+        try:
+            # réflexion légère récurrente (domain REASONING par défaut)
+            from AGI_Evolutive.metacognition import CognitiveDomain
+            features = self._build_reflection_features()
+            raw_prob = self._reflection_model.predict(features)
+            calibrated = self._reflection_calibrator.transform(raw_prob)
+            urgency = _clamp(calibrated, 0.15, 0.95)
+            depth = 1 if urgency < 0.6 else 2
+            self._pending_reflection_update = {"features": features, "raw_prob": raw_prob}
+            mc.trigger_reflection(
+                trigger="periodic_scheduler",
+                domain=CognitiveDomain.REASONING,
+                urgency=urgency,
+                depth=depth
+            )
+        except Exception:
+            self._pending_reflection_update = None
+            pass
 
     def _task_evolution(self):
         evo = getattr(self.arch, "evolution", None)
@@ -544,6 +876,15 @@ class Scheduler:
                     metrics_snapshot = metrics.snapshot() or {}
                 except Exception:
                     metrics_snapshot = {}
+            self._last_metrics_snapshot = metrics_snapshot or {}
+            new_value = self._scalarize_metrics(self._last_metrics_snapshot)
+            if self._metrics_ready:
+                self._last_metrics_delta = new_value - self._last_metrics_value
+            else:
+                self._metrics_ready = True
+                self._last_metrics_delta = 0.0
+            self._prev_metrics_value = self._last_metrics_value
+            self._last_metrics_value = new_value
 
             try:
                 self.principle_inducer.run(recent_docs, recent_dialogues, metrics_snapshot)
