@@ -1,8 +1,10 @@
 import json
+import math
 import os
+import random
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
 
@@ -29,6 +31,9 @@ def _rag_signals(rag_out: Dict[str, Any]) -> Dict[str, float]:
 _PLANS = cfg()["PLANS_PATH"]
 
 DEFAULT_STOP_RULES: Dict[str, Any] = {"max_options": 3, "max_seconds": 900}
+
+_BANDIT_BETAS: Tuple[float, ...] = (0.2, 0.4, 0.6, 0.8)
+_MAX_DRIFTS = 32
 
 
 def _get_field(obj: Any, key: str, default: Any = None) -> Any:
@@ -63,9 +68,158 @@ class Planner:
 
     def __init__(self, architecture: Optional[Any] = None) -> None:
         self._lock = threading.RLock()
-        self.state: Dict[str, Any] = {"plans": {}, "updated_at": time.time()}
+        self.state: Dict[str, Any] = {"plans": {}, "metrics": {}, "updated_at": time.time()}
         self.architecture: Optional[Any] = architecture
         self._load()
+        self._ensure_metrics_structures()
+
+    # ------------------------------------------------------------------
+    # Internal helpers for adaptive metrics / bandits
+    # ------------------------------------------------------------------
+
+    def _ensure_metrics_structures(self) -> None:
+        with self._lock:
+            metrics = self.state.setdefault("metrics", {})
+            metrics.setdefault("signals", {})
+            metrics.setdefault("outcomes", {"count": 0, "success": 0, "avg_duration": 0.0})
+            metrics.setdefault("stop_rules", {})
+            metrics.setdefault("drifts", [])
+
+    def _signal_metrics(self, signal: str) -> Dict[str, Any]:
+        metrics = self.state.setdefault("metrics", {})
+        signals = metrics.setdefault("signals", {})
+        data = signals.setdefault(signal, {"bandit": {}, "ema": {}, "history": []})
+        bandit = data.setdefault("bandit", {})
+        ema_store = data.setdefault("ema", {})
+        for beta in _BANDIT_BETAS:
+            key = f"{beta:.1f}"
+            bandit.setdefault(key, {"alpha": 1.0, "beta": 1.0})
+            ema_store.setdefault(key, 0.0)
+        data.setdefault("last_used", {})
+        return data
+
+    def _select_beta(self, bandit_stats: Dict[str, Dict[str, float]]) -> str:
+        best_beta = None
+        best_sample = float("-inf")
+        for beta_key, params in bandit_stats.items():
+            alpha = max(1e-3, float(params.get("alpha", 1.0)))
+            beta_param = max(1e-3, float(params.get("beta", 1.0)))
+            sample = random.betavariate(alpha, beta_param)
+            if sample > best_sample:
+                best_sample = sample
+                best_beta = beta_key
+        return best_beta or next(iter(bandit_stats.keys()))
+
+    def _apply_adaptive_ema(self, signal: str, raw_value: float) -> Tuple[float, str]:
+        data = self._signal_metrics(signal)
+        bandit_stats = data["bandit"]
+        selected_key = self._select_beta(bandit_stats)
+        beta_value = float(selected_key)
+        ema_store = data["ema"]
+        previous = float(ema_store.get(selected_key, raw_value))
+        ema_value = beta_value * raw_value + (1.0 - beta_value) * previous
+        ema_store[selected_key] = ema_value
+        data["last_used"] = {
+            "beta": selected_key,
+            "raw": float(raw_value),
+            "ema": float(ema_value),
+            "ts": time.time(),
+        }
+        history = data.setdefault("history", [])
+        history.append({"ts": time.time(), "raw": float(raw_value), "ema": float(ema_value)})
+        if len(history) > 32:
+            del history[0 : len(history) - 32]
+        self._record_drift(signal, raw_value, ema_value)
+        return float(ema_value), selected_key
+
+    def _record_drift(self, signal: str, raw_value: float, ema_value: float) -> None:
+        metrics = self.state.setdefault("metrics", {})
+        drifts = metrics.setdefault("drifts", [])
+        delta = abs(raw_value - ema_value)
+        # Trigger drift log when EMA lags behind by more than 30% of raw magnitude
+        threshold = 0.3 * (abs(raw_value) + 1e-9)
+        if delta >= threshold:
+            drifts.append(
+                {
+                    "ts": time.time(),
+                    "signal": signal,
+                    "raw": float(raw_value),
+                    "ema": float(ema_value),
+                    "delta": float(delta),
+                }
+            )
+            if len(drifts) > _MAX_DRIFTS:
+                del drifts[0 : len(drifts) - _MAX_DRIFTS]
+
+    def _capture_signal_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        metrics = self.state.get("metrics", {}).get("signals", {})
+        snapshot: Dict[str, Dict[str, Any]] = {}
+        for signal, data in metrics.items():
+            last = data.get("last_used") if isinstance(data, dict) else None
+            if isinstance(last, dict) and last.get("beta") is not None:
+                snapshot[signal] = {
+                    "beta": last.get("beta"),
+                    "ema": float(last.get("ema", 0.0)),
+                    "raw": float(last.get("raw", 0.0)),
+                    "ts": float(last.get("ts", time.time())),
+                }
+        return snapshot
+
+    def _register_outcome(self, success: bool, elapsed: float) -> None:
+        metrics = self.state.setdefault("metrics", {})
+        outcomes = metrics.setdefault("outcomes", {"count": 0, "success": 0, "avg_duration": 0.0})
+        outcomes["count"] = int(outcomes.get("count", 0)) + 1
+        if success:
+            outcomes["success"] = float(outcomes.get("success", 0.0)) + 1.0
+        else:
+            outcomes.setdefault("success", float(outcomes.get("success", 0.0)))
+        avg_duration = float(outcomes.get("avg_duration", elapsed))
+        beta = 0.3
+        outcomes["avg_duration"] = beta * float(elapsed) + (1.0 - beta) * avg_duration
+        history = outcomes.setdefault("history", [])
+        history.append({"ts": time.time(), "success": bool(success), "duration": float(elapsed)})
+        if len(history) > 64:
+            del history[0 : len(history) - 64]
+
+    def _update_signal_feedback(self, metrics: Dict[str, Any], success: bool) -> None:
+        signals = metrics.get("signals") if isinstance(metrics, dict) else None
+        if not isinstance(signals, dict):
+            return
+        for signal, payload in signals.items():
+            if not isinstance(payload, dict):
+                continue
+            beta_key = payload.get("beta")
+            estimate = payload.get("ema")
+            if beta_key is None or estimate is None:
+                continue
+            self._register_signal_feedback(signal, str(beta_key), float(estimate), success)
+
+    def _register_signal_feedback(
+        self,
+        signal: str,
+        beta_key: str,
+        estimate: float,
+        success: bool,
+    ) -> None:
+        data = self._signal_metrics(signal)
+        stats = data["bandit"].setdefault(beta_key, {"alpha": 1.0, "beta": 1.0})
+        normalized = self._normalize_signal_estimate(signal, estimate)
+        prediction = normalized >= 0.5
+        if success == prediction:
+            stats["alpha"] = float(stats.get("alpha", 1.0)) + 1.0
+        else:
+            stats["beta"] = float(stats.get("beta", 1.0)) + 1.0
+
+    def _normalize_signal_estimate(self, signal: str, value: float) -> float:
+        if signal in {"rag_docs"}:
+            # more documents increases value but saturates quickly
+            norm = 1.0 - math.exp(-max(0.0, value))
+        elif signal in {"rag_diversity"}:
+            norm = max(0.0, min(1.0, value))
+        else:
+            # assume scores in [0, 1] but clamp otherwise
+            norm = max(0.0, min(1.0, value))
+        return norm
 
     def _maybe_preplan_with_rag(self, frame: Any, architecture: Optional[Any]) -> Dict[str, Any]:
         out = {"rag_out": None, "rag_signals": {}, "grounded_context": []}
@@ -89,12 +243,24 @@ class Planner:
                         if cites
                         else 0.0
                     )
-                    out["rag_signals"] = {
+                    raw_signals = {
                         "rag_top1": float(top1),
                         "rag_docs": float(len(cites)),
                         "rag_mean": float(mean),
                         "rag_diversity": float(div),
                     }
+                    adapt_signals: Dict[str, float] = {}
+                    signal_meta: Dict[str, Dict[str, Any]] = {}
+                    for name, raw in raw_signals.items():
+                        ema_value, beta_key = self._apply_adaptive_ema(name, raw)
+                        adapt_signals[name] = float(ema_value)
+                        signal_meta[name] = {
+                            "raw": float(raw),
+                            "ema": float(ema_value),
+                            "beta": beta_key,
+                        }
+                    out["rag_signals"] = adapt_signals
+                    out["rag_signal_meta"] = signal_meta
                     out["grounded_context"] = [
                         {
                             "doc_id": c.get("doc_id"),
@@ -115,7 +281,9 @@ class Planner:
                 with open(_PLANS, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 with self._lock:
-                    self.state = data
+                    if isinstance(data, dict):
+                        self.state.update(data)
+                self._ensure_metrics_structures()
             except Exception:
                 pass
 
@@ -144,6 +312,25 @@ class Planner:
 
     def _normalise_stop_rules(self, stop_rules: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         rules = dict(DEFAULT_STOP_RULES)
+        metrics = self.state.get("metrics", {}).get("outcomes", {})
+        count = int(metrics.get("count", 0))
+        success = float(metrics.get("success", 0.0))
+        success_rate = success / count if count else 0.0
+        avg_duration = float(metrics.get("avg_duration", 0.0))
+
+        # Adaptive tuning : more exploration when success rate is low
+        if count and success_rate < 0.45:
+            rules["max_options"] = min(6, int(round(rules["max_options"] * 1.5)))
+        elif count and success_rate > 0.75:
+            rules["max_options"] = max(2, int(round(rules["max_options"] * 0.8)))
+
+        if avg_duration and avg_duration > 0:
+            # keep some slack but avoid exploding runtime
+            rules["max_seconds"] = max(
+                120,
+                int(min(1800, avg_duration * 3.0)),
+            )
+
         if isinstance(stop_rules, dict):
             for key, value in stop_rules.items():
                 if value is None:
@@ -206,6 +393,9 @@ class Planner:
                     signals = rag_bundle.get("rag_signals") or {}
                     if signals:
                         frame.setdefault("signals", {}).update(signals)
+                    meta = rag_bundle.get("rag_signal_meta")
+                    if meta:
+                        frame.setdefault("signals_meta", {}).update(meta)
                     grounded = rag_bundle.get("grounded_context")
                     if grounded:
                         frame.setdefault("context", {})["grounded_evidence"] = grounded
@@ -281,6 +471,9 @@ class Planner:
             context["grounded_evidence"] = rag_bundle["grounded_context"]
             signals = _ensure_dict_field(frame, "signals")
             signals.update(rag_bundle["rag_signals"])
+            meta = rag_bundle.get("rag_signal_meta")
+            if meta:
+                _ensure_dict_field(frame, "signals_meta").update(meta)
 
         plan = _get_field(frame, "plan")
         if isinstance(plan, dict):
@@ -307,6 +500,9 @@ class Planner:
                     step["status"] = "doing"
                     step["last_emitted_at"] = time.time()
                     action = self._step_to_action(goal_id, step)
+                    signal_snapshot = self._capture_signal_snapshot()
+                    if signal_snapshot:
+                        step.setdefault("metrics", {})["signals"] = signal_snapshot
                     self._save()
                     return action
             return None
@@ -323,6 +519,12 @@ class Planner:
                     step.setdefault("history", []).append(
                         {"ts": time.time(), "event": "completed", "success": success}
                     )
+                    emitted_at = step.get("last_emitted_at")
+                    if emitted_at:
+                        elapsed = max(0.0, time.time() - emitted_at)
+                        self._register_outcome(success, elapsed)
+                    if step.get("metrics"):
+                        self._update_signal_feedback(step["metrics"], bool(success))
                     break
             self._save()
 
