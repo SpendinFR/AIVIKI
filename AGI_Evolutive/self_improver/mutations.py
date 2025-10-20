@@ -154,11 +154,20 @@ class _MutationMemory:
 _MEMORY = _MutationMemory()
 
 
+def _probability_like(key: str, value: float) -> bool:
+    if "threshold" in key:
+        return True
+    default = DEFAULTS.get(key)
+    if default is not None and 0.0 <= default <= 1.0:
+        return True
+    return 0.0 <= value <= 1.0
+
+
 def _mutate_value(key: str, value: float) -> float:
     base_amp = _base_amplitude(key)
     sigma = _MEMORY.scale_amplitude(key, base_amp)
     mutated = random.gauss(value, sigma)
-    if 0.0 <= value <= 1.0 or "threshold" in key:
+    if _probability_like(key, value):
         return _clip(mutated)
     return mutated
 

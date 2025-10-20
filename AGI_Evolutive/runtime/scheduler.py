@@ -553,6 +553,8 @@ class Scheduler:
         return 1.0 if score >= 0.0 else 0.0
 
     def _update_reflection_model(self, outcome: Dict[str, Any]) -> None:
+        if not outcome:
+            return
         if not self._pending_reflection_update:
             return
         features = self._pending_reflection_update.get("features")
@@ -780,8 +782,9 @@ class Scheduler:
                                 outcome = critic.last_outcome() or {}
                             except Exception:
                                 outcome = {}
-                        self._last_planning_outcome = outcome
-                        self._update_reflection_model(outcome)
+                        if outcome:
+                            self._last_planning_outcome = outcome
+                            self._update_reflection_model(outcome)
                         for mechanism in applicable_mais:
                             try:
                                 wins = 1.0 if any(getattr(bid, "source", "") == f"MAI:{mechanism.id}" for bid in winners) else 0.0
@@ -802,8 +805,9 @@ class Scheduler:
                                 continue
                     except Exception:
                         pass
-                elif self._pending_reflection_update:
-                    self._update_reflection_model({})
+                # If no social evaluation is available we keep the pending
+                # reflection update until feedback arrives, avoiding neutral
+                # training data that would collapse the model.
 
     def _task_reflection(self):
         mc = getattr(self.arch, "metacognition", None) or getattr(self.arch, "metacognitive_system", None)
