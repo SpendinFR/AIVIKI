@@ -4,7 +4,8 @@ import json
 import os
 import time
 import uuid
-from typing import Any, Dict, Optional, TYPE_CHECKING
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List, Optional, Protocol, TYPE_CHECKING
 
 from AGI_Evolutive.core.structures.mai import MAI
 from AGI_Evolutive.knowledge.mechanism_store import MechanismStore
@@ -13,18 +14,20 @@ from AGI_Evolutive.utils.jsonsafe import json_sanitize
 if TYPE_CHECKING:
     from .quality import QualityGateRunner
 
-class PromotionManager:
-    """Manage candidate overrides and promotion history."""
+class PromotionStorage:
+    """Filesystem-backed storage for promotion artefacts."""
 
     def __init__(self, root: str = "config") -> None:
         self.root = root
-        os.makedirs(self.root, exist_ok=True)
-        os.makedirs(os.path.join(self.root, "candidates"), exist_ok=True)
+        self.candidate_dir = os.path.join(self.root, "candidates")
         self.active_path = os.path.join(self.root, "active_overrides.json")
         self.hist_path = os.path.join(self.root, "history.jsonl")
 
+        os.makedirs(self.root, exist_ok=True)
+        os.makedirs(self.candidate_dir, exist_ok=True)
+
     # ------------------------------------------------------------------
-    # Active overrides management
+    # Active overrides
     def load_active(self) -> Dict[str, Any]:
         if os.path.exists(self.active_path):
             with open(self.active_path, "r", encoding="utf-8") as handle:
@@ -36,6 +39,66 @@ class PromotionManager:
             json.dump(json_sanitize(overrides), handle, ensure_ascii=False, indent=2)
 
     # ------------------------------------------------------------------
+    # Candidates
+    def candidate_path(self, cid: str) -> str:
+        return os.path.join(self.candidate_dir, f"{cid}.json")
+
+    def write_candidate(self, cid: str, payload: Dict[str, Any]) -> None:
+        with open(self.candidate_path(cid), "w", encoding="utf-8") as handle:
+            json.dump(json_sanitize(payload), handle, ensure_ascii=False, indent=2)
+
+    def read_candidate(self, cid: str) -> Dict[str, Any]:
+        with open(self.candidate_path(cid), "r", encoding="utf-8") as handle:
+            return json.load(handle)
+
+    # ------------------------------------------------------------------
+    # History
+    def append_history(self, event: Dict[str, Any]) -> None:
+        with open(self.hist_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(json_sanitize(event)) + "\n")
+
+    def iter_history(self) -> Iterable[Dict[str, Any]]:
+        if not os.path.exists(self.hist_path):
+            return []
+        with open(self.hist_path, "r", encoding="utf-8") as handle:
+            return [json.loads(line) for line in handle if line.strip()]
+
+
+class PromotionError(RuntimeError):
+    """Base exception raised when promotion fails."""
+
+
+@dataclass
+class QualityGateOutcome:
+    passed: bool
+    report: Dict[str, Any]
+
+
+class CanaryDeployer(Protocol):
+    """Protocol describing a canary deployment helper."""
+
+    def deploy(self, overrides: Dict[str, Any]) -> Dict[str, Any]:
+        ...
+
+    def finalize(self, success: bool) -> None:
+        ...
+
+
+class PromotionManager:
+    """Manage candidate overrides, quality gates, and promotion history."""
+
+    def __init__(self, root: str = "config", storage: Optional[PromotionStorage] = None) -> None:
+        self.storage = storage or PromotionStorage(root=root)
+
+    # ------------------------------------------------------------------
+    # Active overrides management
+    def load_active(self) -> Dict[str, Any]:
+        return self.storage.load_active()
+
+    def save_active(self, overrides: Dict[str, Any]) -> None:
+        self.storage.save_active(overrides)
+
+    # ------------------------------------------------------------------
     # Candidate lifecycle
     def stage_candidate(
         self,
@@ -44,51 +107,88 @@ class PromotionManager:
         metadata: Dict[str, Any] | None = None,
     ) -> str:
         cid = str(uuid.uuid4())
-        path = os.path.join(self.root, "candidates", f"{cid}.json")
         payload = {
             "overrides": overrides,
             "metrics": metrics,
             "metadata": metadata or {},
             "t": time.time(),
+            "cid": cid,
         }
-        with open(path, "w", encoding="utf-8") as handle:
-            json.dump(json_sanitize(payload), handle, ensure_ascii=False, indent=2)
+        self.storage.write_candidate(cid, payload)
         return cid
 
     def read_candidate(self, cid: str) -> Dict[str, Any]:
-        path = os.path.join(self.root, "candidates", f"{cid}.json")
-        with open(path, "r", encoding="utf-8") as handle:
-            return json.load(handle)
+        return self.storage.read_candidate(cid)
 
-    def promote(self, cid: str, quality_runner: Optional["QualityGateRunner"] = None) -> Dict[str, Any]:
+    def _run_quality_gates(
+        self,
+        overrides: Dict[str, Any],
+        quality_runner: Optional["QualityGateRunner"],
+    ) -> QualityGateOutcome:
+        if quality_runner is None:
+            return QualityGateOutcome(passed=True, report={"skipped": True})
+
+        try:
+            report = quality_runner.run(overrides)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            raise PromotionError(f"quality_gate_error: {exc}") from exc
+
+        passed = bool(report.get("passed", False))
+        if not passed:
+            raise PromotionError("quality_gates_failed")
+        return QualityGateOutcome(passed=passed, report=report)
+
+    def _log_history(self, event: Dict[str, Any]) -> None:
+        self.storage.append_history(event)
+
+    def promote(
+        self,
+        cid: str,
+        quality_runner: Optional["QualityGateRunner"] = None,
+        canary: Optional[CanaryDeployer] = None,
+        observers: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         data = self.read_candidate(cid)
-        quality_report: Optional[Dict[str, Any]] = None
-        if quality_runner is not None:
+        overrides = data.get("overrides", {})
+
+        quality_outcome = self._run_quality_gates(overrides, quality_runner)
+
+        canary_report: Optional[Dict[str, Any]] = None
+        if canary is not None:
             try:
-                quality_report = quality_runner.run(data.get("overrides", {}))
-            except Exception as exc:
-                raise RuntimeError(f"quality_gate_error: {exc}") from exc
-            if not quality_report.get("passed", False):
-                raise RuntimeError("quality_gates_failed")
-        self.save_active(data.get("overrides", {}))
+                canary_report = canary.deploy(overrides)
+            except Exception as exc:  # pragma: no cover - defensive guard
+                try:
+                    canary.finalize(False)
+                finally:
+                    raise PromotionError(f"canary_deploy_error: {exc}") from exc
+
+        self.save_active(overrides)
+
         record = {
             "t": time.time(),
             "event": "promote",
+            "promotion_id": str(uuid.uuid4()),
             "cid": cid,
-            "overrides": data.get("overrides"),
+            "overrides": overrides,
             "metrics": data.get("metrics"),
             "metadata": data.get("metadata"),
-            "quality": quality_report,
+            "quality": quality_outcome.report,
+            "canary": canary_report,
+            "observers": observers or [],
         }
-        with open(self.hist_path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(json_sanitize(record)) + "\n")
+        self._log_history(record)
+
+        if canary is not None:
+            canary.finalize(True)
+
         return record
 
     def rollback(self, steps: int = 1) -> None:
-        if not os.path.exists(self.hist_path):
+        history = list(self.storage.iter_history())
+        if not history:
             return
-        with open(self.hist_path, "r", encoding="utf-8") as handle:
-            lines = [json.loads(line) for line in handle if line.strip()]
+        lines = history
         prev: Dict[str, Any] | None = None
         for entry in reversed(lines):
             if entry.get("event") == "promote":
@@ -99,13 +199,15 @@ class PromotionManager:
         if not prev:
             return
         self.save_active(prev.get("overrides", {}))
-        with open(self.hist_path, "a", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(
-                    json_sanitize({"t": time.time(), "event": "rollback", "to": prev})
-                )
-                + "\n"
-            )
+        self._log_history({"t": time.time(), "event": "rollback", "to": prev})
+
+    def describe_history(self) -> List[Dict[str, Any]]:
+        """Return the promotion history as a list for observability/inspection."""
+
+        history = self.storage.iter_history()
+        if isinstance(history, list):
+            return history
+        return list(history)
 
 
 class PromoteManager:
