@@ -260,6 +260,7 @@ class EpisodicLinker:
             REL_REFERS: 0.6,
             REL_NEXT: 0.5,
         }
+        self._last_reward: float = 0.0
 
     def bind(self, memory=None, language=None, metacog=None, emotions=None):
         self.bound.update(
@@ -289,6 +290,7 @@ class EpisodicLinker:
         if not mems:
             return
 
+        reward_signal = 0.0
         if hasattr(self, "_scheduler") and isinstance(self._scheduler, _AdaptiveScheduler):
             load_signal = min(1.0, len(mems) / float(max(1, max_batch)))
             period, window, action = self._scheduler.select(load_signal)
@@ -352,14 +354,25 @@ class EpisodicLinker:
         if len(self.state["processed_ids"]) > 5000:
             self.state["processed_ids"] = self.state["processed_ids"][-2500:]
         self.state["last_run"] = _now()
+        denom = max(1, total_memories)
+        relation_density = total_relations / denom
+        episode_count = len(episodes)
+        reward = 0.6 * max(0.0, min(1.0, relation_density / 3.0))
+        reward += 0.4 * max(0.0, min(1.0, episode_count / float(len(batch))))
+        reward_signal = reward
         if hasattr(self, "_scheduler") and isinstance(self._scheduler, _AdaptiveScheduler):
-            denom = max(1, total_memories)
-            relation_density = total_relations / denom
-            episode_count = len(episodes)
-            reward = 0.6 * max(0.0, min(1.0, relation_density / 3.0))
-            reward += 0.4 * max(0.0, min(1.0, episode_count / float(len(batch))))
             self._scheduler.update(reward)
             self.state["scheduler"] = self._scheduler.to_state()
+        self._last_reward = float(reward_signal)
+        metrics = self.state.setdefault("metrics", {})
+        metrics.update(
+            {
+                "reward": float(reward_signal),
+                "relation_density": float(relation_density),
+                "episodes": int(episode_count),
+                "batch": int(len(batch)),
+            }
+        )
         if hasattr(self, "_salience_learner") and isinstance(self._salience_learner, _SalienceLearner):
             self.state["salience"] = self._salience_learner.to_state()
         self._save(self.paths["state"], self.state)
@@ -699,6 +712,36 @@ class EpisodicLinker:
             except Exception:
                 continue
         return out
+
+    # ---------- diagnostics ----------
+    def pending_backlog(self, limit: int = 300) -> int:
+        """Estimate the number of memories that still need episodic linking."""
+
+        mems = self._fetch_recent_memories(limit=limit)
+        if not mems:
+            return 0
+        processed = set(self.state.get("processed_ids", []))
+        backlog = 0
+        for memory in mems:
+            mid = memory.get("id") or memory.get("_id") or memory.get("memory_id")
+            if not mid or mid in processed:
+                continue
+            backlog += 1
+        return backlog
+
+    def quality_signal(self) -> float:
+        """Return the last normalized reward produced by the episodic linker."""
+
+        metrics = self.state.get("metrics") if isinstance(self.state, dict) else None
+        if isinstance(metrics, dict) and "reward" in metrics:
+            value = float(metrics.get("reward", 0.0))
+        else:
+            value = self._last_reward
+        return max(0.0, min(1.0, float(value)))
+
+    @property
+    def last_reward(self) -> float:
+        return max(0.0, min(1.0, float(self._last_reward)))
 
     # ---------- helpers ----------
     def _next_episode_id(self) -> int:
