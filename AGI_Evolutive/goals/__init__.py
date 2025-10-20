@@ -155,6 +155,8 @@ class GoalSystem:
         node.evidence.append({"t": time.time(), "type": "user_feedback", "content": user_msg})
         node.updated_at = time.time()
         self.store.update_goal(node.id, {"evidence": node.evidence})
+        if node.created_by == "curiosity":
+            self.curiosity.observe_goal_feedback(node.id, user_msg)
 
     def _should_autopropose(self) -> bool:
         return (time.time() - self.last_auto_proposal_at) >= self.auto_proposal_interval
@@ -165,6 +167,8 @@ class GoalSystem:
         proposals = self.curiosity.suggest_subgoals(parent_payload)
         for proposal in proposals:
             node = self.store.add_goal(**proposal)
+            if node.created_by == "curiosity":
+                self.curiosity.register_proposal(node.id, proposal)
             self.metadata[node.id] = GoalMetadata(
                 goal_type=GoalType.EXPLORATION,
                 success_criteria=list(proposal.get("criteria", [])),
