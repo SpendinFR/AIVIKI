@@ -72,7 +72,7 @@ class LightScheduler:
                 try:
                     job["func"]()
                 finally:
-                    job["last"] = now
+                    job["last"] = time.time()
                     elapsed = time.perf_counter() - start
                     job["exec_count"] += 1
                     job["total_duration"] += elapsed
