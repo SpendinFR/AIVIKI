@@ -9,6 +9,8 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
+import math
+
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
 
 
@@ -39,6 +41,103 @@ class GoalNode:
         return asdict(self)
 
 
+class OnlinePriorityModel:
+    """Simple online logistic model for adaptive priority scoring."""
+
+    def __init__(
+        self,
+        feature_names: Optional[List[str]] = None,
+        learning_rate: float = 0.1,
+        weight_bounds: Optional[Dict[str, float]] = None,
+        warmup_updates: int = 20,
+    ):
+        self.feature_names = feature_names or []
+        self.learning_rate = learning_rate
+        self.weight_bounds = weight_bounds or {"min": 0.0, "max": 1.0}
+        self.warmup_updates = max(1, warmup_updates)
+        self.bias = 0.0
+        self.weights: Dict[str, float] = {name: 0.5 for name in self.feature_names}
+        self._updates = 0
+
+    def predict(self, features: Dict[str, float]) -> float:
+        z = self.bias
+        for name, value in features.items():
+            weight = self.weights.get(name)
+            if weight is None:
+                continue
+            z += weight * value
+        # Logistic link for stability
+        try:
+            score = 1.0 / (1.0 + math.exp(-z))
+        except OverflowError:
+            score = 1.0 if z > 0 else 0.0
+        return float(max(0.0, min(1.0, score)))
+
+    def update(self, features: Dict[str, float], target: float, importance: float = 1.0) -> None:
+        target = max(0.0, min(1.0, target))
+        importance = max(0.0, importance)
+        if not importance:
+            return
+        self.ensure_features(list(features.keys()))
+        prediction = self.predict(features)
+        error = (prediction - target) * importance
+        lr = self.learning_rate
+        for name, value in features.items():
+            if name not in self.weights:
+                self.weights[name] = 0.5
+            update = lr * error * value
+            self.weights[name] = self._clip_weight(self.weights[name] - update)
+        self.bias = self._clip_bias(self.bias - lr * error)
+        self._updates += 1
+
+    def confidence(self) -> float:
+        if self._updates <= 0:
+            return 0.0
+        return max(0.0, min(1.0, self._updates / float(self.warmup_updates)))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "feature_names": self.feature_names,
+            "learning_rate": self.learning_rate,
+            "weight_bounds": self.weight_bounds,
+            "warmup_updates": self.warmup_updates,
+            "bias": self.bias,
+            "weights": self.weights,
+            "updates": self._updates,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "OnlinePriorityModel":
+        model = cls(
+            feature_names=data.get("feature_names"),
+            learning_rate=data.get("learning_rate", 0.1),
+            weight_bounds=data.get("weight_bounds"),
+            warmup_updates=data.get("warmup_updates", 20),
+        )
+        model.bias = float(data.get("bias", 0.0))
+        model.weights = {k: float(v) for k, v in data.get("weights", {}).items()}
+        model._updates = int(data.get("updates", 0))
+        return model
+
+    def ensure_features(self, feature_names: List[str]) -> None:
+        for name in feature_names:
+            if name not in self.weights:
+                self.weights[name] = 0.5
+        self.feature_names = sorted(set(self.feature_names).union(feature_names))
+
+    def _clip_weight(self, value: float) -> float:
+        return float(
+            max(
+                self.weight_bounds.get("min", 0.0),
+                min(self.weight_bounds.get("max", 1.0), value),
+            )
+        )
+
+    @staticmethod
+    def _clip_bias(value: float) -> float:
+        return float(max(-5.0, min(5.0, value)))
+
+
 class DagStore:
     """Minimal persistent DAG store for long-lived goals."""
 
@@ -48,6 +147,23 @@ class DagStore:
         os.makedirs(os.path.dirname(self.persist_path), exist_ok=True)
         self.nodes: Dict[str, GoalNode] = {}
         self.active_goal_id: Optional[str] = None
+        self.priority_model = OnlinePriorityModel(
+            feature_names=[
+                "value",
+                "urgency",
+                "curiosity",
+                "competence_balanced",
+                "value_x_urgency",
+                "curiosity_x_gap",
+                "progress",
+                "recency",
+                "status_active",
+                "status_pending",
+            ],
+            learning_rate=0.1,
+            weight_bounds={"min": 0.0, "max": 1.0},
+            warmup_updates=20,
+        )
         self._load()
 
     # ------------------------------------------------------------------
@@ -102,12 +218,28 @@ class DagStore:
         node = self.nodes.get(goal_id)
         if not node:
             return None
+        progress_before = node.progress
         for key, value in updates.items():
             if not hasattr(node, key):
                 continue
             setattr(node, key, value)
+            if key == "progress":
+                try:
+                    progress_value = float(value)
+                except (TypeError, ValueError):
+                    progress_value = node.progress
+                node.evidence.append(
+                    {
+                        "t": _now(),
+                        "event": "progress_update",
+                        "progress": max(0.0, min(1.0, progress_value)),
+                    }
+                )
         node.updated_at = _now()
         self._recompute_priority(node)
+        if "progress" in updates and progress_before < 1.0 <= node.progress:
+            # If progress reached completion through update, treat it as success feedback.
+            self._record_feedback(node, success=True, note="progress_completion")
         self._persist()
         return node
 
@@ -139,12 +271,30 @@ class DagStore:
         node = self.nodes.get(goal_id)
         if not node:
             return
+        completion_time = _now()
+        duration = completion_time - node.created_at
+        features = self._feature_vector(node)
+        priority_before = node.priority
+        self.priority_model.update(
+            features,
+            target=1.0 if success else 0.0,
+            importance=self._completion_importance(duration),
+        )
         node.status = "done" if success else "abandoned"
         node.progress = 1.0 if success else node.progress
-        node.updated_at = _now()
-        node.evidence.append({"t": _now(), "note": note, "success": success})
+        node.updated_at = completion_time
+        node.evidence.append(
+            {
+                "t": completion_time,
+                "note": note,
+                "success": success,
+                "duration_sec": max(0.0, duration),
+                "priority_before": priority_before,
+            }
+        )
         if self.active_goal_id == goal_id:
             self.active_goal_id = None
+        self._recompute_priority(node)
         self._persist()
 
     # ------------------------------------------------------------------
@@ -166,14 +316,75 @@ class DagStore:
         curiosity = max(0.0, min(1.0, node.curiosity))
         competence = max(0.0, min(1.0, node.competence))
         base = 0.4 * value + 0.3 * urgency + 0.2 * curiosity + 0.1 * (1.0 - abs(0.5 - competence) * 2.0)
+        adaptive_features = self._feature_vector(node)
+        self.priority_model.ensure_features(list(adaptive_features.keys()))
+        adaptive_score = self.priority_model.predict(adaptive_features)
+        blend = self.priority_model.confidence()
+        priority = (1.0 - blend) * base + blend * adaptive_score
         if node.status not in {"pending", "active"}:
-            base *= 0.2
-        node.priority = float(max(0.0, min(1.0, base)))
+            priority *= 0.2
+        node.priority = float(max(0.0, min(1.0, priority)))
+
+    def _feature_vector(self, node: GoalNode) -> Dict[str, float]:
+        now = _now()
+        value = max(0.0, min(1.0, node.value))
+        urgency = max(0.0, min(1.0, node.urgency))
+        curiosity = max(0.0, min(1.0, node.curiosity))
+        competence = max(0.0, min(1.0, node.competence))
+        competence_balanced = 1.0 - abs(0.5 - competence) * 2.0
+        progress = max(0.0, min(1.0, node.progress))
+        age_seconds = max(0.0, now - node.created_at)
+        # recency decays over 72 hours
+        recency = 1.0 - min(1.0, age_seconds / (72.0 * 3600.0))
+        status_active = 1.0 if node.status == "active" else 0.0
+        status_pending = 1.0 if node.status == "pending" else 0.0
+        curiosity_gap = curiosity * (1.0 - competence)
+        features = {
+            "value": value,
+            "urgency": urgency,
+            "curiosity": curiosity,
+            "competence_balanced": competence_balanced,
+            "value_x_urgency": value * urgency,
+            "curiosity_x_gap": curiosity_gap,
+            "progress": progress,
+            "recency": max(0.0, recency),
+            "status_active": status_active,
+            "status_pending": status_pending,
+        }
+        return features
+
+    @staticmethod
+    def _completion_importance(duration: float) -> float:
+        if duration <= 0:
+            return 1.0
+        horizon = 3600.0  # one hour reference
+        score = 1.0 / (1.0 + duration / horizon)
+        return max(0.1, min(1.0, score))
+
+    def _record_feedback(self, node: GoalNode, success: bool, note: str = "") -> None:
+        duration = max(0.0, _now() - node.created_at)
+        features = self._feature_vector(node)
+        self.priority_model.update(
+            features,
+            target=1.0 if success else 0.0,
+            importance=self._completion_importance(duration),
+        )
+        node.evidence.append(
+            {
+                "t": _now(),
+                "event": "auto_feedback",
+                "note": note,
+                "success": success,
+                "duration_sec": duration,
+            }
+        )
+        self._recompute_priority(node)
 
     def _persist(self) -> None:
         payload = {
             "active_goal_id": self.active_goal_id,
             "nodes": {gid: node.to_dict() for gid, node in self.nodes.items()},
+            "priority_model": self.priority_model.to_dict(),
         }
         try:
             with open(self.persist_path, "w", encoding="utf-8") as fh:
@@ -197,6 +408,11 @@ class DagStore:
                 continue
         self.nodes = nodes
         self.active_goal_id = data.get("active_goal_id")
+        if "priority_model" in data:
+            try:
+                self.priority_model = OnlinePriorityModel.from_dict(data["priority_model"])
+            except Exception:
+                pass
 
     def _export_dashboard(self) -> None:
         snapshot = {
