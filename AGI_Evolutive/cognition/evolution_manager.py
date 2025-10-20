@@ -1,9 +1,10 @@
 import json
 import os
+import random
 import statistics
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 from AGI_Evolutive.core.structures.mai import MAI
 from AGI_Evolutive.knowledge.mechanism_store import MechanismStore
@@ -46,6 +47,57 @@ def _rolling(values: List[float], k: int) -> float:
         return 0.0
     tail = values[-k:] if len(values) > k else values
     return _mean(tail)
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+class ThompsonBandit:
+    """Simple Thompson Sampling helper persisted as dict in state."""
+
+    def __init__(self, storage: Dict[str, Any], actions: Sequence[Union[int, float, str]]):
+        self.storage = storage
+        self.actions = list(actions)
+        if "_meta" not in self.storage:
+            self.storage["_meta"] = {}
+        for action in self.actions:
+            key = self._key(action)
+            self.storage.setdefault(key, {"alpha": 1.0, "beta": 1.0})
+
+    @staticmethod
+    def _key(action: Union[int, float, str]) -> str:
+        if isinstance(action, float):
+            # éviter les collisions dues aux flottants
+            return f"{action:.6f}"
+        return str(action)
+
+    def sample(self, default: Union[int, float, str]) -> Union[int, float, str]:
+        """Renvoie l'action tirée via Thompson Sampling."""
+        best_action = None
+        best_score = -1.0
+        for action in self.actions:
+            entry = self.storage[self._key(action)]
+            draw = random.betavariate(entry["alpha"], entry["beta"])
+            if draw > best_score:
+                best_score = draw
+                best_action = action
+        if best_action is None:
+            best_action = default
+        self.set_last_action(best_action)
+        return best_action
+
+    def update(self, action: Union[int, float, str], reward: float) -> None:
+        entry = self.storage[self._key(action)]
+        reward = _clamp01(reward)
+        entry["alpha"] = float(entry.get("alpha", 1.0)) + reward
+        entry["beta"] = float(entry.get("beta", 1.0)) + (1.0 - reward)
+
+    def last_action(self) -> Optional[Union[int, float, str]]:
+        return self.storage.get("_meta", {}).get("last_action")
+
+    def set_last_action(self, action: Union[int, float, str]) -> None:
+        self.storage.setdefault("_meta", {})["last_action"] = action
 
 
 class EvolutionManager:
@@ -114,9 +166,74 @@ class EvolutionManager:
             "history_extra": {},
             "legacy_metrics_history": [],
             "strategies": [],
+            "bandits": {},
         })
         self.horizon = horizon_cycles
         self._state_lock = threading.RLock()
+
+    # ---------- adaptive helpers ----------
+    def _get_bandit(self, name: str, actions: Sequence[Union[int, float, str]]) -> ThompsonBandit:
+        bandits = self.state.setdefault("bandits", {})
+        storage = bandits.setdefault(name, {})
+        return ThompsonBandit(storage, actions)
+
+    def _update_window_bandit(
+        self,
+        metric: str,
+        previous_values: List[float],
+        current_values: List[float],
+        default_window: int,
+    ) -> None:
+        if not current_values:
+            return
+        bandit = self._get_bandit(
+            f"window::{metric}",
+            actions=[3, 5, 8, 14, 20, 30],
+        )
+        last_action = bandit.last_action()
+        if last_action is None:
+            bandit.set_last_action(default_window)
+            last_action = default_window
+        last_action = int(last_action)
+        if not previous_values:
+            # Pas assez d'historique pour calculer une récompense.
+            return
+        tail = previous_values[-last_action:] if len(previous_values) >= last_action else previous_values
+        previous_avg = _mean(tail, default=current_values[-1])
+        diff = abs(current_values[-1] - previous_avg)
+        reward = _clamp01(1.0 - min(1.0, diff))
+        bandit.update(last_action, reward)
+        next_action = int(bandit.sample(last_action))
+        bandit.set_last_action(next_action)
+
+    def _current_window(self, metric: str, default_window: int) -> int:
+        bandit = self._get_bandit(f"window::{metric}", actions=[3, 5, 8, 14, 20, 30])
+        last_action = bandit.last_action()
+        if last_action is None:
+            bandit.set_last_action(default_window)
+            last_action = default_window
+        return int(last_action)
+
+    def _detect_regimes(self, hist: Dict[str, List[float]]) -> List[str]:
+        regimes: List[str] = []
+        if len(hist.get("learning_rate", [])) >= 12:
+            short = _rolling(hist["learning_rate"], min(6, len(hist["learning_rate"])) )
+            long = _rolling(hist["learning_rate"], min(18, len(hist["learning_rate"])) )
+            if short - long > 0.05:
+                regimes.append("learning_surge")
+            elif long - short > 0.05:
+                regimes.append("learning_stall")
+        if len(hist.get("fatigue", [])) >= 12:
+            short_f = _rolling(hist["fatigue"], min(6, len(hist["fatigue"])) )
+            long_f = _rolling(hist["fatigue"], min(18, len(hist["fatigue"])) )
+            if short_f > 0.75 and short_f - long_f > 0.03:
+                regimes.append("fatigue_rise")
+        if len(hist.get("reasoning_confidence", [])) >= 12 and len(hist.get("recall_accuracy", [])) >= 12:
+            conf_short = _rolling(hist["reasoning_confidence"], min(6, len(hist["reasoning_confidence"])) )
+            recall_short = _rolling(hist["recall_accuracy"], min(6, len(hist["recall_accuracy"])) )
+            if conf_short - recall_short > 0.2:
+                regimes.append("overconfidence_phase")
+        return regimes
 
     def evaluate_mechanism(self, mai: MAI) -> bool:
         """
@@ -213,10 +330,27 @@ class EvolutionManager:
         except (TypeError, ValueError):
             err_val = 0.5
         success = err_val < 0.2
+        reward_signal = _clamp01(1.0 - min(1.0, err_val))
 
         current = float(self.habits_strength.get(key, 0.0))
-        delta = 0.08 if success else -0.04
-        updated = max(0.0, min(1.0, current + delta))
+        if success:
+            gain_bandit = self._get_bandit(
+                f"habit_gain::{key}",
+                actions=[0.04, 0.06, 0.08, 0.12],
+            )
+            step = float(gain_bandit.sample(0.08))
+            delta = step
+            gain_bandit.update(step, reward_signal)
+        else:
+            loss_bandit = self._get_bandit(
+                f"habit_loss::{key}",
+                actions=[0.02, 0.04, 0.06, 0.08],
+            )
+            step = float(loss_bandit.sample(0.04))
+            delta = -step
+            loss_bandit.update(step, 1.0 - reward_signal)
+
+        updated = _clamp01(current + delta)
         self.habits_strength[key] = updated
 
     # ---------- binding ----------
@@ -253,6 +387,7 @@ class EvolutionManager:
 
             # pousser les séries
             hist = self.state["history"]
+            previous_hist = {k: list(v) for k, v in hist.items()}
             for key in hist.keys():
                 hist[key].append(float(metrics.get(key, 0.0)))
 
@@ -270,6 +405,16 @@ class EvolutionManager:
             for k in list(extra_hist.keys()):
                 if len(extra_hist[k]) > self.horizon:
                     extra_hist[k] = extra_hist[k][-self.horizon:]
+
+            # mise à jour des bandits de fenêtres adaptatives
+            for metric_key, prev_values in previous_hist.items():
+                default_window = 20 if metric_key == "error_rate" else 5
+                self._update_window_bandit(
+                    metric_key,
+                    previous_values=prev_values,
+                    current_values=hist.get(metric_key, []),
+                    default_window=default_window,
+                )
 
             self.state["last_cycle_id"] = cycle_id
             self.state["cycle_count"] = self.state.get("cycle_count", 0) + 1
@@ -369,35 +514,61 @@ class EvolutionManager:
         """
         with self._state_lock:
             hist = self.state["history"]
+            win_speed = self._current_window("reasoning_speed", 5)
+            win_learn = self._current_window("learning_rate", 5)
+            win_conf = self._current_window("reasoning_confidence", 5)
+            win_recall = self._current_window("recall_accuracy", 5)
+            win_fatigue = self._current_window("fatigue", 5)
+            win_load = self._current_window("cognitive_load", 5)
+            win_errors = self._current_window("error_rate", 20)
             eval_out = {
                 "t": _now(),
                 "rolling": {
-                    "speed_5": _rolling(hist["reasoning_speed"], 5),
-                    "learn_5": _rolling(hist["learning_rate"], 5),
-                    "conf_5": _rolling(hist["reasoning_confidence"], 5),
-                    "recall_5": _rolling(hist["recall_accuracy"], 5),
-                    "fatigue_5": _rolling(hist["fatigue"], 5),
-                    "load_5": _rolling(hist["cognitive_load"], 5),
-                    "errors_20": _rolling(hist["error_rate"], 20),
+                    "speed": _rolling(hist["reasoning_speed"], win_speed),
+                    "learn": _rolling(hist["learning_rate"], win_learn),
+                    "conf": _rolling(hist["reasoning_confidence"], win_conf),
+                    "recall": _rolling(hist["recall_accuracy"], win_recall),
+                    "fatigue": _rolling(hist["fatigue"], win_fatigue),
+                    "load": _rolling(hist["cognitive_load"], win_load),
+                    "errors": _rolling(hist["error_rate"], win_errors),
                 },
                 "flags": [],
-                "recommendations": []
+                "recommendations": [],
+                "regimes": self._detect_regimes(hist),
             }
+            eval_out["rolling"].update({
+                "speed_5": eval_out["rolling"]["speed"],
+                "learn_5": eval_out["rolling"]["learn"],
+                "conf_5": eval_out["rolling"]["conf"],
+                "recall_5": eval_out["rolling"]["recall"],
+                "fatigue_5": eval_out["rolling"]["fatigue"],
+                "load_5": eval_out["rolling"]["load"],
+                "errors_20": eval_out["rolling"]["errors"],
+            })
 
             r = eval_out["rolling"]
             # flags
-            if r["learn_5"] < 0.35 and r["conf_5"] < 0.45:
+            if r["learn"] < 0.35 and r["conf"] < 0.45:
                 eval_out["flags"].append("learning_regression")
-            if r["fatigue_5"] > 0.7:
+            if r["fatigue"] > 0.7:
                 eval_out["flags"].append("high_fatigue")
-            if r["load_5"] > 0.8:
+            if r["load"] > 0.8:
                 eval_out["flags"].append("overload")
-            if r["errors_20"] > 0.05:
+            if r["errors"] > 0.05:
                 eval_out["flags"].append("high_error_rate")
 
             # recos : stratégie & expérimentation
             eval_out["recommendations"] += self._strategy_recommendations(r)
             eval_out["recommendations"] += self._exploration_recommendations()
+
+            # enregistrer les régimes détectés comme milestones si nouveaux
+            if eval_out["regimes"]:
+                milestones = self.state.setdefault("milestones", [])
+                for regime in eval_out["regimes"]:
+                    marker = {"ts": eval_out["t"], "type": "regime", "value": regime}
+                    if marker not in milestones:
+                        milestones.append(marker)
+                self.state["milestones"] = milestones[-200:]
 
             # persiste recos + flags en JSONL
             _append_jsonl(self.paths["reco"], {
@@ -416,28 +587,28 @@ class EvolutionManager:
     def _strategy_recommendations(self, r: Dict[str, float]) -> List[Dict[str, Any]]:
         recos = []
         # calibrage effort/attention
-        if r["load_5"] > 0.8 or r["fatigue_5"] > 0.7:
+        if r["load"] > 0.8 or r["fatigue"] > 0.7:
             recos.append({
                 "kind": "effort_downshift",
                 "reason": "High cognitive load/fatigue",
                 "action": "Réduire la profondeur des tâches; augmenter micro-pauses; privilégier consolidation."
             })
         # booster apprentissage si stagnation
-        if r["learn_5"] < 0.4 and r["conf_5"] < 0.5:
+        if r["learn"] < 0.4 and r["conf"] < 0.5:
             recos.append({
                 "kind": "strategy_change",
                 "reason": "Low learning rate and low confidence",
                 "action": "Tester stratégie d'étude alternative (auto-explication, exemples concrets, retrieval practice)."
             })
         # renforcer rappel si recall bas
-        if r["recall_5"] < 0.5:
+        if r["recall"] < 0.5:
             recos.append({
                 "kind": "memory_consolidation",
                 "reason": "Low recall accuracy",
                 "action": "Augmenter fréquence de consolidation et répétition espacée."
             })
         # erreurs hautes
-        if r["errors_20"] > 0.05:
+        if r["errors"] > 0.05:
             recos.append({
                 "kind": "error_clinic",
                 "reason": "High recent error rate",
@@ -493,14 +664,23 @@ class EvolutionManager:
         proposals = []
 
         # Exemple 1 : ajuster poids de curiosité si learning_rate bas
-        lr = _rolling(self.state["history"]["learning_rate"], 8)
+        lr = _rolling(
+            self.state["history"]["learning_rate"],
+            self._current_window("learning_rate", 8),
+        )
         if lr < 0.4:
+            curiosity_bandit = self._get_bandit(
+                "proposal::curiosity_delta",
+                actions=[0.05, 0.1, 0.15],
+            )
+            curiosity_delta = float(curiosity_bandit.sample(0.1))
             proposals.append({
                 "type": "adjust_drive",
                 "target": "curiosity",
-                "delta": +0.1,
-                "rationale": "Learning rate bas sur 8 cycles - stimuler exploration."
+                "delta": curiosity_delta,
+                "rationale": "Learning rate bas sur 8 cycles - stimuler exploration.",
             })
+            curiosity_bandit.update(curiosity_delta, _clamp01((0.4 - lr) / 0.4))
 
         # Exemple 2 : créer macro-goal d'étude d'un concept central
         cgraph_path = os.path.join(self.data_dir, "concept_graph.json")
@@ -518,8 +698,14 @@ class EvolutionManager:
                 })
 
         # Exemple 3 : calibration métacognitive si écart confiance/perf
-        conf = _rolling(self.state["history"]["reasoning_confidence"], 8)
-        recall = _rolling(self.state["history"]["recall_accuracy"], 8)
+        conf = _rolling(
+            self.state["history"]["reasoning_confidence"],
+            self._current_window("reasoning_confidence", 8),
+        )
+        recall = _rolling(
+            self.state["history"]["recall_accuracy"],
+            self._current_window("recall_accuracy", 8),
+        )
         if conf - recall > 0.25:
             proposals.append({
                 "type": "metacog_calibration",
@@ -547,13 +733,13 @@ class EvolutionManager:
             "t": _now(),
             "last_cycle": self.state["last_cycle_id"],
             "rolling": {
-                "speed_8": _rolling(h["reasoning_speed"], 8),
-                "learn_8": _rolling(h["learning_rate"], 8),
-                "conf_8": _rolling(h["reasoning_confidence"], 8),
-                "recall_8": _rolling(h["recall_accuracy"], 8),
-                "load_8": _rolling(h["cognitive_load"], 8),
-                "fatigue_8": _rolling(h["fatigue"], 8),
-                "goals_8": _rolling(h["goals_progress"], 8),
+                "speed": _rolling(h["reasoning_speed"], self._current_window("reasoning_speed", 8)),
+                "learn": _rolling(h["learning_rate"], self._current_window("learning_rate", 8)),
+                "conf": _rolling(h["reasoning_confidence"], self._current_window("reasoning_confidence", 8)),
+                "recall": _rolling(h["recall_accuracy"], self._current_window("recall_accuracy", 8)),
+                "load": _rolling(h["cognitive_load"], self._current_window("cognitive_load", 8)),
+                "fatigue": _rolling(h["fatigue"], self._current_window("fatigue", 8)),
+                "goals": _rolling(h["goals_progress"], self._current_window("goals_progress", 8)),
             },
             "risk_flags": list(self.state.get("risk_flags", [])),
             "milestones": list(self.state.get("milestones", []))[-20:]
