@@ -1,8 +1,51 @@
 from __future__ import annotations
 
 from typing import Dict, Any, List
+import math
 import re
 import time
+import unicodedata
+from collections import deque
+
+
+class OnlineLinearModel:
+    """Mini modèle linéaire online avec régularisation et facteur d'oubli."""
+
+    def __init__(
+        self,
+        base_weights: Dict[str, float],
+        learning_rate: float = 0.05,
+        l2: float = 0.01,
+        decay: float = 0.995,
+    ) -> None:
+        self.weights: Dict[str, float] = dict(base_weights)
+        self.lr = learning_rate
+        self.l2 = l2
+        self.decay = decay
+
+    def predict(self, features: Dict[str, float]) -> float:
+        score = sum(self.weights.get(k, 0.0) * v for k, v in features.items())
+        # utilisation d'une sigmoïde douce pour rester entre 0 et 1
+        try:
+            return 1.0 / (1.0 + math.exp(-score))
+        except OverflowError:
+            return 0.0 if score < 0 else 1.0
+
+    def update(self, features: Dict[str, float], target: float) -> None:
+        prediction = self.predict(features)
+        error = prediction - target
+        # facteur d'oubli : décroît légèrement les poids avant correction
+        for key in list(self.weights.keys()):
+            self.weights[key] *= self.decay
+        for name, value in features.items():
+            grad = error * value + self.l2 * self.weights.get(name, 0.0)
+            self.weights[name] = self.weights.get(name, 0.0) - self.lr * grad
+
+
+def _strip_accents(text: str) -> str:
+    return "".join(
+        c for c in unicodedata.normalize("NFD", text) if unicodedata.category(c) != "Mn"
+    )
 
 
 class StyleObserver:
@@ -14,7 +57,37 @@ class StyleObserver:
         self.voice = voice_profile
         self.lex = lexicon
         self.user_model = user_model
-        self.last_updates: List[float] = []  # timestamps pour rate limit
+        self.last_updates: deque[float] = deque(maxlen=32)  # timestamps pour rate limit
+        self._state = self._ensure_state()
+        self._channel_models: Dict[str, OnlineLinearModel] = {}
+        self._fallback_model = OnlineLinearModel(
+            self._state.setdefault(
+                "fallback_weights",
+                {
+                    "bias": -0.8,
+                    "sent_len": 0.04,
+                    "exclam": 0.15,
+                    "emoji": 0.12,
+                    "question": 0.05,
+                },
+            ),
+            learning_rate=0.03,
+            l2=0.005,
+            decay=0.998,
+        )
+        self._channel_base = {
+            "bias": -0.2,
+            "align": 0.9,
+            "novelty": 0.8,
+            "humor": 0.6,
+            "analytic": 0.45,
+            "cur": 0.5,
+            "bond": 0.4,
+            "chan_user": 0.25,
+        }
+        self._fallback_threshold = 0.62
+        self._metrics = self._state.setdefault("metrics", {"events": []})
+        self._regex_cache: Dict[str, re.Pattern] = {}
 
     # --------- API publique ----------
     def observe_text(self, text: str, source: str, *, channel: str) -> None:
@@ -33,13 +106,16 @@ class StyleObserver:
             score = self._like_score(it, persona, drives, channel=channel)
             if score >= 0.65 and self._aligned(it, persona):
                 scored.append((score, it))
+            else:
+                self._record_feedback(it, channel, accepted=False)
 
         if not scored:
             return
 
         # 3) rate limit (max 5 ajouts / 5min)
         now = time.time()
-        self.last_updates = [t for t in self.last_updates if now - t < 300]
+        while self.last_updates and now - self.last_updates[0] >= 300:
+            self.last_updates.popleft()
         budget = max(0, 5 - len(self.last_updates))
         if budget <= 0:
             return
@@ -51,6 +127,7 @@ class StyleObserver:
         for it in picked:
             self._apply_like(it)
             self.last_updates.append(now)
+            self._record_feedback(it, channel, accepted=True)
 
     # --------- Extracteurs ----------
     def _extract_candidates(self, text: str) -> List[Dict[str, Any]]:
@@ -65,11 +142,19 @@ class StyleObserver:
                 items.append({"type": "collocation", "text": phr})
 
         # blagues ou punchlines ultra basiques (heuristique)
-        if re.search(r"\b(c’est (pas )?faux|plot twist|fun fact)\b", text, flags=re.I):
+        normalized_text = _strip_accents(text)
+        if self._pattern("c'est (pas )?faux|est (un|une|le|la|l') (twist|fait)\b").search(
+            normalized_text
+        ):
             items.append({"type": "punch", "text": "fun fact"})
         # références pop (à étendre)
-        if re.search(r"\b(matrix|inception|star wars|one piece)\b", text, flags=re.I):
+        if self._pattern("matrix|inception|star wars|one piece|the expanse|gundam").search(
+            normalized_text
+        ):
             items.append({"type": "reference", "text": "réf pop-culture"})
+
+        # fallback classifier pour détecter des phrases stylées
+        items.extend(self._fallback_candidates(text))
 
         return items
 
@@ -91,7 +176,7 @@ class StyleObserver:
 
         # features simples
         txt = item["text"].lower()
-        novelty = 1.0 if not self.lex.lex["collocations"].get(txt) else 0.4
+        novelty = 1.0 if not self._has_collocation(txt) else 0.4
         humor = 1.0 if item["type"] in ("punch",) else 0.2
         analytic = 1.0 if len(txt.split()) >= 3 and item["type"] == "collocation" else 0.4
 
@@ -111,8 +196,28 @@ class StyleObserver:
         # canal : booste l’utilisateur (on apprend plus de toi)
         chan = 0.15 if channel == "user" else 0.0
 
-        raw = 0.35 * align + 0.25 * novelty + 0.2 * humor + 0.2 * cur + chan
-        return max(0.0, min(1.0, raw))
+        features = {
+            "bias": 1.0,
+            "align": align,
+            "novelty": novelty,
+            "humor": humor,
+            "analytic": analytic,
+            "cur": cur,
+            "bond": bond,
+        }
+        if channel == "user":
+            features["chan_user"] = 1.0
+        model = self._channel_model(channel)
+        score = model.predict(features)
+        if item.get("type") == "fallback":
+            fallback_feats = item.setdefault(
+                "_fallback_features", self._fallback_features(item["text"])
+            )
+            if fallback_feats:
+                fallback_score = self._fallback_model.predict(fallback_feats)
+                score = (score + fallback_score) / 2.0
+        item["_features"] = features
+        return max(0.0, min(1.0, score))
 
     def _aligned(self, item: Dict[str, Any], persona: Dict[str, Any]) -> bool:
         # garde-fou : blacklist mots, pas d’insulte, pas contraire aux valeurs, etc.
@@ -169,3 +274,112 @@ class StyleObserver:
             except Exception:
                 pass
         return persona
+
+    # --------- Helpers internes ----------
+    def _ensure_state(self) -> Dict[str, Any]:
+        if self.self_model is None:
+            return {"channel_weights": {}}
+        state = getattr(self.self_model, "state", None)
+        if state is None:
+            state = {}
+            setattr(self.self_model, "state", state)
+        bucket = state.setdefault("style_observer", {})
+        bucket.setdefault("channel_weights", {})
+        return bucket
+
+    def _channel_model(self, channel: str) -> OnlineLinearModel:
+        if channel not in self._channel_models:
+            stored = self._state["channel_weights"].get(channel, {})
+            weights = dict(self._channel_base)
+            weights.update(stored)
+            self._channel_models[channel] = OnlineLinearModel(
+                weights,
+                learning_rate=0.04,
+                l2=0.01,
+                decay=0.997,
+            )
+        return self._channel_models[channel]
+
+    def _persist_weights(self, channel: str) -> None:
+        if self.self_model is None:
+            return
+        model = self._channel_models.get(channel)
+        if model is None:
+            return
+        self._state["channel_weights"][channel] = dict(model.weights)
+
+    def _persist_fallback(self) -> None:
+        if self.self_model is None:
+            return
+        self._state["fallback_weights"] = dict(self._fallback_model.weights)
+
+    def _pattern(self, expr: str) -> re.Pattern:
+        key = f"pattern::{expr}"
+        pat = self._regex_cache.get(key)
+        if pat is None:
+            flags = re.IGNORECASE
+            normalized = _strip_accents(expr)
+            pat = re.compile(normalized, flags)
+            self._regex_cache[key] = pat
+        return pat
+
+    def _has_collocation(self, text: str) -> bool:
+        try:
+            lex_data = getattr(self.lex, "lex", {}) or {}
+            collocs = lex_data.get("collocations", {}) if isinstance(lex_data, dict) else {}
+            if hasattr(collocs, "get"):
+                return bool(collocs.get(text))
+        except Exception:
+            return False
+        return False
+
+    def _fallback_candidates(self, text: str) -> List[Dict[str, Any]]:
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+        items: List[Dict[str, Any]] = []
+        for sent in sentences:
+            feats = self._fallback_features(sent)
+            if not feats:
+                continue
+            score = self._fallback_model.predict(feats)
+            if score >= self._fallback_threshold:
+                items.append({"type": "fallback", "text": sent, "_fallback_features": feats})
+        return items
+
+    def _fallback_features(self, sent: str) -> Dict[str, float]:
+        if len(sent) < 6:
+            return {}
+        normalized = _strip_accents(sent)
+        emoji = len(re.findall(r"[\u2600-\u27BF\U0001F300-\U0001FAD6]", sent))
+        return {
+            "bias": 1.0,
+            "sent_len": min(len(normalized) / 80.0, 2.0),
+            "exclam": sent.count("!"),
+            "emoji": float(emoji > 0),
+            "question": float("?" in sent),
+        }
+
+    def _record_feedback(self, item: Dict[str, Any], channel: str, *, accepted: bool) -> None:
+        feats = item.get("_features")
+        if feats and channel in self._channel_models:
+            self._channel_models[channel].update(feats, 1.0 if accepted else 0.0)
+            self._persist_weights(channel)
+        fallback_feats = item.get("_fallback_features")
+        if fallback_feats:
+            self._fallback_model.update(fallback_feats, 1.0 if accepted else 0.0)
+            self._persist_fallback()
+        self._log_event(
+            {
+                "text": item.get("text", "")[:160],
+                "channel": channel,
+                "accepted": accepted,
+                "type": item.get("type"),
+                "ts": time.time(),
+            }
+        )
+
+    def _log_event(self, payload: Dict[str, Any]) -> None:
+        events: List[Dict[str, Any]] = self._metrics.setdefault("events", [])
+        events.append(payload)
+        # garde une trace raisonnable
+        if len(events) > 200:
+            del events[:-200]
