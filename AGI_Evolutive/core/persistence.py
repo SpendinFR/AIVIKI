@@ -1,24 +1,127 @@
 
 # core/persistence.py
-"""
-PersistenceManager: sauvegarde/chargement robuste de l'état de l'AGI en local.
-- Sauvegarde automatique à intervalle régulier et sur demande
-- Reprise à chaud: si un snapshot existe, on recharge lors de l'initialisation
-- Sérialisation prudente: on filtre les objets non-sérialisables
+"""Persistence helpers for evolutionary state management.
+
+Cette version étend le `PersistenceManager` originel avec plusieurs capacités :
+- versionnage/migrations des snapshots,
+- backends de stockage interchangeables,
+- journalisation incrémentale des drifts,
+- autosave adaptatif déclenché sur dérive significative,
+- instrumentation riche avec alertes optionnelles.
 """
 import hashlib
+import inspect
 import json
+import logging
 import os
 import pickle
 import time
 import types
-import inspect
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 DEFAULT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".agi_state")
 DEFAULT_DIR = os.path.abspath(DEFAULT_DIR)
 DEFAULT_FILE = os.path.join(DEFAULT_DIR, "snapshot.pkl")
+
+
+class StorageBackend:
+    """Abstract storage backend for snapshots and history artifacts."""
+
+    def write_bytes(self, path: str, payload: bytes, *, atomic: bool = False) -> None:
+        raise NotImplementedError
+
+    def read_bytes(self, path: str) -> bytes:
+        raise NotImplementedError
+
+    def exists(self, path: str) -> bool:
+        raise NotImplementedError
+
+    def list_files(self, path: str, suffix: Optional[str] = None) -> Iterable[str]:
+        raise NotImplementedError
+
+    def remove(self, path: str) -> None:
+        raise NotImplementedError
+
+    def ensure_dir(self, path: str) -> None:
+        raise NotImplementedError
+
+    def append_text(self, path: str, text: str) -> None:
+        raise NotImplementedError
+
+    def resolve(self, path: str) -> str:
+        raise NotImplementedError
+
+
+class FileStorageBackend(StorageBackend):
+    """Simple filesystem backend with atomic writes."""
+
+    def __init__(self, root: Optional[str] = None):
+        self.root = os.path.abspath(root or DEFAULT_DIR)
+        os.makedirs(self.root, exist_ok=True)
+
+    def resolve(self, path: str) -> str:
+        if os.path.isabs(path):
+            return path
+        return os.path.join(self.root, path)
+
+    def ensure_dir(self, path: str) -> None:
+        os.makedirs(self.resolve(path), exist_ok=True)
+
+    def write_bytes(self, path: str, payload: bytes, *, atomic: bool = False) -> None:
+        full_path = self.resolve(path)
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        if atomic:
+            tmpfile = f"{full_path}.tmp"
+            with open(tmpfile, "wb") as fh:
+                fh.write(payload)
+            os.replace(tmpfile, full_path)
+        else:
+            with open(full_path, "wb") as fh:
+                fh.write(payload)
+
+    def read_bytes(self, path: str) -> bytes:
+        full_path = self.resolve(path)
+        with open(full_path, "rb") as fh:
+            return fh.read()
+
+    def exists(self, path: str) -> bool:
+        return os.path.exists(self.resolve(path))
+
+    def list_files(self, path: str, suffix: Optional[str] = None) -> Iterable[str]:
+        full_path = self.resolve(path)
+        try:
+            for entry in os.listdir(full_path):
+                if suffix and not entry.endswith(suffix):
+                    continue
+                yield entry
+        except Exception:
+            return
+
+    def remove(self, path: str) -> None:
+        full_path = self.resolve(path)
+        if os.path.exists(full_path):
+            os.remove(full_path)
+
+    def append_text(self, path: str, text: str) -> None:
+        full_path = self.resolve(path)
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        with open(full_path, "a", encoding="utf-8") as fh:
+            fh.write(text)
+
+
+MigrationCallable = Callable[[Dict[str, Any]], Dict[str, Any]]
+_MIGRATIONS: Dict[int, Tuple[int, MigrationCallable]] = {}
+
+
+def register_migration(from_version: int, to_version: int) -> Callable[[MigrationCallable], MigrationCallable]:
+    """Register a migration that upgrades a snapshot to a newer version."""
+
+    def decorator(func: MigrationCallable) -> MigrationCallable:
+        _MIGRATIONS[from_version] = (to_version, func)
+        return func
+
+    return decorator
 
 def _is_picklable(x):
     try:
@@ -76,26 +179,48 @@ def _from_state(obj, state: Dict[str, Any]):
             pass
 
 class PersistenceManager:
-    def __init__(self, arch, directory: str = DEFAULT_DIR, filename: str = DEFAULT_FILE):
+    def __init__(
+        self,
+        arch,
+        directory: str = DEFAULT_DIR,
+        filename: str = DEFAULT_FILE,
+        *,
+        schema_version: int = 1,
+        backend: Optional[StorageBackend] = None,
+        autosave_interval: float = 60.0,
+        autosave_min_interval: float = 10.0,
+        autosave_drift_threshold: float = 0.5,
+        alert_hook: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+    ):
         self.arch = arch
         self.directory = os.path.abspath(directory)
-        self.filename = os.path.abspath(filename)
-        self.autosave_interval = 60.0  # secondes
+        self.backend = backend or FileStorageBackend(self.directory)
+        self.filename = filename if os.path.isabs(filename) else os.path.join(self.directory, filename)
+        self.schema_version = int(schema_version)
+        self.autosave_interval = float(max(autosave_interval, 1.0))
+        self.autosave_min_interval = float(max(autosave_min_interval, 0.5))
+        self.autosave_drift_threshold = float(max(autosave_drift_threshold, 0.0))
+        self.alert_hook = alert_hook
+        self.logger = logging.getLogger(__name__)
         self._last_save = time.time()
-        os.makedirs(self.directory, exist_ok=True)
+        self.backend.ensure_dir(self.directory)
         self.history_dir = os.path.join(self.directory, "history")
-        os.makedirs(self.history_dir, exist_ok=True)
+        self.backend.ensure_dir(self.history_dir)
         self.history_retention = 20
+        self.journal_path = os.path.join(self.history_dir, "events.log")
         self._last_snapshot_meta: Optional[Dict[str, Any]] = None
         self._last_snapshot_hash: Optional[str] = None
         self._last_drift: Optional[Dict[str, Any]] = None
+        self._pending_snapshot_cache: Optional[Tuple[Dict[str, Any], bytes, Dict[str, Any]]] = None
+        self._pending_snapshot_time: float = 0.0
+        self.snapshot_cache_ttl = 2.0
 
     def make_snapshot(self) -> Dict[str, Any]:
         subs = [
             "memory","perception","reasoning","goals","emotions",
             "learning","metacognition","creativity","world_model","language"
         ]
-        snap = {"timestamp": time.time(), "version": 1}
+        snap = {"timestamp": time.time(), "version": self.schema_version}
         for name in subs:
             comp = getattr(self.arch, name, None)
             if comp is None:
@@ -105,15 +230,22 @@ class PersistenceManager:
         return snap
     
     def save(self):
-        snap = self.make_snapshot()
-        payload = pickle.dumps(snap, protocol=pickle.HIGHEST_PROTOCOL)
-        tmpfile = self.filename + ".tmp"
-        with open(tmpfile, "wb") as f:
-            f.write(payload)
-        os.replace(tmpfile, self.filename)
+        start = time.perf_counter()
+        cache = self._consume_snapshot_cache()
+        if cache is None:
+            snap = self.make_snapshot()
+            payload = pickle.dumps(snap, protocol=pickle.HIGHEST_PROTOCOL)
+            digest = hashlib.sha256(payload).hexdigest()
+            summary = self._summarize_snapshot(snap, digest)
+        else:
+            snap, payload, summary = cache
+            digest = summary.get("hash") or hashlib.sha256(payload).hexdigest()
+        try:
+            self.backend.write_bytes(self.filename, payload, atomic=True)
+        except Exception as exc:
+            self._alert("snapshot_write_failed", {"error": repr(exc), "path": self.filename})
+            raise
         self._last_save = time.time()
-        digest = hashlib.sha256(payload).hexdigest()
-        summary = self._summarize_snapshot(snap, digest)
         prev_summary = self._last_snapshot_meta
         self._last_drift = self._compute_drift(prev_summary, summary)
         self._last_snapshot_meta = summary
@@ -121,16 +253,24 @@ class PersistenceManager:
         self._last_snapshot_hash = digest
         if digest != previous_hash:
             self._record_history(payload, summary)
+            self._append_journal(
+                "snapshot",
+                digest=digest,
+                severity=self._last_drift.get("severity", 0.0) if self._last_drift else 0.0,
+                components=list(summary.get("components", {}).keys()),
+            )
             self._prune_history()
+        duration = time.perf_counter() - start
+        self.logger.info("Snapshot saved", extra={"digest": digest, "duration": duration})
         return self.filename
 
     def load(self) -> bool:
-        if not os.path.exists(self.filename):
+        if not self.backend.exists(self.filename):
             return False
         try:
-            with open(self.filename, "rb") as f:
-                snap = pickle.load(f)
-            payload = pickle.dumps(snap, protocol=pickle.HIGHEST_PROTOCOL)
+            payload = self.backend.read_bytes(self.filename)
+            snap = pickle.loads(payload)
+            snap = self._apply_migrations(snap)
             for name, state in snap.items():
                 if name in ("timestamp", "version"):
                     continue
@@ -141,12 +281,27 @@ class PersistenceManager:
             self._last_snapshot_meta = self._summarize_snapshot(snap, digest)
             self._last_snapshot_hash = digest
             self._last_drift = None
+            self._append_journal("load", digest=digest, version=snap.get("version"))
+            self.logger.info("Snapshot loaded", extra={"digest": digest})
             return True
-        except Exception:
+        except Exception as exc:
+            self._alert("snapshot_load_failed", {"error": repr(exc), "path": self.filename})
             return False
 
     def autosave_tick(self):
-        if (time.time() - self._last_save) >= self.autosave_interval:
+        now = time.time()
+        elapsed = now - self._last_save
+        if elapsed < self.autosave_min_interval:
+            return
+        if elapsed >= self.autosave_interval:
+            self.save()
+            return
+        severity = self._estimate_drift_severity()
+        if severity >= self.autosave_drift_threshold:
+            self.logger.debug(
+                "Autosave triggered on drift",
+                extra={"severity": severity, "threshold": self.autosave_drift_threshold},
+            )
             self.save()
 
     def save_on_exit(self):
@@ -154,6 +309,73 @@ class PersistenceManager:
             self.save()
         except Exception:
             pass
+
+    # ------------------------------------------------------------------
+    # Snapshot orchestration helpers
+    def _consume_snapshot_cache(self) -> Optional[Tuple[Dict[str, Any], bytes, Dict[str, Any]]]:
+        if not self._pending_snapshot_cache:
+            return None
+        if (time.time() - self._pending_snapshot_time) > self.snapshot_cache_ttl:
+            self._pending_snapshot_cache = None
+            return None
+        cache = self._pending_snapshot_cache
+        self._pending_snapshot_cache = None
+        return cache
+
+    def _estimate_drift_severity(self) -> float:
+        try:
+            snap = self.make_snapshot()
+            payload = pickle.dumps(snap, protocol=pickle.HIGHEST_PROTOCOL)
+            digest = hashlib.sha256(payload).hexdigest()
+            summary = self._summarize_snapshot(snap, digest)
+        except Exception as exc:
+            self._alert("snapshot_probe_failed", {"error": repr(exc)})
+            return 0.0
+        prev_summary = self._last_snapshot_meta
+        drift = self._compute_drift(prev_summary, summary)
+        self._pending_snapshot_cache = (snap, payload, summary)
+        self._pending_snapshot_time = time.time()
+        return float(drift.get("severity", 0.0))
+
+    def _apply_migrations(self, snap: Dict[str, Any]) -> Dict[str, Any]:
+        current_version = int(snap.get("version", 1) or 1)
+        target = self.schema_version
+        if current_version == target:
+            return snap
+        visited = set()
+        while current_version != target:
+            if current_version in visited:
+                raise RuntimeError("Cyclic snapshot migrations detected")
+            visited.add(current_version)
+            migration = _MIGRATIONS.get(current_version)
+            if migration is None:
+                self._alert(
+                    "migration_missing",
+                    {"from_version": current_version, "to_version": target},
+                )
+                break
+            next_version, func = migration
+            try:
+                snap = func(snap)
+            except Exception as exc:
+                self._alert(
+                    "migration_failed",
+                    {"from_version": current_version, "to_version": next_version, "error": repr(exc)},
+                )
+                raise
+            snap["version"] = next_version
+            current_version = next_version
+        return snap
+
+    def _alert(self, message: str, context: Optional[Dict[str, Any]] = None) -> None:
+        payload = context or {}
+        if self.alert_hook:
+            try:
+                self.alert_hook(message, payload)
+            except Exception:
+                self.logger.exception("Alert hook failure", extra={"message": message, **payload})
+        else:
+            self.logger.warning("Persistence alert", extra={"message": message, **payload})
 
     # ------------------------------------------------------------------
     # History & drift reporting
@@ -227,27 +449,26 @@ class PersistenceManager:
         data_path = os.path.join(self.history_dir, f"{base}.pkl")
         meta_path = os.path.join(self.history_dir, f"{base}.json")
         try:
-            with open(data_path, "wb") as fh:
-                fh.write(payload)
-        except Exception:
+            self.backend.write_bytes(data_path, payload, atomic=True)
+        except Exception as exc:
+            self._alert("history_write_failed", {"error": repr(exc), "path": data_path})
             return
         meta_payload = dict(summary)
         meta_payload["path"] = os.path.relpath(data_path, self.directory)
         try:
-            with open(meta_path, "w", encoding="utf-8") as fh:
-                json.dump(meta_payload, fh, indent=2, sort_keys=True)
-        except Exception:
-            # History metadata is best-effort; ignore failures.
-            pass
+            self.backend.write_bytes(meta_path, json.dumps(meta_payload, indent=2, sort_keys=True).encode("utf-8"))
+        except Exception as exc:
+            self._alert("history_meta_failed", {"error": repr(exc), "path": meta_path})
 
     def _prune_history(self) -> None:
         try:
             entries = [
                 f
-                for f in os.listdir(self.history_dir)
-                if f.endswith(".json") and os.path.isfile(os.path.join(self.history_dir, f))
+                for f in self.backend.list_files(self.history_dir, suffix=".json")
+                if self.backend.exists(os.path.join(self.history_dir, f))
             ]
-        except Exception:
+        except Exception as exc:
+            self._alert("history_list_failed", {"error": repr(exc)})
             return
         if len(entries) <= self.history_retention:
             return
@@ -258,10 +479,21 @@ class PersistenceManager:
             for suffix in (".json", ".pkl"):
                 path = os.path.join(self.history_dir, f"{base}{suffix}")
                 try:
-                    if os.path.exists(path):
-                        os.remove(path)
-                except Exception:
-                    pass
+                    if self.backend.exists(path):
+                        self.backend.remove(path)
+                except Exception as exc:
+                    self._alert("history_prune_failed", {"error": repr(exc), "path": path})
+
+    def _append_journal(self, event_type: str, **data: Any) -> None:
+        event = {
+            "timestamp": time.time(),
+            "type": event_type,
+            **data,
+        }
+        try:
+            self.backend.append_text(self.journal_path, json.dumps(event, sort_keys=True) + "\n")
+        except Exception as exc:
+            self._alert("journal_append_failed", {"error": repr(exc)})
 
     def get_last_snapshot_metadata(self) -> Dict[str, Any]:
         """Return metadata describing the latest persisted snapshot."""
