@@ -122,12 +122,20 @@ class _OnlineFallbackClassifier:
 
         return features
 
+    @staticmethod
+    def _sigmoid(raw: float) -> float:
+        if raw >= 0.0:
+            z = math.exp(-raw)
+            return 1.0 / (1.0 + z)
+        z = math.exp(raw)
+        return z / (1.0 + z)
+
     def predict(self, doc_id: int, query: str, text: str) -> float:
         features = self._extract_features(query, text)
         raw = self._bias
         for name, value in features.items():
             raw += self._weights.get(name, 0.0) * value
-        score = 1.0 / (1.0 + math.exp(-raw))
+        score = self._sigmoid(raw)
         self._last_features[doc_id] = features
         return score
 
@@ -139,7 +147,7 @@ class _OnlineFallbackClassifier:
         raw = self._bias
         for name, value in features.items():
             raw += self._weights.get(name, 0.0) * value
-        pred = 1.0 / (1.0 + math.exp(-raw))
+        pred = self._sigmoid(raw)
         error = reward - pred
         for name, value in features.items():
             grad = error * value - self.l2 * self._weights.get(name, 0.0)

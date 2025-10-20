@@ -128,30 +128,30 @@ class SnapshotDriftTracker:
         payload = json.dumps(sanitized, sort_keys=True, ensure_ascii=False)
         digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-        drift_event: Optional[Dict[str, Any]] = None
-        if self._last_hash is None:
-            drift_event = {
-                "t": time.time(),
-                "snapshot": snapshot_path,
-                "initial": True,
-                "changed_keys": [],
-            }
-        elif digest != self._last_hash:
-            changed = sorted(self._diff_keys(self._last_snapshot or {}, sanitized))
-            drift_event = {
-                "t": time.time(),
-                "snapshot": snapshot_path,
-                "initial": False,
-                "changed_keys": changed,
-            }
-
-        self._last_hash = digest
-        self._last_snapshot = sanitized
-
-        if drift_event is None:
-            return
-
         with self._lock:
+            drift_event: Optional[Dict[str, Any]] = None
+            if self._last_hash is None:
+                drift_event = {
+                    "t": time.time(),
+                    "snapshot": snapshot_path,
+                    "initial": True,
+                    "changed_keys": [],
+                }
+            elif digest != self._last_hash:
+                changed = sorted(self._diff_keys(self._last_snapshot or {}, sanitized))
+                drift_event = {
+                    "t": time.time(),
+                    "snapshot": snapshot_path,
+                    "initial": False,
+                    "changed_keys": changed,
+                }
+
+            self._last_hash = digest
+            self._last_snapshot = sanitized
+
+            if drift_event is None:
+                return
+
             with open(self.log_path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(drift_event, ensure_ascii=False) + "\n")
 
