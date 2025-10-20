@@ -17,12 +17,13 @@ class OnlineLinear:
         feature_names: Sequence[str],
         learning_rate: float = 0.15,
         l2: float = 0.01,
-        weight_bounds: Sequence[float] = (0.0, 1.5),
+        weight_bounds: Sequence[float] = (-1.5, 1.5),
     ) -> None:
         self.feature_names = list(feature_names)
         self.learning_rate = learning_rate
         self.l2 = l2
-        self.low, self.high = weight_bounds
+        low, high = weight_bounds
+        self.low, self.high = (low, high) if low <= high else (high, low)
         self.weights: Dict[str, float] = {name: 0.0 for name in self.feature_names}
 
     def predict(self, features: Dict[str, float]) -> float:

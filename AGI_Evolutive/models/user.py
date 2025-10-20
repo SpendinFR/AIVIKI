@@ -82,9 +82,27 @@ class UserModel:
             return 1.0
         return 1.0 / (1.0 + math.exp(-x))
 
+    def _normalize_timestamp(self, value: float) -> float:
+        if not isinstance(value, (int, float)):
+            return time.time()
+        ts = float(value)
+        if not math.isfinite(ts):
+            return time.time()
+        # Heuristically downscale timestamps provided in ms/us/ns
+        # to keep them within datetime.fromtimestamp's supported range.
+        for _ in range(3):
+            if abs(ts) <= 1e11:
+                break
+            ts /= 1000.0
+        return ts
+
     def _feature_vector(self, timestamp: float, context: Optional[Dict[str, Any]]) -> Dict[str, float]:
         features: Dict[str, float] = {"bias": 1.0}
-        dt_obj = dt.datetime.fromtimestamp(timestamp)
+        ts = self._normalize_timestamp(timestamp)
+        try:
+            dt_obj = dt.datetime.fromtimestamp(ts)
+        except (OverflowError, ValueError, OSError):
+            dt_obj = dt.datetime.fromtimestamp(time.time())
         features[f"hour::{dt_obj.hour:02d}"] = 1.0
         features[f"weekday::{dt_obj.weekday()}"] = 1.0
         if context:
@@ -258,7 +276,7 @@ class UserModel:
             context = {k: meta.get(k) for k in ("channel", "partner", "location") if meta.get(k) is not None}
             timestamp = meta.get("timestamp")
             if isinstance(timestamp, (int, float)):
-                ts = float(timestamp)
+                ts = self._normalize_timestamp(timestamp)
             else:
                 ts = time.time()
 
