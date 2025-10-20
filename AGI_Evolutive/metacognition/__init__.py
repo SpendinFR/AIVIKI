@@ -16,6 +16,8 @@ import math
 import json
 import inspect
 
+from AGI_Evolutive.cognition.meta_cognition import OnlineLinear
+
 from .experimentation import MetacognitionExperimenter, calibrate_self_model
 
 class MetacognitiveState(Enum):
@@ -110,6 +112,42 @@ class ReflectionSession:
     duration: float = 0.0
     quality_score: float = 0.0
 
+
+class ThompsonBandit:
+    """Bandit de Thompson discret pour la sélection adaptative d'options."""
+
+    def __init__(self, arms: List[Any], prior: Tuple[float, float] = (1.0, 1.0)):
+        if not arms:
+            raise ValueError("ThompsonBandit requires at least one arm")
+        self.arms: List[Any] = list(arms)
+        self.alpha: Dict[Any, float] = {arm: float(prior[0]) for arm in self.arms}
+        self.beta: Dict[Any, float] = {arm: float(prior[1]) for arm in self.arms}
+        self.last_selected: Optional[Any] = None
+
+    def select(self) -> Any:
+        samples = {}
+        for arm in self.arms:
+            a = max(1e-3, self.alpha.get(arm, 1.0))
+            b = max(1e-3, self.beta.get(arm, 1.0))
+            samples[arm] = np.random.beta(a, b)
+        best_arm = max(samples.items(), key=lambda item: item[1])[0]
+        self.last_selected = best_arm
+        return best_arm
+
+    def update(self, arm: Any, reward: float):
+        if arm not in self.alpha:
+            return
+        reward = max(0.0, min(1.0, float(reward)))
+        self.alpha[arm] = self.alpha.get(arm, 1.0) + reward
+        self.beta[arm] = self.beta.get(arm, 1.0) + (1.0 - reward)
+
+    def add_arm(self, arm: Any, prior: Tuple[float, float] = (1.0, 1.0)):
+        if arm in self.alpha:
+            return
+        self.arms.append(arm)
+        self.alpha[arm] = float(prior[0])
+        self.beta[arm] = float(prior[1])
+
 class MetacognitiveSystem:
     """
     Système de métacognition avancé - Le "surveillant interne" de l'AGI
@@ -181,7 +219,7 @@ class MetacognitiveSystem:
             "self_improvements": deque(maxlen=200),
             "error_corrections": deque(maxlen=300)
         }
-        
+
         # === ÉTATS MÉTACOGNITIFS DYNAMIQUES ===
         self.metacognitive_states = {
             "awareness_level": 0.1,
@@ -191,7 +229,7 @@ class MetacognitiveSystem:
             "insight_readiness": 0.4,
             "cognitive_flexibility": 0.5
         }
-        
+
         # === PARAMÈTRES DE FONCTIONNEMENT ===
         self.operational_parameters = {
             "monitoring_intensity": 0.7,
@@ -201,6 +239,41 @@ class MetacognitiveSystem:
             "error_tolerance": 0.3,
             "improvement_target": 0.8
         }
+
+        # === MÉCANISMES D'ADAPTATION AVANCÉS ===
+        self._drift_log: deque = deque(maxlen=200)
+        self._recent_reflection_quality: deque = deque(maxlen=50)
+        self._reflection_domain_bandit = ThompsonBandit(list(CognitiveDomain))
+
+        self._ema_candidates: Tuple[float, ...] = (0.2, 0.4, 0.6, 0.8)
+        self._ema_bandits: Dict[str, ThompsonBandit] = {}
+        self._current_ema_coeffs: Dict[str, float] = {}
+        self._smoothed_metrics: Dict[str, float] = {}
+        self._ema_histories: Dict[str, deque] = defaultdict(lambda: deque(maxlen=30))
+        self._ema_correlations: Dict[str, float] = {}
+
+        self._state_performance_history: deque = deque(maxlen=120)
+        self._state_performance_correlation: Dict[str, float] = {
+            "awareness": 0.0,
+            "understanding": 0.0,
+        }
+
+        self._state_update_model: OnlineLinear = OnlineLinear(
+            feature_names=["significance", "confidence", "emotional_valence", "cognitive_load"],
+            bounds=(0.0, 1.0),
+            lr=0.04,
+            l2=0.001,
+            max_grad=0.25,
+            warmup=24,
+            init_weight=0.05,
+        )
+        self._state_update_context: deque = deque(maxlen=64)
+
+        self._self_model_rate_candidates: List[float] = [0.05, 0.08, 0.1, 0.12, 0.15]
+        self._self_model_rate_bandit = ThompsonBandit(self._self_model_rate_candidates)
+        self._current_self_model_rate: float = self.operational_parameters["self_model_update_rate"]
+        self._last_rate_arm: float = self._current_self_model_rate
+
         
         # === THREADS DE SURVEILLANCE ===
         self.monitoring_threads = {}
@@ -282,6 +355,146 @@ class MetacognitiveSystem:
         # Première réflexion initiale
         initial_reflection = self._perform_initial_self_assessment()
         self.metacognitive_history["reflection_sessions"].append(initial_reflection)
+
+    # ==============================================================
+    # 🛠️ MÉCANISMES D'ADAPTATION ET D'APPRENTISSAGE
+    # ==============================================================
+
+    def _log_drift(self, parameter: str, old_value: float, new_value: float):
+        if not isinstance(old_value, (int, float)) or not isinstance(new_value, (int, float)):
+            return
+        if abs(new_value - old_value) < 1e-6:
+            return
+        drift = {
+            "timestamp": time.time(),
+            "parameter": parameter,
+            "old": float(old_value),
+            "new": float(new_value),
+            "delta": float(new_value - old_value),
+        }
+        self._drift_log.append(drift)
+        if self.logger:
+            try:
+                self.logger.write("metacog.drift", **drift)
+            except Exception:
+                pass
+
+    def _get_ema_bandit(self, metric: str) -> ThompsonBandit:
+        bandit = self._ema_bandits.get(metric)
+        if bandit is None:
+            bandit = ThompsonBandit(list(self._ema_candidates))
+            self._ema_bandits[metric] = bandit
+        return bandit
+
+    def _apply_adaptive_ema(self, metric: str, value: float) -> float:
+        bandit = self._get_ema_bandit(metric)
+        selected_arm = bandit.select()
+        previous_coeff = self._current_ema_coeffs.get(metric, float(selected_arm))
+        target_coeff = float(selected_arm)
+        max_step = 0.25
+        delta = target_coeff - previous_coeff
+        if abs(delta) > max_step:
+            target_coeff = previous_coeff + math.copysign(max_step, delta)
+        target_coeff = max(min(self._ema_candidates), min(max(self._ema_candidates), target_coeff))
+        if metric in self._current_ema_coeffs and abs(target_coeff - previous_coeff) > 0.15:
+            self._log_drift(f"ema_{metric}", previous_coeff, target_coeff)
+        self._current_ema_coeffs[metric] = target_coeff
+
+        previous_value = self._smoothed_metrics.get(metric, value)
+        smoothed_value = target_coeff * value + (1.0 - target_coeff) * previous_value
+        self._smoothed_metrics[metric] = smoothed_value
+
+        quality_signal = self._recent_reflection_quality[-1] if self._recent_reflection_quality else 0.5
+        history = self._ema_histories[metric]
+        history.append((smoothed_value, quality_signal))
+
+        reward = 0.5
+        if len(history) >= 4:
+            smoothed_values = np.array([entry[0] for entry in history])
+            quality_values = np.array([entry[1] for entry in history])
+            if np.std(smoothed_values) > 1e-6 and np.std(quality_values) > 1e-6:
+                corr = np.corrcoef(smoothed_values, quality_values)[0, 1]
+                reward = max(0.0, min(1.0, 0.5 + 0.5 * corr))
+                previous_corr = self._ema_correlations.get(metric)
+                if previous_corr is not None and corr < previous_corr - 0.2:
+                    self._log_drift(f"ema_corr_{metric}", previous_corr, corr)
+                self._ema_correlations[metric] = corr
+
+        bandit.update(selected_arm, reward)
+        return smoothed_value
+
+    def _record_state_performance_sample(self, metric: str, value: float):
+        sample = {
+            "timestamp": time.time(),
+            "metric": metric,
+            "value": float(value),
+            "awareness": float(self.metacognitive_states.get("awareness_level", 0.0)),
+            "understanding": float(self.metacognitive_states.get("self_understanding", 0.0)),
+        }
+        self._state_performance_history.append(sample)
+        if len(self._state_performance_history) >= 6:
+            self._update_state_performance_correlation()
+
+    def _update_state_performance_correlation(self):
+        data = list(self._state_performance_history)[-40:]
+        if not data:
+            return
+        awareness_values = np.array([entry["awareness"] for entry in data])
+        understanding_values = np.array([entry["understanding"] for entry in data])
+        metric_values = np.array([entry["value"] for entry in data])
+
+        def safe_corr(a: np.ndarray, b: np.ndarray) -> float:
+            if a.size < 3 or b.size < 3:
+                return 0.0
+            if np.std(a) < 1e-6 or np.std(b) < 1e-6:
+                return 0.0
+            matrix = np.corrcoef(a, b)
+            return float(matrix[0, 1])
+
+        self._state_performance_correlation["awareness"] = safe_corr(awareness_values, metric_values)
+        self._state_performance_correlation["understanding"] = safe_corr(understanding_values, metric_values)
+
+    def _select_self_model_rate(self) -> float:
+        arm = self._self_model_rate_bandit.select()
+        self._last_rate_arm = float(arm)
+        target_rate = float(arm)
+        current_rate = self._current_self_model_rate
+        max_step = 0.03
+        delta = target_rate - current_rate
+        if abs(delta) > max_step:
+            target_rate = current_rate + math.copysign(max_step, delta)
+        min_rate = min(self._self_model_rate_candidates)
+        max_rate = max(self._self_model_rate_candidates)
+        adjusted_rate = max(min_rate, min(max_rate, target_rate))
+        if abs(adjusted_rate - current_rate) > 0.02:
+            self._log_drift("self_model_update_rate", current_rate, adjusted_rate)
+        self._current_self_model_rate = adjusted_rate
+        self.operational_parameters["self_model_update_rate"] = adjusted_rate
+        return adjusted_rate
+
+    def _estimate_state_update_reward(
+        self,
+        event: MetacognitiveEvent,
+        before_states: Dict[str, float],
+        after_states: Dict[str, float],
+    ) -> float:
+        delta_awareness = after_states.get("awareness_level", 0.0) - before_states.get("awareness_level", 0.0)
+        delta_understanding = after_states.get("self_understanding", 0.0) - before_states.get("self_understanding", 0.0)
+        delta_total = delta_awareness + delta_understanding
+        pressure = 0.5 * (event.significance + event.confidence)
+        corr_awareness = self._state_performance_correlation.get("awareness", 0.0)
+        corr_understanding = self._state_performance_correlation.get("understanding", 0.0)
+        corr_component = 0.5 + 0.25 * corr_awareness + 0.25 * corr_understanding
+        improvement_component = 0.5 + 0.5 * math.tanh(delta_total * 5.0)
+        reward = pressure * 0.3 + improvement_component * corr_component * 0.7
+        return max(0.0, min(1.0, reward))
+
+    def _register_reflection_outcome(self, reflection: ReflectionSession):
+        domain = reflection.focus_domain
+        quality = max(0.0, min(1.0, reflection.quality_score))
+        self._reflection_domain_bandit.update(domain, quality)
+        if quality < 0.3:
+            self._log_drift(f"reflection_quality_{domain.value}", reflection.depth_level, quality)
 
     def _initialize_learning_strategies(self) -> Dict[str, Dict[str, Any]]:
         """Initialise les stratégies d'apprentissage connues"""
@@ -426,14 +639,17 @@ class MetacognitiveSystem:
 
             performance_metrics.update(self._assess_learning_performance(reasoning))
 
-            for metric, value in performance_metrics.items():
+            for metric, value in list(performance_metrics.items()):
+                smoothed_value = self._apply_adaptive_ema(metric, value)
+                performance_metrics[metric] = smoothed_value
+                self._record_state_performance_sample(metric, smoothed_value)
                 self.cognitive_monitoring["performance_tracking"][metric].append({
                     "timestamp": time.time(),
-                    "value": value,
+                    "value": smoothed_value,
                     "context": "continuous_monitoring"
                 })
                 try:
-                    self.experimenter.record_outcome(metric, new_value=value)
+                    self.experimenter.record_outcome(metric, new_value=smoothed_value)
                 except Exception as _e:
                     print(f"[⚠] record_outcome: {_e}")
 
@@ -632,22 +848,64 @@ class MetacognitiveSystem:
     
     def _update_metacognitive_states(self, event: MetacognitiveEvent):
         """Met à jour les états métacognitifs basé sur les événements"""
-        
-        # Augmentation de la conscience avec les événements significatifs
-        if event.significance > 0.5:
-            awareness_increase = event.significance * 0.01
-            self.metacognitive_states["awareness_level"] = min(
-                1.0, self.metacognitive_states["awareness_level"] + awareness_increase
-            )
-        
-        # Augmentation de la compréhension de soi avec la réflexion sur les erreurs
-        if event.event_type == "error_detected":
-            understanding_increase = event.significance * 0.02
-            self.metacognitive_states["self_understanding"] = min(
-                1.0, self.metacognitive_states["self_understanding"] + understanding_increase
-            )
-    
-    def trigger_reflection(self, trigger: str, domain: CognitiveDomain, 
+        before_states = {
+            "awareness_level": self.metacognitive_states.get("awareness_level", 0.0),
+            "self_understanding": self.metacognitive_states.get("self_understanding", 0.0),
+        }
+
+        features: Dict[str, float] = {
+            "significance": float(event.significance),
+            "confidence": float(event.confidence),
+            "emotional_valence": float(event.emotional_valence),
+            "cognitive_load": float(event.cognitive_load),
+            "domain_importance": float(self._assess_domain_impact(event.domain)),
+            "significance_confidence_gap": abs(float(event.significance) - float(event.confidence)),
+        }
+        features[f"domain_{event.domain.value}"] = 1.0
+        features[f"event_{event.event_type}"] = 1.0
+
+        modulation = self._state_update_model.predict(features)
+        modulation_factor = (modulation - 0.5) * 2.0
+
+        # Conscience: basée sur la signification, modulée par le modèle
+        base_awareness = event.significance * 0.01 if event.significance > 0.3 else 0.0
+        awareness_delta = base_awareness * (1.0 + modulation_factor)
+        awareness_delta = max(-0.05, min(0.05, awareness_delta))
+        new_awareness = max(0.0, min(1.0, before_states["awareness_level"] + awareness_delta))
+        if abs(new_awareness - before_states["awareness_level"]) > 0.02:
+            self._log_drift("awareness_level", before_states["awareness_level"], new_awareness)
+        self.metacognitive_states["awareness_level"] = new_awareness
+
+        # Compréhension de soi: events d'erreur ou faible confiance entraînent des ajustements
+        base_understanding = 0.0
+        if event.event_type == "error_detected" or event.confidence < 0.4:
+            base_understanding = event.significance * 0.02
+        elif event.significance > 0.6:
+            base_understanding = event.significance * 0.01
+        understanding_delta = base_understanding * (1.0 + modulation_factor)
+        understanding_delta = max(-0.05, min(0.05, understanding_delta))
+        new_understanding = max(0.0, min(1.0, before_states["self_understanding"] + understanding_delta))
+        if abs(new_understanding - before_states["self_understanding"]) > 0.02:
+            self._log_drift("self_understanding", before_states["self_understanding"], new_understanding)
+        self.metacognitive_states["self_understanding"] = new_understanding
+
+        after_states = {
+            "awareness_level": new_awareness,
+            "self_understanding": new_understanding,
+        }
+
+        reward = self._estimate_state_update_reward(event, before_states, after_states)
+        self._state_update_model.update(features, reward)
+        self._state_update_context.append({
+            "event_type": event.event_type,
+            "domain": event.domain.value,
+            "features": features,
+            "reward": reward,
+            "before": before_states,
+            "after": after_states,
+        })
+
+    def trigger_reflection(self, trigger: str, domain: CognitiveDomain,
                           urgency: float = 0.5, depth: int = 2):
         """Déclenche une session de réflexion"""
         reflection = ReflectionSession(
@@ -659,11 +917,13 @@ class MetacognitiveSystem:
         
         # Exécution de la réflexion
         self._execute_reflection_session(reflection)
-        
+
         # Enregistrement
         self.metacognitive_history["reflection_sessions"].append(reflection)
         self.reflection_engine["triggered_reflections"].append(reflection)
-        
+        self._recent_reflection_quality.append(max(0.0, min(1.0, reflection.quality_score)))
+        self._register_reflection_outcome(reflection)
+
         return reflection
     
     def _execute_reflection_session(self, reflection: ReflectionSession):
@@ -1155,7 +1415,7 @@ class MetacognitiveSystem:
     
     def _update_ability_estimate(self, current_estimate: float, new_evidence: float) -> float:
         """Met à jour une estimation de capacité avec de nouvelles preuves"""
-        learning_rate = self.operational_parameters["self_model_update_rate"]
+        learning_rate = self._select_self_model_rate()
         updated_estimate = (1 - learning_rate) * current_estimate + learning_rate * new_evidence
         return max(0.0, min(1.0, updated_estimate))
     
@@ -1173,8 +1433,14 @@ class MetacognitiveSystem:
         
         if consistency_scores:
             new_accuracy = np.mean(consistency_scores)
+            previous_accuracy = self.self_model_accuracy
             learning_rate = 0.1
-            self.self_model_accuracy = (1 - learning_rate) * self.self_model_accuracy + learning_rate * new_accuracy
+            self.self_model_accuracy = (1 - learning_rate) * previous_accuracy + learning_rate * new_accuracy
+            if self._last_rate_arm is not None:
+                improvement = self.self_model_accuracy - previous_accuracy
+                reward = 0.5 + 0.5 * math.tanh(improvement / 0.05)
+                reward = max(0.0, min(1.0, reward))
+                self._self_model_rate_bandit.update(self._last_rate_arm, reward)
     
     def _perform_initial_self_assessment(self) -> ReflectionSession:
         """Effectue l'auto-évaluation initiale"""
@@ -1237,10 +1503,14 @@ class MetacognitiveSystem:
         def periodic_reflection_loop():
             while self.running:
                 try:
-                    # Sélection aléatoire d'un domaine à réfléchir
-                    domains = list(CognitiveDomain)
-                    selected_domain = random.choice(domains)
-                    
+                    # Sélection adaptative d'un domaine via Thompson Sampling
+                    selected_domain = self._reflection_domain_bandit.select()
+                    if not isinstance(selected_domain, CognitiveDomain):
+                        try:
+                            selected_domain = CognitiveDomain(selected_domain)
+                        except Exception:
+                            selected_domain = CognitiveDomain.LEARNING
+
                     self.trigger_reflection(
                         trigger="periodic_review",
                         domain=selected_domain,
