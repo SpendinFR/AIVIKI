@@ -110,8 +110,11 @@ class Homeostasis:
             try:
                 with open(_PATH, "r", encoding="utf-8") as f:
                     self.state = json.load(f)
-            except Exception:  # pragma: no cover - defensive
-                logger.exception("Failed to load homeostasis state; using defaults")
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "Impossible de charger l'état homeostasis, utilisation des valeurs par défaut: %s",
+                    exc,
+                )
 
     def _ensure_schema(self) -> None:
         drives = self.state.setdefault(

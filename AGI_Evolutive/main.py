@@ -1,6 +1,7 @@
 # 🚀 main.py - Point d'entrée AGI Évolutive
 import glob
 import json
+import logging
 import os
 import re
 import sys
@@ -77,6 +78,7 @@ from AGI_Evolutive.language.renderer import LanguageRenderer
 from AGI_Evolutive.language import OnlineNgramClassifier
 from AGI_Evolutive.memory.concept_extractor import ConceptExtractor
 from AGI_Evolutive.memory.prefs_bridge import PrefsBridge as PreferencesAdapter
+from AGI_Evolutive.utils.logging_setup import configure_logging
 
 BANNER = """
 ╔══════════════════════════════════════════════╗
@@ -260,8 +262,15 @@ def list_inbox(inbox_dir="inbox"):
         print("📁 Inbox :", ", ".join(files))
 
 def run_cli():
+    log_path = configure_logging()
+    logger = logging.getLogger(__name__)
+
     print(BANNER)
+    print(f"📝 Journaux: {log_path}")
     print("Chargement de l'architecture cognitive…")
+
+    logger.info("Démarrage de la CLI AGI Évolutive", extra={"log_path": str(log_path)})
+    logger.info("Initialisation de l'architecture cognitive")
     try:
         arch = CognitiveArchitecture()
         arch.prioritizer = getattr(arch, "prioritizer", GoalPrioritizer(arch))
@@ -350,6 +359,13 @@ def run_cli():
 
         orc = Orchestrator(arch)
         auto = Autopilot(arch, orchestrator=orc)
+        logger.info(
+            "Architecture cognitive initialisée",
+            extra={
+                "modules": ["autopilot", "orchestrator", "memory", "language"],
+                "rag_active": bool(getattr(arch, "rag", None)),
+            },
+        )
     except Exception as e:
         print("❌ Erreur d'initialisation :", e)
         traceback.print_exc()
@@ -398,6 +414,7 @@ def run_cli():
             except Exception as e:
                 print("⚠️ Erreur lors de la sauvegarde :", e)
             print("👋 Fin de session.")
+            logger.info("Session CLI terminée (interruption utilisateur)")
             break
 
         msg_lower = msg.lower()
@@ -774,6 +791,7 @@ def run_cli():
             _pending_cache = list(questions)
         for q in questions:
             print("❓", q["text"])
+    logger.info("Session CLI terminée")
 
 if __name__ == "__main__":
     run_cli()

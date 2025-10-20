@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 import time
 from collections import deque
@@ -50,11 +51,18 @@ from AGI_Evolutive.core.persistence import PersistenceManager
 from AGI_Evolutive.core.config import cfg
 
 
+logger = logging.getLogger(__name__)
+
+
 class CognitiveArchitecture:
     """Central coordinator for the agent's cognitive subsystems."""
 
     def __init__(self, boot_minimal: bool = False):
         self.boot_minimal = boot_minimal
+        logger.info(
+            "Initialisation de la CognitiveArchitecture",
+            extra={"boot_minimal": bool(boot_minimal)},
+        )
         # Observability
         self.logger = JSONLLogger("runtime/agent_events.jsonl")
         self.telemetry = Telemetry()
@@ -171,6 +179,14 @@ class CognitiveArchitecture:
         except Exception:
             # Ne jamais empêcher l'architecture de booter
             self.rag = None
+
+        logger.info(
+            "Statut RAG",
+            extra={
+                "actif": bool(self.rag),
+                "adaptatif": bool(self.rag_adaptive),
+            },
+        )
 
         self.telemetry.log("init", "core", {"stage": "perception"})
         self.perception = PerceptionSystem(self, self.memory)
@@ -348,6 +364,14 @@ class CognitiveArchitecture:
         self.telemetry.log("ready", "core", {"status": "initialized"})
         self._cycle_counter = 0
         self._decay_period = 8
+
+        logger.info(
+            "CognitiveArchitecture prête",
+            extra={
+                "boot_minimal": bool(boot_minimal),
+                "scheduler_actif": bool(self.scheduler),
+            },
+        )
 
     # ------------------------------------------------------------------
     # Helpers
