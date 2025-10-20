@@ -953,7 +953,24 @@ class Orchestrator:
             try:
                 res = recommend_and_apply_mission(self, threshold=0.75, delta_gate=0.10)
                 if res.get("status") == "needs_confirmation":
-                    pass
+                    proposal = {
+                        "kind": "mission_proposal",
+                        "best": res.get("best"),
+                        "second": res.get("second"),
+                        "delta": res.get("delta"),
+                        "ts": time.time(),
+                    }
+                    try:
+                        self._sj_new_items_queue.append(proposal)
+                    except Exception:
+                        pass
+                    if hasattr(self.memory, "store") and hasattr(self.memory.store, "add"):
+                        try:
+                            payload = dict(proposal)
+                            payload["status"] = "needs_confirmation"
+                            self.memory.store.add(payload)
+                        except Exception:
+                            pass
             except Exception:
                 pass
 
@@ -1187,7 +1204,69 @@ class Orchestrator:
                 except Exception:
                     pass
             elif stg is Stage.ATTEND:
-                pass
+                obs = ctx.get("obs")
+                if not ctx.get("text") and isinstance(obs, dict):
+                    maybe_text = obs.get("text") or obs.get("content")
+                    if maybe_text:
+                        ctx["text"] = str(maybe_text)
+                summary = ctx.get("text") or ""
+                if not summary and obs is not None:
+                    if isinstance(obs, dict):
+                        summary = str(
+                            obs.get("summary")
+                            or obs.get("description")
+                            or obs.get("text")
+                            or obs.get("content")
+                            or obs
+                        )
+                    else:
+                        summary = str(obs)
+                ctx["summary"] = summary[:240]
+                meta = trigger.meta or {}
+                payload = trigger.payload or {}
+                try:
+                    importance = float(meta.get("importance", 0.5))
+                except Exception:
+                    importance = 0.5
+                try:
+                    immediacy = float(meta.get("immediacy", 0.0))
+                except Exception:
+                    immediacy = 0.0
+                salience = importance
+                if isinstance(payload, dict):
+                    try:
+                        salience = max(salience, float(payload.get("salience", salience)))
+                    except Exception:
+                        pass
+                salience = max(0.0, min(1.0, salience))
+                attention_snapshot = {
+                    "salience": salience,
+                    "immediacy": immediacy,
+                    "source": meta.get("source"),
+                    "trigger": trigger.type.name,
+                }
+                if isinstance(payload, dict):
+                    payload_kind = payload.get("kind") or payload.get("type")
+                    if payload_kind:
+                        attention_snapshot["payload_kind"] = payload_kind
+                ctx["scratch"]["attention"] = attention_snapshot
+                if (
+                    salience >= 0.7
+                    and hasattr(self.memory, "store")
+                    and hasattr(self.memory.store, "add")
+                ):
+                    try:
+                        self.memory.store.add(
+                            {
+                                "kind": "attention_marker",
+                                "topic": ctx.get("topic") or meta.get("topic"),
+                                "summary": ctx.get("summary"),
+                                "attention": dict(attention_snapshot),
+                                "ts": time.time(),
+                            }
+                        )
+                    except Exception:
+                        pass
             elif stg is Stage.INTERPRET:
                 ctx["scratch"]["concepts"] = self.memory.concepts.extract(ctx["obs"])
                 ctx["scratch"]["episodic_links"] = self.memory.episodic.link(ctx["obs"])

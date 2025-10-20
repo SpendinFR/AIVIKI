@@ -257,9 +257,109 @@ class LanguageRenderer:
                 elif tac == "ack_grateful":
                     base = base + " Merci, je le note."
                 elif tac == "reformulation_empathique":
-                    pass
+                    params = (rule.get("tactic") or {}).get("params") or {}
+                    try:
+                        ratio = float(params.get("mirror_ratio", 0.5))
+                    except Exception:
+                        ratio = 0.5
+                    ratio = max(0.1, min(0.9, ratio))
+                    user_msg = str(ctx.get("last_message") or "")
+                    snippet = ""
+                    if user_msg:
+                        tokens = re.findall(r"[A-Za-zÀ-ÿ'’]+", user_msg)
+                        if tokens:
+                            take = max(3, int(len(tokens) * ratio))
+                            snippet = join_tokens(tokens[:take])
+                            if len(snippet) > 120:
+                                snippet = snippet[:117].rstrip() + "…"
+                    if snippet:
+                        empathy = f"Si je comprends bien, tu parles de « {snippet} »."
+                    else:
+                        empathy = "Si je comprends bien, ce sujet te tient à cœur."
+                    if empathy.lower() not in base.lower():
+                        base = f"{empathy} {base}".strip()
                 elif tac == "clarify_definition":
-                    pass
+                    params = (rule.get("tactic") or {}).get("params") or {}
+                    ensure_example = bool(params.get("ensure_example"))
+                    state_snapshot = ctx.get("state_snapshot") or {}
+                    dialogue_state = state_snapshot.get("dialogue") if isinstance(state_snapshot, dict) else None
+
+                    def _iter_unknown_terms(dialogue: Any):
+                        if dialogue is None:
+                            return
+                        if isinstance(dialogue, dict):
+                            frames = dialogue.get("recent_frames", []) or []
+                            for frame in reversed(frames):
+                                if not isinstance(frame, dict):
+                                    continue
+                                for key in ("unknown_terms", "terms_need_definition", "unknowns"):
+                                    vals = frame.get(key) or []
+                                    for val in vals:
+                                        if val:
+                                            yield str(val)
+                            profile = dialogue.get("user_profile", {})
+                            if isinstance(profile, dict):
+                                for val in reversed(profile.get("unknown_terms", []) or []):
+                                    if val:
+                                        yield str(val)
+                            return
+                        frames = list(getattr(dialogue, "recent_frames", []) or [])
+                        for frame in reversed(frames):
+                            if isinstance(frame, dict):
+                                sources = [
+                                    frame.get("unknown_terms"),
+                                    frame.get("terms_need_definition"),
+                                    frame.get("unknowns"),
+                                ]
+                            else:
+                                sources = [
+                                    getattr(frame, "unknown_terms", None),
+                                    getattr(frame, "terms_need_definition", None),
+                                    getattr(frame, "unknowns", None),
+                                ]
+                            for vals in sources:
+                                if not vals:
+                                    continue
+                                for val in vals:
+                                    if val:
+                                        yield str(val)
+                        profile = getattr(dialogue, "user_profile", None)
+                        if isinstance(profile, dict):
+                            for val in reversed(profile.get("unknown_terms", []) or []):
+                                if val:
+                                    yield str(val)
+
+                    term = None
+                    for candidate in _iter_unknown_terms(dialogue_state):
+                        candidate = candidate.strip()
+                        if candidate:
+                            term = candidate
+                            break
+                    if term is None:
+                        topics = ctx.get("topics") or []
+                        if topics:
+                            term = str(topics[0]).strip()
+                    if term:
+                        intro = f"Pour clarifier, quand je parle de « {term} », j'entends ceci :"
+                        if intro.lower() not in base.lower():
+                            base = f"{intro} {base}".strip()
+                    if ensure_example and "exemple" not in base.lower():
+                        last_msg = str(ctx.get("last_message") or "")
+                        example_snippet = ""
+                        if last_msg:
+                            tokens = re.findall(r"[A-Za-zÀ-ÿ'’]+", last_msg)
+                            if tokens:
+                                limit = min(len(tokens), 12)
+                                example_snippet = join_tokens(tokens[:limit])
+                                if len(example_snippet) > 80:
+                                    example_snippet = example_snippet[:77].rstrip() + "…"
+                        if example_snippet:
+                            base += (
+                                f" Par exemple, dans ce que tu viens d'évoquer (« {example_snippet} »),"
+                                " cette définition s'applique."
+                            )
+                        else:
+                            base += " Par exemple, on peut penser à une situation concrète pour l'illustrer."
 
         out = self._decorate_with_voice(base)
         if use_past:
