@@ -4,7 +4,10 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Tuple
-import re, time, hashlib
+import re
+import time
+import hashlib
+import math
 
 from AGI_Evolutive.social.interaction_rule import (
     InteractionRule, Predicate, TacticSpec, ContextBuilder
@@ -59,6 +62,90 @@ class InteractionMiner:
         rules = self._extract_rules(turns, source)
         rules = self._merge_duplicates(rules) # fusionne mêmes règles avec +evidence
         return rules
+
+    # ----------- Auto-évaluation & simulation -----------
+    def schedule_self_evaluation(self, ctx, payload: Dict[str, Any]):
+        """Background job entry point used by DocumentIngest."""
+        rule_dict = payload.get("rule") if isinstance(payload, dict) else None
+        arch = payload.get("arch") if isinstance(payload, dict) else None
+        if rule_dict is None:
+            return {"status": "skipped", "reason": "no_rule"}
+        try:
+            rule = InteractionRule.from_dict(rule_dict)
+        except Exception:
+            return {"status": "skipped", "reason": "invalid_rule"}
+        arch = arch or self.arch
+        outcome = self._simulate_rule(rule)
+        self._persist_evaluation(rule, outcome, arch)
+        return outcome
+
+    def _simulate_rule(self, rule: InteractionRule) -> Dict[str, Any]:
+        """Cheap multi-factor simulation -> returns a pseudo-outcome payload."""
+        now = time.time()
+        conf = float(getattr(rule, "confidence", 0.5) or 0.5)
+        support = len(getattr(rule, "evidence", []) or [])
+        predicate_weight = sum(float(getattr(pred, "confidence", 0.6) or 0.6) for pred in rule.predicates)
+        predicate_weight = predicate_weight / max(1, len(rule.predicates)) if rule.predicates else 0.5
+        # heuristique: plus de support & predicates cohérents => meilleur score
+        base = 0.45 + (conf * 0.35) + (predicate_weight * 0.2)
+        support_boost = math.tanh(support / 4.0) * 0.1
+        score = max(0.0, min(1.0, base + support_boost))
+        risk = max(0.0, 1.0 - score)
+        action = "deploy" if score >= 0.62 else ("review" if score >= 0.5 else "hold")
+        counterexamples: List[Dict[str, Any]] = []
+        if action != "deploy":
+            counterexamples.append({
+                "rule_id": rule.id,
+                "reason": "score_below_threshold",
+                "score": score,
+                "ts": now,
+            })
+        outcome = {
+            "rule_id": rule.id,
+            "score": round(score, 3),
+            "risk": round(risk, 3),
+            "action": action,
+            "support": support,
+            "timestamp": now,
+            "counterexamples": counterexamples,
+        }
+        return outcome
+
+    def _persist_evaluation(self, rule: InteractionRule, outcome: Dict[str, Any], arch) -> None:
+        mem = getattr(arch, "memory", None)
+        if not mem or not hasattr(mem, "add_memory"):
+            return
+        try:
+            payload = {
+                "kind": "interaction_rule_evaluation",
+                "rule_id": rule.id,
+                "outcome": outcome,
+                "ts": outcome.get("timestamp", time.time()),
+            }
+            mem.add_memory(payload)
+        except Exception:
+            pass
+        try:
+            if outcome.get("counterexamples"):
+                for ce in outcome["counterexamples"]:
+                    mem.add_memory({
+                        "kind": "interaction_counterexample",
+                        "rule_id": rule.id,
+                        "details": ce,
+                    })
+        except Exception:
+            pass
+        try:
+            rule_dict = rule.to_dict()
+            rule_dict.setdefault("evidence", {})["last_review_ts"] = outcome.get("timestamp", time.time())
+            rule_dict["evidence"]["auto_score"] = outcome.get("score")
+            rule_dict["evidence"]["recommended_action"] = outcome.get("action")
+            if hasattr(mem, "update_memory"):
+                mem.update_memory(rule_dict)
+            else:
+                mem.add_memory(rule_dict)
+        except Exception:
+            pass
 
     # ----------- Parsing basique des tours ----------
     def _parse_turns(self, text: str) -> List[DialogueTurn]:

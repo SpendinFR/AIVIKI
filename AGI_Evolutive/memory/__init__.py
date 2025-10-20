@@ -9,7 +9,7 @@ import time
 from collections import deque
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 import heapq
 import json
@@ -80,6 +80,7 @@ class MemoryTrace:
     consolidation_state: MemoryConsolidationState
     last_accessed: float
     access_count: int
+    evidence: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class MemoryRetrievalResult:
@@ -569,6 +570,13 @@ class MemorySystem:
         memory_id = self._generate_memory_id(content, context, timestamp)
         
         # Création de la trace mnésique
+        evidence = {
+            "usage": 0,
+            "positive": 0,
+            "negative": 0,
+            "last_used_ts": timestamp,
+            "ingested_ts": timestamp,
+        }
         memory_trace = MemoryTrace(
             id=memory_id,
             content=content,
@@ -581,7 +589,8 @@ class MemorySystem:
             associations=[],
             consolidation_state=MemoryConsolidationState.LABILE,
             last_accessed=timestamp,
-            access_count=1
+            access_count=1,
+            evidence=evidence,
         )
         
         # Application des effets d'amorçage et de récence
@@ -911,12 +920,22 @@ class MemorySystem:
         # Effet de pratique - l'accessibilité augmente avec les accès
         memory.access_count += 1
         memory.last_accessed = time.time()
-        
+
         # Augmentation de l'accessibilité basée sur la force et la récence
         practice_boost = 0.1 * (1.0 - memory.accessibility)
         recency_boost = 0.05 * (1.0 - memory.accessibility)
-        
+
         memory.accessibility = min(1.0, memory.accessibility + practice_boost + recency_boost)
+
+        try:
+            evidence = getattr(memory, "evidence", None)
+            if isinstance(memory, dict):
+                evidence = memory.setdefault("evidence", {})
+            if isinstance(evidence, dict):
+                evidence["usage"] = evidence.get("usage", 0) + 1
+                evidence["last_used_ts"] = memory.last_accessed
+        except Exception:
+            pass
     
     def _calculate_retrieval_confidence(self, memories: List[MemoryTrace], cues: Dict) -> float:
         """Calcule la confiance dans la récupération"""
@@ -949,12 +968,53 @@ class MemorySystem:
         """Calcule la cohérence émotionnelle des mémoires récupérées"""
         if len(memories) < 2:
             return 1.0
-        
+
         valences = [memory.valence for memory in memories]
         variance = np.var(valences)
-        
+
         # Cohérence inversement proportionnelle à la variance
         return 1.0 / (1.0 + variance * 10)
+
+    def register_memory_usage(self, memory_id: str, *, signal: str = "generic", reward: Optional[float] = None) -> bool:
+        """Expose une API légère pour informer le système qu'une mémoire a été utilisée."""
+        trace = self._get_memory_by_id(memory_id)
+        if not trace:
+            return False
+        try:
+            evidence = getattr(trace, "evidence", None)
+            if isinstance(trace, dict):
+                evidence = trace.setdefault("evidence", {})
+            if isinstance(evidence, dict):
+                evidence["usage"] = evidence.get("usage", 0) + 1
+                evidence.setdefault("signals", {}).setdefault(signal, 0)
+                evidence["signals"][signal] += 1
+                evidence["last_used_ts"] = time.time()
+                if reward is not None:
+                    if reward >= 0:
+                        evidence["positive"] = evidence.get("positive", 0) + 1
+                    else:
+                        evidence["negative"] = evidence.get("negative", 0) + 1
+                    evidence.setdefault("reward_history", []).append({
+                        "ts": time.time(),
+                        "reward": float(reward),
+                    })
+                    if len(evidence["reward_history"]) > 30:
+                        del evidence["reward_history"][:-30]
+        except Exception:
+            return False
+        try:
+            meta = self.memory_metadata.setdefault("usage_events", [])
+            meta.append({
+                "memory_id": memory_id,
+                "signal": signal,
+                "reward": reward,
+                "ts": time.time(),
+            })
+            if len(meta) > 200:
+                del meta[:-200]
+        except Exception:
+            pass
+        return True
     
     def _get_memory_by_id(self, memory_id: str) -> Optional[MemoryTrace]:
         """Récupère une mémoire par son ID"""
