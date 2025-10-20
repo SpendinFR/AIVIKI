@@ -159,7 +159,9 @@ class SocialCritic:
           "accepted": bool,
           "reward": float [0..1],
           "confidence": float [0..1],
-          "components": { ... contributions ... }
+          "components": {
+              <nom composant>: {"w": float, "v": float, "contrib": float}
+          }
         }
         """
         W = self.cfg["weights"]
