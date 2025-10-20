@@ -166,8 +166,10 @@ class GlobalWorkspace:
         else:
             self._state_path = ""
         self._state = self._load_state()
-        self._rag_model = self._init_rag_model(self._state.get("rag_model"))
-        self._score_model = self._init_score_model(self._state.get("score_model"))
+        rag_state = self._state.get("rag_model") if isinstance(self._state, dict) else None
+        score_state = self._state.get("score_model") if isinstance(self._state, dict) else None
+        self._rag_model = self._init_rag_model(rag_state)
+        self._score_model = self._init_score_model(score_state)
         bandit_state = self._state.get("bandit") if isinstance(self._state, dict) else None
         self._bandit = ThompsonBandit(
             candidates=[
