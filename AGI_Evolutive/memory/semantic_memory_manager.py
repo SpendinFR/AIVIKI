@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Any, Callable, Deque, Dict, Optional
 import random
 import time
 
@@ -17,6 +18,133 @@ class TaskStats:
     last_run: float
     iterations: int = 0
     last_result: Optional[Any] = None
+    history: Deque[Dict[str, Any]] = field(default_factory=lambda: deque(maxlen=256))
+
+
+class AdaptiveEMA:
+    """Adaptive EMA that selects smoothing via Thompson Sampling over betas."""
+
+    def __init__(self, betas: Optional[tuple[float, ...]] = None) -> None:
+        self._betas = betas or (0.2, 0.4, 0.6, 0.8)
+        self._values: Dict[float, Optional[float]] = {beta: None for beta in self._betas}
+        self._success: Dict[float, float] = {beta: 1.0 for beta in self._betas}
+        self._fail: Dict[float, float] = {beta: 1.0 for beta in self._betas}
+        self.current_beta: float = self._betas[0] if self._betas else 1.0
+        self.value: float = 0.0
+
+    def update(self, value: float) -> float:
+        if not self._betas:
+            self.value = value
+            return value
+
+        scale = max(abs(value), 1.0)
+        for beta in self._betas:
+            previous = self._values[beta]
+            if previous is None:
+                self._values[beta] = value
+                continue
+            error = abs(previous - value)
+            # convert error into pseudo reward in [0, 1]
+            success = max(0.0, min(1.0, 1.0 - min(error / (scale * 2.0), 1.0)))
+            self._success[beta] += success
+            self._fail[beta] += 1.0 - success
+            self._values[beta] = beta * value + (1.0 - beta) * previous
+
+        samples = {
+            beta: random.betavariate(self._success[beta], self._fail[beta]) for beta in self._betas
+        }
+        self.current_beta = max(samples, key=samples.get)
+        selected = self._values[self.current_beta]
+        self.value = selected if selected is not None else value
+        return self.value
+
+
+class AdaptivePeriodController:
+    """Adaptive scheduler that modulates task periods based on observed load."""
+
+    def __init__(
+        self,
+        period: float,
+        *,
+        name: str,
+        min_period: Optional[float] = None,
+        max_period: Optional[float] = None,
+    ) -> None:
+        self.name = name
+        self.period = float(period) if period else 0.0
+        if self.period <= 0:
+            self.min_period = float(min_period or 0.0)
+            self.max_period = float(max_period or self.min_period)
+        else:
+            computed_min = self.period * 0.25
+            self.min_period = max(1.0, float(min_period) if min_period is not None else computed_min)
+            computed_max = self.period * 4.0
+            candidate_max = float(max_period) if max_period is not None else computed_max
+            self.max_period = max(self.min_period, candidate_max)
+        self.load = AdaptiveEMA()
+        self.rate = AdaptiveEMA()
+        self.drift_log: Deque[Dict[str, float]] = deque(maxlen=64)
+        self.last_adjusted: Optional[float] = None
+
+    def update(
+        self,
+        period: float,
+        *,
+        processed: int,
+        duration: float,
+        limit: Optional[int] = None,
+        wall_ts: Optional[float] = None,
+    ) -> float:
+        if period <= 0:
+            self.period = 0.0
+            return 0.0
+
+        ts = float(wall_ts) if wall_ts is not None else time.time()
+        period = float(period)
+        processed = max(0, int(processed))
+        duration = max(duration, 1e-3)
+
+        smoothed_load = self.load.update(float(processed))
+        instantaneous_rate = float(processed) / duration
+        smoothed_rate = self.rate.update(instantaneous_rate)
+
+        new_period = period
+        if limit:
+            limit_f = float(limit)
+            target = 0.4 * limit_f
+            if smoothed_load > 0.85 * limit_f:
+                new_period = period * 0.5
+            elif smoothed_load > target:
+                new_period = period * 0.75
+            elif smoothed_load < target * 0.3:
+                new_period = period * 1.35
+            elif smoothed_load < target * 0.6:
+                new_period = period * 1.15
+        else:
+            baseline = self.rate.value if self.rate.value else smoothed_rate
+            if baseline:
+                ratio = smoothed_rate / max(baseline, 1e-6)
+                if ratio > 1.5:
+                    new_period = period * 0.7
+                elif ratio < 0.7:
+                    new_period = period * 1.2
+
+        new_period = max(self.min_period, min(self.max_period, new_period))
+
+        if abs(new_period - period) > max(1.0, 0.1 * period):
+            self.drift_log.append(
+                {
+                    "ts": ts,
+                    "from": period,
+                    "to": new_period,
+                    "load": smoothed_load,
+                    "rate": smoothed_rate,
+                }
+            )
+
+        self.period = new_period
+        self.last_adjusted = ts
+        return new_period
 
 
 class SemanticMemoryManager:
@@ -61,6 +189,49 @@ class SemanticMemoryManager:
         self.episodic_task = TaskStats(last_run=now)
         self.summary_task = TaskStats(last_run=now)
 
+        self._task_meta: Dict[str, Dict[str, Any]] = {
+            "concept": {
+                "task_attr": "concept_task",
+                "period_attr": "concept_period",
+                "next_attr": "next_concept",
+                "limit": 500,
+                "min_period": 60.0,
+                "max_factor": 6.0,
+            },
+            "episodic": {
+                "task_attr": "episodic_task",
+                "period_attr": "episodic_period",
+                "next_attr": "next_episodic",
+                "limit": 800,
+                "min_period": 120.0,
+                "max_factor": 6.0,
+            },
+            "summarize": {
+                "task_attr": "summary_task",
+                "period_attr": "summarize_period",
+                "next_attr": "next_summarize",
+                "limit": None,
+                "min_period": 180.0,
+                "max_factor": 6.0,
+            },
+        }
+
+        self._controllers: Dict[str, AdaptivePeriodController] = {}
+        for name, meta in self._task_meta.items():
+            period = float(getattr(self, meta["period_attr"]))
+            min_period = meta.get("min_period")
+            max_factor = meta.get("max_factor") or 4.0
+            max_period = None if period <= 0 else period * max_factor
+            self._controllers[name] = AdaptivePeriodController(
+                period,
+                name=name,
+                min_period=min_period,
+                max_period=max_period,
+            )
+
+        self.drift_events: Deque[Dict[str, Any]] = deque(maxlen=128)
+        self._drift_cursors: Dict[str, int] = {name: 0 for name in self._controllers}
+
     # ------------------------------------------------------------------
     def tick(self, now: Optional[float] = None) -> Dict[str, Any]:
         """Run maintenance tasks according to their schedule."""
@@ -69,30 +240,49 @@ class SemanticMemoryManager:
         stats: Dict[str, Any] = {"ts": now}
 
         if self.concept_period and now >= self.next_concept:
+            processed_concepts = 0
+            started_at = self._now()
             try:
-                stats["concepts"] = self._run_concept_update(now)
+                processed_concepts = self._run_concept_update(now)
+                stats["concepts"] = processed_concepts
             finally:
-                self.next_concept = now + self._jitter(self.concept_period)
-                self.concept_task.last_run = now
-                self.concept_task.iterations += 1
+                self._finalize_task_run(
+                    "concept",
+                    now=now,
+                    started_at=started_at,
+                    processed=processed_concepts,
+                    result=stats.get("concepts"),
+                )
 
         if self.episodic_period and now >= self.next_episodic:
+            processed_links = 0
+            started_at = self._now()
             try:
-                stats["episodic"] = self._run_episodic_linking(now)
+                processed_links = self._run_episodic_linking(now)
+                stats["episodic"] = processed_links
             finally:
-                self.next_episodic = now + self._jitter(self.episodic_period)
-                self.episodic_task.last_run = now
-                self.episodic_task.iterations += 1
+                self._finalize_task_run(
+                    "episodic",
+                    now=now,
+                    started_at=started_at,
+                    processed=processed_links,
+                    result=stats.get("episodic"),
+                )
 
         if self.summarize_period and now >= self.next_summarize:
+            step_stats: Any = None
+            started_at = self._now()
             try:
                 step_stats = self.summarizer.step(now)
                 stats["summaries"] = step_stats
             finally:
-                self.next_summarize = now + self._jitter(self.summarize_period)
-                self.summary_task.last_run = now
-                self.summary_task.iterations += 1
-                self.summary_task.last_result = stats.get("summaries")
+                self._finalize_task_run(
+                    "summarize",
+                    now=now,
+                    started_at=started_at,
+                    processed=None,
+                    result=stats.get("summaries"),
+                )
 
         return stats
 
@@ -108,6 +298,41 @@ class SemanticMemoryManager:
             self.next_episodic = min(self.next_episodic, now + urgency * self.episodic_period * 0.5)
         if self.summarize_period:
             self.next_summarize = min(self.next_summarize, now + urgency * self.summarize_period * 0.5)
+
+    # ------------------------------------------------------------------
+    def get_task_metrics(self, task: str) -> Dict[str, Any]:
+        """Expose a snapshot of adaptive statistics for observability."""
+
+        meta = self._task_meta.get(task)
+        if not meta:
+            return {}
+        stats: TaskStats = getattr(self, meta["task_attr"], None)
+        controller = self._controllers.get(task)
+        if not stats:
+            return {}
+        snapshot: Dict[str, Any] = {
+            "period": getattr(self, meta["period_attr"]),
+            "next_run": getattr(self, meta["next_attr"]),
+            "iterations": stats.iterations,
+            "history": list(stats.history),
+        }
+        if controller:
+            snapshot.update(
+                {
+                    "ema_load": controller.load.value,
+                    "ema_rate": controller.rate.value,
+                    "drifts": list(controller.drift_log),
+                }
+            )
+        return snapshot
+
+    def get_drift_events(self, limit: int = 20) -> Deque[Dict[str, Any]]:
+        """Return recent drift events capped by *limit*."""
+
+        if limit <= 0:
+            return deque()
+        sliced = list(self.drift_events)[-limit:]
+        return deque(sliced)
 
     # ------------------------------------------------------------------
     def _run_concept_update(self, now: float) -> int:
@@ -145,12 +370,94 @@ class SemanticMemoryManager:
             created = []
         return len(created)
 
-    def _jitter(self, period: int) -> float:
+    def _jitter(self, period: float) -> float:
         if period <= 0:
             return 0.0
         j = self.jitter_frac
         spread = period * j
         return period + random.uniform(-spread, +spread)
+
+    def _finalize_task_run(
+        self,
+        task: str,
+        *,
+        now: float,
+        started_at: float,
+        processed: Optional[int],
+        result: Any,
+    ) -> None:
+        meta = self._task_meta.get(task)
+        if not meta:
+            return
+
+        stats: TaskStats = getattr(self, meta["task_attr"])
+        period_attr = meta["period_attr"]
+        next_attr = meta["next_attr"]
+        period = getattr(self, period_attr)
+        limit = meta.get("limit")
+
+        duration = max(self._now() - started_at, 0.0)
+        if processed is None:
+            processed = self._infer_processed_count(result)
+        processed = max(0, int(processed or 0))
+
+        stats.last_run = now
+        stats.iterations += 1
+        stats.last_result = result
+
+        history_entry = {
+            "ts": now,
+            "period_before": period,
+            "processed": processed,
+            "duration": duration,
+            "limit": limit,
+        }
+        stats.history.append(history_entry)
+
+        controller = self._controllers.get(task)
+        if controller and period:
+            new_period = controller.update(
+                period,
+                processed=processed,
+                duration=duration,
+                limit=limit,
+                wall_ts=now,
+            )
+            setattr(self, period_attr, new_period)
+            next_run = now + self._jitter(new_period) if new_period else now
+            history_entry["period_after"] = new_period
+            setattr(self, next_attr, next_run)
+            history_entry["next_run"] = next_run
+            self._capture_drift_events(task)
+        else:
+            next_run = now + self._jitter(period) if period else now
+            history_entry["period_after"] = period
+            history_entry["next_run"] = next_run
+            setattr(self, next_attr, next_run)
+
+    def _capture_drift_events(self, task: str) -> None:
+        controller = self._controllers.get(task)
+        if not controller:
+            return
+        cursor = self._drift_cursors.get(task, 0)
+        if len(controller.drift_log) <= cursor:
+            self._drift_cursors[task] = len(controller.drift_log)
+            return
+        for drift in list(controller.drift_log)[cursor:]:
+            event = dict(drift)
+            event["task"] = task
+            self.drift_events.append(event)
+        self._drift_cursors[task] = len(controller.drift_log)
+
+    def _infer_processed_count(self, result: Any) -> int:
+        if isinstance(result, (int, float)):
+            return int(result)
+        if isinstance(result, dict):
+            for key in ("processed", "items", "count", "written", "created"):
+                value = result.get(key)
+                if isinstance(value, (int, float)):
+                    return int(value)
+        return 0
 
     def _now(self, override: Optional[float] = None) -> float:
         if override is not None:
