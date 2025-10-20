@@ -115,6 +115,7 @@ class EmotionalSystem:
             metacog=self.metacognitive_system,
             goals=getattr(self.cognitive_architecture, "goals", None) if self.cognitive_architecture else None,
             language=getattr(self.cognitive_architecture, "language", None) if self.cognitive_architecture else None,
+            evolution=getattr(self.cognitive_architecture, "evolution", None) if self.cognitive_architecture else None,
         )
 
         

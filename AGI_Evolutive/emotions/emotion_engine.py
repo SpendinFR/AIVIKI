@@ -6,10 +6,14 @@ EmotionEngineV2 — moteur émotionnel évolutif, compatible avec l'existant
   avec poids apprenants en ligne (SGD borné) et confiance par signal
 - Incertitude estimée et propagée → exploration, focus, ton, safety gate
 - Journalisation JSONL des épisodes + dashboard JSON d'état (poids, mood, etc.)
+- Meta-contrôle des plugins (gating doux, entropie cible, apprentissage contextuel)
+- Auto-synthèse de patterns contextuels → plugin émergent latent
+- Plasticité multi-échelles : demi-vies adaptatives corrélées aux modulateurs
+- Rituels auto-scénarisés (auto-régulation) avec mémoire synthétique
 - **Compat 100%** avec l'existant :
   - API: bind(), register_event(), step(), get_modulators(), get_state(),
           update_from_recent_memories(), modulate_homeostasis()
-  - Modulateurs: mêmes clés + alias 
+  - Modulateurs: mêmes clés + alias
     *tone* **et** *language_tone*, *goal_priority_bias* **dict** + *goal_priority_bias_scalar*
   - Bump explicite de arch.global_activation via activation_delta
   - Cible de décroissance configurable: vers "mood" (par défaut) ou "neutral"
@@ -24,6 +28,7 @@ import json
 import time
 import math
 import uuid
+from collections import defaultdict, deque
 from dataclasses import dataclass, field, asdict
 from typing import Dict, Any, Optional, List, Tuple
 
@@ -31,6 +36,17 @@ from typing import Dict, Any, Optional, List, Tuple
 
 def clip(x: float, lo: float, hi: float) -> float:
     return lo if x < lo else hi if x > hi else x
+
+
+def _softmax(logits: Dict[str, float], temperature: float = 1.0) -> Dict[str, float]:
+    if not logits:
+        return {}
+    temp = max(1e-3, float(temperature))
+    scaled = {k: float(v) / temp for k, v in logits.items()}
+    max_logit = max(scaled.values())
+    exps = {k: math.exp(v - max_logit) for k, v in scaled.items()}
+    total = sum(exps.values()) or 1.0
+    return {k: exps[k] / total for k in logits}
 
 
 def json_sanitize(obj: Any) -> Any:
@@ -164,21 +180,98 @@ class SocialFeedbackPlugin(AppraisalPlugin):
                                confidence=conf, meta={"pos": pos, "neg": neg})
 
 
+class PluginMetaController:
+    def __init__(self, plugin_names: List[str], lr: float = 0.03, target_entropy: float = 1.2):
+        self.plugin_names = list(plugin_names)
+        self.lr = float(lr)
+        self.params: Dict[str, defaultdict] = {name: defaultdict(float) for name in self.plugin_names}
+        self.temperature: float = 1.3
+        self.target_entropy = float(target_entropy)
+        self._avg_quality: float = 0.0
+        self._last_feats: Dict[str, float] = {}
+        self._last_gates: Dict[str, float] = {name: 1.0 / max(1, len(self.plugin_names)) for name in self.plugin_names}
+
+    def _feature_vector(self, ctx: Dict[str, Any]) -> Dict[str, float]:
+        feats: Dict[str, float] = {"bias": 1.0}
+        feats["cognitive_load"] = float(ctx.get("cognitive_load", 0.5) or 0.0)
+        feats["error_density"] = float(len(ctx.get("recent_errors", []) or [])) / 5.0
+        feats["success"] = float(ctx.get("recent_success", 0.0) or 0.0)
+        feats["reward"] = float(ctx.get("reward_signal", 0.0) or 0.0)
+        feats["fatigue"] = float(ctx.get("fatigue", 0.0) or 0.0)
+        tod = int(ctx.get("time_of_day", -1))
+        if tod >= 0:
+            feats["is_night"] = 1.0 if tod < 6 or tod > 21 else 0.0
+        latent = ctx.get("_latent_features")
+        if isinstance(latent, dict):
+            for key, value in latent.items():
+                if len(feats) > 24:
+                    break
+                if isinstance(value, (int, float)):
+                    feats[f"latent_{key}"] = float(value)
+        return feats
+
+    def compute(self, ctx: Dict[str, Any], confidences: Dict[str, float]) -> Dict[str, float]:
+        feats = self._feature_vector(ctx)
+        logits: Dict[str, float] = {}
+        for name in self.plugin_names:
+            params = self.params.setdefault(name, defaultdict(float))
+            logit = 0.0
+            for feat, value in feats.items():
+                logit += params[feat] * float(value)
+            logit += math.log(max(confidences.get(name, 1e-3), 1e-3))
+            logits[name] = logit
+        gates = _softmax(logits, temperature=self.temperature or 1.0)
+        if not gates:
+            gates = {name: 1.0 / max(1, len(self.plugin_names)) for name in self.plugin_names}
+        self._last_feats = feats
+        self._last_gates = gates
+        return gates
+
+    def update(self, quality: Optional[float]) -> None:
+        if quality is None or not self._last_feats:
+            return
+        q = clip(float(quality), -1.0, 1.0)
+        self._avg_quality = 0.92 * self._avg_quality + 0.08 * q
+        advantage = q - self._avg_quality
+        for name, gate_value in self._last_gates.items():
+            params = self.params.setdefault(name, defaultdict(float))
+            for feat, value in self._last_feats.items():
+                delta = self.lr * advantage * float(value) * (1.0 - gate_value)
+                params[feat] = clip(params[feat] + delta, -3.0, 3.0)
+        entropy = 0.0
+        for g in self._last_gates.values():
+            if g > 0:
+                entropy -= g * math.log(g)
+        self.temperature = clip(self.temperature + 0.05 * (entropy - self.target_entropy), 0.4, 2.5)
+
+    @property
+    def last_gates(self) -> Dict[str, float]:
+        return dict(self._last_gates)
+
+
 class AppraisalAggregator:
-    def __init__(self, plugins: List[AppraisalPlugin], lr: float = 0.02, w_max: float = 3.0):
+    def __init__(self, plugins: List[AppraisalPlugin], lr: float = 0.02, w_max: float = 3.0,
+                 meta_controller: Optional[PluginMetaController] = None):
         self.plugins: Dict[str, AppraisalPlugin] = {p.name: p for p in plugins}
         self.w: Dict[str, float] = {p.name: 1.0 for p in plugins}
         self.lr = float(lr)
         self.w_max = float(w_max)
+        self.meta_controller = meta_controller or PluginMetaController(list(self.plugins))
+        self.last_gates: Dict[str, float] = {name: 1.0 / max(1, len(self.plugins)) for name in self.plugins}
 
-    def step(self, ctx: Dict[str, Any], quality: Optional[float]) -> Tuple[float, float, float, Dict[str, float]]:
+    def step(self, ctx: Dict[str, Any], quality: Optional[float]) -> Tuple[float, float, float, Dict[str, float], Dict[str, float]]:
         dv = da = dd = 0.0
         parts: Dict[str, float] = {}
         cache: Dict[str, AppraisalOutput] = {}
+        confidences: Dict[str, float] = {}
         for name, p in self.plugins.items():
             out = p(ctx)
             cache[name] = out
-            contrib = float(self.w[name]) * float(out.confidence)
+            confidences[name] = float(out.confidence)
+        gates = self.meta_controller.compute(ctx, confidences)
+        for name, out in cache.items():
+            gate = gates.get(name, 1.0)
+            contrib = gate * float(self.w[name]) * float(out.confidence)
             dv += contrib * out.dv
             da += contrib * out.da
             dd += contrib * out.dd
@@ -187,10 +280,213 @@ class AppraisalAggregator:
             target = clip(quality, -1.0, 1.0)
             for name, out in cache.items():
                 signal = out.dv + 0.5 * out.da + 0.3 * out.dd
-                grad = target * signal * out.confidence
+                grad = target * signal * out.confidence * gates.get(name, 1.0)
                 self.w[name] = clip(self.w[name] + self.lr * grad, 0.0, self.w_max)
-        return dv, da, dd, parts
+        self.meta_controller.update(quality)
+        self.last_gates = dict(gates)
+        return dv, da, dd, parts, gates
 
+
+class ContextAutoSynthesizer:
+    def __init__(self, max_patterns: int = 12):
+        self.max_patterns = max_patterns
+        self.pattern_stats: Dict[str, Dict[str, float]] = {}
+        self.history: deque = deque(maxlen=200)
+
+    @staticmethod
+    def _clean_token(token: str) -> Optional[str]:
+        token = "".join(ch for ch in token.lower() if ch.isalpha())
+        if len(token) < 4:
+            return None
+        return token
+
+    def _extract_tokens(self, ctx: Dict[str, Any]) -> List[str]:
+        tokens: List[str] = []
+        memories = ctx.get("recent_memories") or []
+        for mem in memories[:40]:
+            if not isinstance(mem, dict):
+                continue
+            text = str(mem.get("text", ""))
+            for raw in text.split():
+                tok = self._clean_token(raw)
+                if tok:
+                    tokens.append(tok)
+        return tokens
+
+    def augment(self, ctx: Dict[str, Any]) -> Dict[str, float]:
+        features: Dict[str, float] = {}
+        memories = ctx.get("recent_memories") or []
+        if memories:
+            questions = sum("?" in str((m or {}).get("text", "")) for m in memories)
+            features["question_ratio"] = questions / max(1.0, len(memories))
+            positive = sum("bravo" in str((m or {}).get("text", "")).lower() or "merci" in str((m or {}).get("text", "")).lower()
+                           for m in memories)
+            negative = sum("erreur" in str((m or {}).get("text", "")).lower() or "fail" in str((m or {}).get("text", "")).lower()
+                           for m in memories)
+            features["memory_valence"] = clip((positive - negative) / max(1.0, len(memories)), -1.0, 1.0)
+        tokens = self._extract_tokens(ctx)
+        unique_tokens = set(tokens)
+        features["novelty"] = clip(len(unique_tokens) / 30.0, 0.0, 1.0)
+        features["token_count"] = clip(len(tokens) / 60.0, 0.0, 1.0)
+        self.history.append({"tokens": list(unique_tokens)})
+        return features
+
+    def observe(self, ctx: Dict[str, Any], quality: Optional[float]) -> None:
+        if quality is None:
+            return
+        q = clip(float(quality), -1.0, 1.0)
+        for token in self._extract_tokens(ctx):
+            stats = self.pattern_stats.setdefault(token, {"sum": 0.0, "count": 0.0})
+            stats["sum"] += q
+            stats["count"] += 1.0
+        if len(self.pattern_stats) > self.max_patterns * 2:
+            # prune lowest confidence patterns
+            sorted_items = sorted(self.pattern_stats.items(), key=lambda kv: abs(kv[1]["sum"]) / max(1.0, kv[1]["count"]))
+            for key, _ in sorted_items[: max(0, len(sorted_items) - self.max_patterns)]:
+                self.pattern_stats.pop(key, None)
+
+    def build_output(self, ctx: Dict[str, Any]) -> AppraisalOutput:
+        tokens = set(self._extract_tokens(ctx))
+        dv = da = dd = 0.0
+        details: List[Tuple[str, float]] = []
+        for token in list(tokens)[:8]:
+            stats = self.pattern_stats.get(token)
+            if not stats or stats["count"] < 3:
+                continue
+            mean_reward = clip(stats["sum"] / max(1.0, stats["count"]), -1.0, 1.0)
+            weight = mean_reward
+            dv += 0.15 * weight
+            da += 0.08 * abs(weight)
+            dd += 0.05 * weight
+            details.append((token, round(mean_reward, 3)))
+        confidence = clip(0.25 + 0.05 * len(details), 0.1, 0.8)
+        return AppraisalOutput(dv=dv, da=da, dd=dd, confidence=confidence, meta={"patterns": details[:5]})
+
+
+class SynthesizedPlugin(AppraisalPlugin):
+    name = "latent_synth"
+
+    def __init__(self, synthesizer: ContextAutoSynthesizer):
+        self._synth = synthesizer
+
+    def __call__(self, ctx: Dict[str, Any]) -> AppraisalOutput:
+        return self._synth.build_output(ctx)
+
+
+class HalfLifePlasticity:
+    def __init__(self, episode_half_life: float, mood_half_life: float,
+                 min_episode: float = 60.0, max_episode: float = 60.0 * 60.0,
+                 min_mood: float = 60.0 * 10.0, max_mood: float = 60.0 * 60.0 * 24.0):
+        self.episode_half_life = float(episode_half_life)
+        self.mood_half_life = float(mood_half_life)
+        self.min_episode = float(min_episode)
+        self.max_episode = float(max_episode)
+        self.min_mood = float(min_mood)
+        self.max_mood = float(max_mood)
+        self.history: deque = deque(maxlen=120)
+        self._last_adjust = 0.0
+
+    @staticmethod
+    def _corr(xs: List[float], ys: List[float]) -> float:
+        n = len(xs)
+        if n < 3:
+            return 0.0
+        mean_x = sum(xs) / n
+        mean_y = sum(ys) / n
+        num = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+        den_x = sum((x - mean_x) ** 2 for x in xs)
+        den_y = sum((y - mean_y) ** 2 for y in ys)
+        denom = math.sqrt(max(den_x, 1e-9) * max(den_y, 1e-9))
+        if denom <= 1e-6:
+            return 0.0
+        return clip(num / denom, -1.0, 1.0)
+
+    def observe(self, now: float, quality: Optional[float], modulators: Optional[Dict[str, Any]]) -> Optional[Tuple[float, float]]:
+        if quality is None or modulators is None:
+            return None
+        entry = {
+            "quality": clip(float(quality), -1.0, 1.0),
+            "curiosity": float(modulators.get("curiosity_gain", 0.0) or 0.0),
+            "focus": float(modulators.get("focus_narrowing", 0.0) or 0.0),
+            "activation": float(modulators.get("activation_delta", 0.0) or 0.0),
+        }
+        self.history.append(entry)
+        if now - self._last_adjust < 10.0 or len(self.history) < 12:
+            return None
+        qualities = [h["quality"] for h in self.history]
+        focus = [h["focus"] for h in self.history]
+        curiosity = [h["curiosity"] for h in self.history]
+        activation = [h["activation"] for h in self.history]
+        corr_focus = self._corr(qualities, focus)
+        corr_curiosity = self._corr(qualities, curiosity)
+        corr_activation = self._corr(qualities, activation)
+        changed = False
+        if corr_curiosity > 0.15:
+            new_ep = clip(self.episode_half_life * (1.0 + 0.08 * corr_curiosity), self.min_episode, self.max_episode)
+            if abs(new_ep - self.episode_half_life) > 1e-3:
+                self.episode_half_life = new_ep
+                changed = True
+        elif corr_curiosity < -0.15:
+            new_ep = clip(self.episode_half_life * (1.0 + 0.08 * corr_curiosity), self.min_episode, self.max_episode)
+            if abs(new_ep - self.episode_half_life) > 1e-3:
+                self.episode_half_life = new_ep
+                changed = True
+        if corr_focus > 0.20:
+            new_mood = clip(self.mood_half_life * (1.0 - 0.05 * corr_focus), self.min_mood, self.max_mood)
+            if abs(new_mood - self.mood_half_life) > 1e-3:
+                self.mood_half_life = new_mood
+                changed = True
+        elif corr_activation < -0.20:
+            new_mood = clip(self.mood_half_life * (1.0 + 0.04 * corr_activation), self.min_mood, self.max_mood)
+            if abs(new_mood - self.mood_half_life) > 1e-3:
+                self.mood_half_life = new_mood
+                changed = True
+        if changed:
+            self._last_adjust = now
+            return self.episode_half_life, self.mood_half_life
+        return None
+
+
+class RitualPlanner:
+    def __init__(self, cooldown: float = 180.0):
+        self.cooldown = float(cooldown)
+        self._last_trigger = 0.0
+        self.trace: deque = deque(maxlen=20)
+
+    def observe(self, now: float, quality: Optional[float], state: AffectState, mood: MoodState) -> None:
+        self.trace.append({
+            "t": now,
+            "valence": float(state.valence),
+            "arousal": float(state.arousal),
+            "quality": None if quality is None else float(quality),
+            "mood_valence": float(mood.valence),
+        })
+
+    def maybe_plan(self, now: float) -> Optional[Dict[str, Any]]:
+        if now - self._last_trigger < self.cooldown or len(self.trace) < 4:
+            return None
+        recent = list(self.trace)[-4:]
+        if all(item["valence"] < -0.35 for item in recent):
+            self._last_trigger = now
+            return {
+                "kind": "self_soothing",
+                "intensity": 0.55,
+                "valence_hint": 0.6,
+                "arousal_hint": -0.25,
+                "dominance_hint": 0.15,
+                "meta": {"ritual": "breathing_reset"},
+            }
+        if all(item["arousal"] > 0.75 for item in recent):
+            self._last_trigger = now
+            return {
+                "kind": "grounding_focus",
+                "intensity": 0.50,
+                "valence_hint": 0.2,
+                "arousal_hint": -0.4,
+                "dominance_hint": 0.2,
+                "meta": {"ritual": "micro_grounding"},
+            }
+        return None
 
 # ========================= Labelling ========================= #
 
@@ -249,12 +545,31 @@ class EmotionEngine:
         self.rng = (seed and int(seed)) or None
 
         # Plugins & agrégateur
-        self.aggregator = AppraisalAggregator([
-            CognitiveLoadPlugin(), ErrorPlugin(), SuccessPlugin(), RewardPlugin(), FatiguePlugin(), SocialFeedbackPlugin()
-        ])
+        self._synthesizer = ContextAutoSynthesizer()
+        plugins: List[AppraisalPlugin] = [
+            CognitiveLoadPlugin(),
+            ErrorPlugin(),
+            SuccessPlugin(),
+            RewardPlugin(),
+            FatiguePlugin(),
+            SocialFeedbackPlugin(),
+            SynthesizedPlugin(self._synthesizer),
+        ]
+        self.aggregator = AppraisalAggregator(plugins)
+
+        # Plasticité multi-échelles + rituels
+        self._plasticity = HalfLifePlasticity(self.half_life_sec, self.mood_half_life_sec)
+        self._rituals = RitualPlanner()
 
         # Liaison vers d'autres modules
-        self.bound: Dict[str, Any] = {"arch": None, "memory": None, "metacog": None, "goals": None, "language": None}
+        self.bound: Dict[str, Any] = {
+            "arch": None,
+            "memory": None,
+            "metacog": None,
+            "goals": None,
+            "language": None,
+            "evolution": None,
+        }
 
         # Épisodes récents
         self._recent_episodes: List[EmotionEpisode] = []
@@ -267,8 +582,15 @@ class EmotionEngine:
         self.load()
 
     # ---------- Binding ----------
-    def bind(self, arch=None, memory=None, metacog=None, goals=None, language=None):
-        self.bound.update({"arch": arch, "memory": memory, "metacog": metacog, "goals": goals, "language": language})
+    def bind(self, arch=None, memory=None, metacog=None, goals=None, language=None, evolution=None):
+        self.bound.update({
+            "arch": arch,
+            "memory": memory,
+            "metacog": metacog,
+            "goals": goals,
+            "language": language,
+            "evolution": evolution,
+        })
         return self
 
     # ---------- API externe ----------
@@ -297,10 +619,29 @@ class EmotionEngine:
             "uncertainty": self._estimate_uncertainty(),
             "label": self.state.label,
             "weights": dict(self.aggregator.w),
+            "gates": dict(self.aggregator.last_gates),
+            "half_life": self.half_life_sec,
+            "mood_half_life": self.mood_half_life_sec,
+            "latent_patterns": {
+                token: {
+                    "score": clip(stats.get("sum", 0.0) / max(1.0, stats.get("count", 0.0)), -1.0, 1.0),
+                    "count": stats.get("count", 0.0),
+                }
+                for token, stats in list(self._synthesizer.pattern_stats.items())[:10]
+            },
             "recent_causes": [
                 {"id": e.id, "label": e.label, "causes": e.causes[-3:], "dv": e.dv, "da": e.da, "dd": e.dd, "confidence": e.confidence, "dt": e.dt}
                 for e in self._recent_episodes[-5:]
             ],
+        }
+
+    def get_affect(self) -> Dict[str, float]:
+        self.step(force=True)
+        return {
+            "valence": float(self.state.valence),
+            "arousal": float(self.state.arousal),
+            "dominance": float(self.state.dominance),
+            "label": self.state.label,
         }
 
     # ---------- Compat: helpers hérités ----------
@@ -359,17 +700,28 @@ class EmotionEngine:
 
         # 2) Contexte + appraisal via agrégateur (avec proxy qualité)
         ctx = self._collect_context()
-        dv, da, dd, parts = self.aggregator.step(ctx, quality=quality if quality is not None else self._proxy_quality(ctx))
+        quality_signal = quality if quality is not None else self._proxy_quality(ctx)
+        dv, da, dd, parts, gates = self.aggregator.step(ctx, quality=quality_signal)
+        self._synthesizer.observe(ctx, quality_signal)
 
         # 3) Appliquer delta + journaliser
         self._nudge(dv, da, dd, source="aggregator", confidence=self._confidence_from_ctx(ctx),
-                    meta={"parts": parts, "ctx_keys": list(ctx.keys())})
+                    meta={"parts": parts, "ctx_keys": list(ctx.keys()), "gates": gates})
+
+        # 3b) Rituels potentiels (après nudge pour état à jour)
+        self._rituals.observe(now, quality_signal, self.state, self.mood)
 
         # 4) Mise à jour humeur (filtre lent)
         self._update_mood(now)
 
         # 5) Recalcul modulateurs & dispatch
         self.last_modulators = self._compute_modulators()
+        adjust = self._plasticity.observe(now, quality_signal, self.last_modulators)
+        if adjust:
+            self.half_life_sec = self._plasticity.episode_half_life
+            self.mood_half_life_sec = self._plasticity.mood_half_life
+            self._emit_plasticity_annotation(now)
+        self._maybe_trigger_ritual(now)
         self._dispatch_modulators(self.last_modulators)
 
         # 6) Persistance légère
@@ -401,7 +753,11 @@ class EmotionEngine:
         if language is not None:
             ctx.setdefault("social_cues", getattr(language, "recent_user_cues", None))
         ctx.setdefault("time_of_day", time.localtime().tm_hour)
-        return {k: v for k, v in ctx.items() if v is not None}
+        ctx = {k: v for k, v in ctx.items() if v is not None}
+        latent = self._synthesizer.augment(ctx)
+        if latent:
+            ctx["_latent_features"] = latent
+        return ctx
 
     def _confidence_from_ctx(self, ctx: Dict[str, Any]) -> float:
         filled = sum(1 for _ in ctx.items())
@@ -562,6 +918,65 @@ class EmotionEngine:
             except Exception:
                 pass
 
+    def _emit_plasticity_annotation(self, now: float) -> None:
+        note = {
+            "ts": now,
+            "episode_half_life": round(self._plasticity.episode_half_life, 3),
+            "mood_half_life": round(self._plasticity.mood_half_life, 3),
+        }
+        evolution = self.bound.get("evolution")
+        if evolution is not None and hasattr(evolution, "state"):
+            try:
+                extra = evolution.state.setdefault("history_extra", {})
+                bucket = extra.setdefault("emotion_plasticity", [])
+                bucket.append(note)
+                extra["emotion_plasticity"] = bucket[-120:]
+            except Exception:
+                pass
+        memory = self.bound.get("memory")
+        if memory is not None and hasattr(memory, "add_memory"):
+            try:
+                memory.add_memory({
+                    "kind": "emotion_plasticity",
+                    "content": "Ajustement demi-vies émotionnelles",
+                    "metadata": note,
+                })
+            except Exception:
+                pass
+
+    def _emit_ritual_memory(self, plan: Dict[str, Any], now: float) -> None:
+        memory = self.bound.get("memory")
+        if memory is None or not hasattr(memory, "add_memory"):
+            return
+        try:
+            memory.add_memory({
+                "kind": "emotion_ritual",
+                "content": plan.get("meta", {}).get("ritual", plan.get("kind", "ritual")),
+                "metadata": {
+                    "plan": {k: v for k, v in plan.items() if k != "meta"},
+                    "ts": now,
+                },
+            })
+        except Exception:
+            pass
+
+    def _maybe_trigger_ritual(self, now: float) -> None:
+        plan = self._rituals.maybe_plan(now)
+        if not plan:
+            return
+        meta = dict(plan.get("meta") or {})
+        meta.setdefault("source", "EmotionEngine.ritual")
+        self.register_event(
+            plan.get("kind", "ritual"),
+            intensity=float(plan.get("intensity", 0.4)),
+            valence_hint=plan.get("valence_hint"),
+            arousal_hint=plan.get("arousal_hint"),
+            dominance_hint=plan.get("dominance_hint"),
+            confidence=0.8,
+            meta=meta,
+        )
+        self._emit_ritual_memory(plan, now)
+
     # ========================= Persistance ========================= #
     def save(self):
         payload = {
@@ -570,6 +985,24 @@ class EmotionEngine:
             "weights": dict(self.aggregator.w),
             "last_modulators": self.last_modulators,
             "t": time.time(),
+            "half_life_sec": self.half_life_sec,
+            "mood_half_life_sec": self.mood_half_life_sec,
+            "meta": {
+                "temperature": getattr(self.aggregator.meta_controller, "temperature", None),
+                "params": {
+                    name: dict(params)
+                    for name, params in getattr(self.aggregator.meta_controller, "params", {}).items()
+                },
+                "gates": dict(getattr(self.aggregator, "last_gates", {})),
+            },
+            "latent_patterns": {
+                key: {"sum": val.get("sum", 0.0), "count": val.get("count", 0.0)}
+                for key, val in self._synthesizer.pattern_stats.items()
+            },
+            "plasticity": {
+                "episode": self._plasticity.episode_half_life,
+                "mood": self._plasticity.mood_half_life,
+            },
         }
         try:
             with open(self.path_state, "w", encoding="utf-8") as f:
@@ -587,6 +1020,12 @@ class EmotionEngine:
             "m_d": round(self.mood.dominance, 3),
             "unc": round(self._estimate_uncertainty(), 3),
             "weights": dict(self.aggregator.w),
+            "half_life": round(self.half_life_sec, 2),
+            "mood_half_life": round(self.mood_half_life_sec, 2),
+            "gates": {
+                name: round(float(val), 4)
+                for name, val in self.aggregator.last_gates.items()
+            },
         }
         try:
             with open(self.path_dashboard, "w", encoding="utf-8") as f:
@@ -618,6 +1057,46 @@ class EmotionEngine:
                 for k, v in w.items():
                     if k in self.aggregator.w:
                         self.aggregator.w[k] = float(v)
+                if "half_life_sec" in data:
+                    self.half_life_sec = float(data.get("half_life_sec", self.half_life_sec))
+                if "mood_half_life_sec" in data:
+                    self.mood_half_life_sec = float(data.get("mood_half_life_sec", self.mood_half_life_sec))
+                self._plasticity.episode_half_life = self.half_life_sec
+                self._plasticity.mood_half_life = self.mood_half_life_sec
+                meta = data.get("meta", {})
+                params = meta.get("params", {})
+                if isinstance(params, dict):
+                    for name, feats in params.items():
+                        bucket = self.aggregator.meta_controller.params.setdefault(name, defaultdict(float))
+                        if isinstance(feats, dict):
+                            for feat, value in feats.items():
+                                bucket[feat] = float(value)
+                temp = meta.get("temperature")
+                if temp is not None:
+                    self.aggregator.meta_controller.temperature = float(temp)
+                gates = meta.get("gates")
+                if isinstance(gates, dict):
+                    self.aggregator.last_gates = {k: float(v) for k, v in gates.items()}
+                latent = data.get("latent_patterns")
+                if isinstance(latent, dict):
+                    self._synthesizer.pattern_stats = {
+                        str(k): {
+                            "sum": float(v.get("sum", 0.0)),
+                            "count": float(v.get("count", 0.0)),
+                        }
+                        for k, v in latent.items()
+                        if isinstance(v, dict)
+                    }
+                plasticity = data.get("plasticity")
+                if isinstance(plasticity, dict):
+                    ep = plasticity.get("episode")
+                    md = plasticity.get("mood")
+                    if ep is not None:
+                        self._plasticity.episode_half_life = float(ep)
+                        self.half_life_sec = float(ep)
+                    if md is not None:
+                        self._plasticity.mood_half_life = float(md)
+                        self.mood_half_life_sec = float(md)
         except Exception:
             # fallback silencieux
             self.state = AffectState()
