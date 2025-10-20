@@ -33,6 +33,7 @@ except Exception:  # pragma: no cover
     SemanticMemoryManager = None
 
 
+from .adaptive import AdaptiveMemoryParameters, ThompsonBetaScheduler
 from .retrieval import MemoryRetrieval
 from .semantic_memory_manager import SemanticMemoryManager
 from .summarizer import ProgressiveSummarizer, SummarizerConfig
@@ -224,27 +225,33 @@ class MemorySystem:
         }
         
         # === MÉMOIRE DE TRAVAIL ===
+        decay_candidates = (0.2, 0.4, 0.6, 0.8)
+        self._decay_schedulers = {
+            name: ThompsonBetaScheduler(decay_candidates)
+            for name in ("phonological_loop", "visuospatial_sketchpad", "episodic_buffer")
+        }
+
         self.working_memory = {
             "phonological_loop": {
                 "contents": [],
                 "capacity": 4,
-                "decay_rate": 0.1
+                "decay_rate": self._decay_schedulers["phonological_loop"].current_value,
             },
             "visuospatial_sketchpad": {
                 "contents": [],
                 "capacity": 4,
-                "decay_rate": 0.15
+                "decay_rate": self._decay_schedulers["visuospatial_sketchpad"].current_value,
             },
             "episodic_buffer": {
                 "contents": [],
                 "capacity": 4,
-                "decay_rate": 0.05
+                "decay_rate": self._decay_schedulers["episodic_buffer"].current_value,
             },
             "central_executive": {
                 "focus": None,
                 "attention_control": 0.8,
-                "task_switching": 0.7
-            }
+                "task_switching": 0.7,
+            },
         }
         
         # === MÉMOIRE À LONG TERME ===
@@ -264,7 +271,7 @@ class MemorySystem:
         }
         
         # === PARAMÈTRES DE MÉMOIRE ===
-        self.memory_parameters = {
+        base_memory_parameters = {
             "encoding_threshold": 0.6,    # Seuil d'encodage
             "retrieval_threshold": 0.3,   # Seuil de récupération
             "consolidation_rate": 0.01,   # Taux de consolidation
@@ -274,6 +281,50 @@ class MemorySystem:
             "recency_effect": 0.9,        # Effet de récence
             "emotional_enhancement": 1.5  # Renforcement émotionnel
         }
+        adaptive_config = {
+            "encoding_threshold": {
+                "bounds": (0.4, 0.95),
+                "lr": 0.08,
+                "feature_keys": ("salience", "novelty", "reward"),
+                "max_step": 0.1,
+            },
+            "retrieval_threshold": {
+                "bounds": (0.2, 0.7),
+                "lr": 0.06,
+                "feature_keys": ("context_match", "reward", "stability"),
+                "max_step": 0.08,
+            },
+            "consolidation_rate": {
+                "bounds": (0.005, 0.05),
+                "lr": 0.02,
+                "feature_keys": ("stability", "reward", "emotional_coherence"),
+                "max_step": 0.01,
+            },
+            "forgetting_rate": {
+                "bounds": (0.0005, 0.01),
+                "lr": 0.015,
+                "feature_keys": ("noise_level", "reward"),
+                "max_step": 0.002,
+            },
+            "primacy_effect": {
+                "bounds": (0.5, 1.0),
+                "lr": 0.03,
+                "feature_keys": ("primacy_signal", "reward"),
+                "max_step": 0.05,
+            },
+            "recency_effect": {
+                "bounds": (0.5, 1.0),
+                "lr": 0.03,
+                "feature_keys": ("recency_signal", "reward"),
+                "max_step": 0.05,
+            },
+        }
+        self.memory_parameters = AdaptiveMemoryParameters(
+            base_memory_parameters,
+            adaptive_config=adaptive_config,
+        )
+        self._memory_feedback_history: "deque[Dict[str, Any]]" = deque(maxlen=512)
+        self._parameter_drift_log: "deque[Dict[str, Any]]" = deque(maxlen=512)
         
         # === PROCESSUS DE CONSOLIDATION ===
         self.consolidation_process = {
@@ -387,8 +438,124 @@ class MemorySystem:
                     record.get("text", ""),
                     metadata=meta,
                 )
+            learning_signal = self._extract_learning_signal(extra)
+            if learning_signal is not None:
+                context_features = self._build_feedback_features(payload, extra)
+                self.observe_outcome(
+                    reward=learning_signal,
+                    context=context_features,
+                    source="interaction",
+                    working_buffer="phonological_loop",
+                )
         except Exception:
             pass
+
+    def _normalize_reward(self, value: Any) -> float:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        if not np.isfinite(numeric):
+            return 0.0
+        if 0.0 <= numeric <= 1.0:
+            return numeric
+        return float((np.tanh(numeric) + 1.0) / 2.0)
+
+    def _extract_learning_signal(self, metadata: Dict[str, Any]) -> Optional[float]:
+        if not metadata:
+            return None
+        for key in (
+            "reward",
+            "quality",
+            "quality_score",
+            "score",
+            "success",
+            "engagement",
+        ):
+            if key in metadata and metadata[key] is not None:
+                if isinstance(metadata[key], (int, float, np.floating)):
+                    return self._normalize_reward(metadata[key])
+        return None
+
+    def _build_feedback_features(self, payload: Dict[str, Any], metadata: Dict[str, Any]) -> Dict[str, float]:
+        ts = float(payload.get("ts", time.time()))
+        now = time.time()
+        text = payload.get("text", "") or ""
+        text_length = len(text)
+        stability = float(np.clip(metadata.get("stability", 0.5), 0.0, 1.0))
+        recency = float(np.clip(np.exp(-(now - ts) / 600.0), 0.0, 1.0))
+        primacy = float(np.clip(metadata.get("primacy_signal", metadata.get("position", 0.5)), 0.0, 1.0))
+        features: Dict[str, float] = {
+            "salience": float(np.clip(metadata.get("salience", 0.5), 0.0, 1.0)),
+            "novelty": float(np.clip(metadata.get("novelty", min(1.0, text_length / 400.0)), 0.0, 1.0)),
+            "context_match": float(np.clip(metadata.get("context_match", 0.5), 0.0, 1.0)),
+            "stability": stability,
+            "noise_level": float(np.clip(metadata.get("noise", 1.0 - stability), 0.0, 1.0)),
+            "emotional_coherence": float(
+                np.clip(metadata.get("emotional_coherence", abs(metadata.get("valence", 0.0))), 0.0, 1.0)
+            ),
+            "recency_signal": recency,
+            "primacy_signal": primacy,
+            "text_density": float(np.clip(text_length / 1000.0, 0.0, 1.0)),
+        }
+        if self._memory_feedback_history:
+            last_time = self._memory_feedback_history[-1]["time"]
+            features["time_since_last_feedback"] = float(
+                np.clip((ts - last_time) / 600.0, 0.0, 1.0)
+            )
+        else:
+            features["time_since_last_feedback"] = 1.0
+        return features
+
+    def observe_outcome(
+        self,
+        *,
+        reward: float,
+        context: Optional[Dict[str, float]] = None,
+        source: str = "generic",
+        working_buffer: Optional[str] = None,
+    ) -> None:
+        normalized_reward = self._normalize_reward(reward)
+        context = {k: float(v) for k, v in (context or {}).items()}
+        context.setdefault("reward", normalized_reward)
+        before = self.memory_parameters.snapshot()
+        self.memory_parameters.update_from_feedback(context, normalized_reward)
+        after = self.memory_parameters.snapshot()
+        timestamp = time.time()
+        drift_entries: List[Dict[str, Any]] = []
+        for name, previous in before.items():
+            delta = after[name] - previous
+            if abs(delta) > 1e-6:
+                entry = {
+                    "parameter": name,
+                    "delta": delta,
+                    "new_value": after[name],
+                    "reward": normalized_reward,
+                    "source": source,
+                    "time": timestamp,
+                }
+                self._parameter_drift_log.append(entry)
+                drift_entries.append(entry)
+        if working_buffer:
+            self._update_decay_controller(working_buffer, normalized_reward)
+        self._memory_feedback_history.append(
+            {
+                "reward": normalized_reward,
+                "context": context,
+                "source": source,
+                "time": timestamp,
+                "drift": drift_entries,
+            }
+        )
+
+    def _update_decay_controller(self, buffer_name: str, reward: float) -> None:
+        scheduler = self._decay_schedulers.get(buffer_name)
+        if not scheduler:
+            return
+        new_value = scheduler.update(reward)
+        component = self.working_memory.get(buffer_name)
+        if component is not None:
+            component["decay_rate"] = new_value
 
     def ingest_document(self, text: str, title: Optional[str] = None, source: Optional[str] = None):
         """Ajoute un document arbitraire dans l'index."""
