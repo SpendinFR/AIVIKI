@@ -73,7 +73,7 @@ class FeedbackStats:
 
         decay_steps = elapsed / half_life
         # Cap the modifier to avoid brutal swings.
-        return float(min(2.0, max(0.5, math.exp(decay_steps * 0.2))))
+        return float(min(2.0, max(0.5, math.exp(-decay_steps * 0.2))))
 
 
 @dataclass

@@ -829,6 +829,7 @@ class BeliefGraph:
             rule_id = belief.created_by.split(":", 1)[1]
             self._feedback.record_rule_outcome(rule_id, outcome=success, weight=weight)
         self._maybe_autoadapt_rules()
+        self._feedback.flush()
         return True
 
     def retire(self, belief_id: str) -> bool:
