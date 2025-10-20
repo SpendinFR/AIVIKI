@@ -5,6 +5,8 @@ import os, json, time, uuid, math
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
 
+from .adaptation import FeedbackTracker
+
 from .ontology import Ontology
 from .entity_linker import EntityLinker
 from .summarizer import BeliefSummarizer
@@ -310,10 +312,14 @@ class BeliefGraph:
         self._events: Dict[str, Event] = {}
         self._rules: List[LocalRule] = self._default_rules()
         self.decay_rates = {"anchor": 0.0001, "episode": 0.001}
+        feedback_path = os.path.join(os.path.dirname(self.path) or ".", "belief_feedback.json")
+        self._feedback = FeedbackTracker(feedback_path)
         self._load()
         self.summarizer = BeliefSummarizer(self)
         self._last_summary: Dict[str, Any] = {}
         self._last_summary_ts: float = 0.0
+        self._last_rule_update: float = 0.0
+        self._rule_refresh_interval: float = 300.0
 
     def set_entity_linker(self, linker: EntityLinker) -> None:
         self.entity_linker = linker
@@ -362,6 +368,7 @@ class BeliefGraph:
                     self._normalize_belief(b)
                     self._cache[b.id] = b
                     self._register_belief_entities(b)
+                    self._feedback.ensure_belief(b.id)
                 except Exception:
                     continue
 
@@ -371,6 +378,7 @@ class BeliefGraph:
                 f.write(json.dumps(json_sanitize(b.to_dict()), ensure_ascii=False) + "\n")
             for ev in self._events.values():
                 f.write(json.dumps(json_sanitize(ev.to_dict()), ensure_ascii=False) + "\n")
+        self._feedback.flush()
 
     # ------------------------------------------------------------------
     def _default_rules(self) -> List[LocalRule]:
@@ -432,6 +440,77 @@ class BeliefGraph:
             if label != canonical:
                 self.entity_linker.alias(label, canonical, weight=0.005)
 
+    def _observe_cooccurrences(self, belief: Belief) -> None:
+        if belief.polarity <= 0:
+            return
+        peers = [
+            other
+            for other in self._cache.values()
+            if other.id != belief.id and other.subject == belief.subject and other.polarity > 0
+        ]
+        if not peers:
+            return
+        for other in peers:
+            success = belief.confidence >= 0.5 and other.confidence >= 0.5
+            weight = (belief.confidence + other.confidence) / 2.0
+            self._feedback.record_relation_pair(
+                belief.relation,
+                other.relation,
+                other.polarity,
+                outcome=success,
+                weight=weight,
+            )
+            self._feedback.record_relation_pair(
+                other.relation,
+                belief.relation,
+                belief.polarity,
+                outcome=success,
+                weight=weight,
+            )
+
+    def _update_rule_strengths(self) -> None:
+        for rule_id, stats in self._feedback.iter_rule_stats():
+            for rule in self._rules:
+                if rule.id != rule_id:
+                    continue
+                total = stats.total()
+                if total < 3.0:
+                    break
+                ratio = stats.ratio(default=0.5)
+                target = 0.1 + 0.8 * ratio
+                rule.strength = float(
+                    max(0.05, min(rule.confidence_cap, 0.5 * rule.strength + 0.5 * target))
+                )
+                cap_target = 0.6 + 0.3 * ratio
+                rule.confidence_cap = float(max(rule.strength, min(0.99, cap_target)))
+                break
+
+    def _promote_feedback_rules(self) -> None:
+        existing_ids = {rule.id for rule in self._rules}
+        for candidate in self._feedback.candidate_rules():
+            rule_id = f"auto:{candidate.if_relation}->{candidate.then_relation}:{candidate.polarity}"
+            if rule_id in existing_ids:
+                continue
+            strength = float(min(0.9, max(0.2, candidate.confidence)))
+            new_rule = LocalRule(
+                id=rule_id,
+                if_relation=candidate.if_relation,
+                then_relation=candidate.then_relation,
+                polarity=candidate.polarity,
+                strength=strength,
+                confidence_cap=float(min(0.95, max(strength, candidate.confidence + 0.1))),
+            )
+            self._rules.append(new_rule)
+            existing_ids.add(rule_id)
+
+    def _maybe_autoadapt_rules(self) -> None:
+        now = time.time()
+        if now - self._last_rule_update < self._rule_refresh_interval:
+            return
+        self._last_rule_update = now
+        self._update_rule_strengths()
+        self._promote_feedback_rules()
+
     def _find_belief(
         self,
         subject: str,
@@ -472,6 +551,8 @@ class BeliefGraph:
                     if derived_conf > existing.confidence:
                         existing.confidence = derived_conf
                         existing.updated_at = now
+                        self._observe_cooccurrences(existing)
+                        self._feedback.record_rule_outcome(rule.id, outcome=True, weight=derived_conf)
                         updates.append(existing)
                     continue
                 subject_record = self.entity_linker.get(seed.subject)
@@ -496,18 +577,27 @@ class BeliefGraph:
                 )
                 self._cache[new_b.id] = new_b
                 self._register_belief_entities(new_b)
+                self._feedback.ensure_belief(new_b.id)
+                self._observe_cooccurrences(new_b)
+                self._feedback.record_rule_outcome(rule.id, outcome=True, weight=derived_conf)
                 updates.append(new_b)
             else:
-                positive = self._find_belief(seed.subject, relation, seed.value, polarity=+1, active_only=False)
+                positive = self._find_belief(
+                    seed.subject, relation, seed.value, polarity=+1, active_only=False
+                )
                 if positive:
                     positive.confidence = float(max(0.0, positive.confidence - derived_conf))
                     positive.updated_at = now
+                    self._feedback.record_rule_outcome(rule.id, outcome=None, weight=derived_conf)
                     updates.append(positive)
-                negative = self._find_belief(seed.subject, relation, seed.value, polarity=-1, active_only=False)
+                negative = self._find_belief(
+                    seed.subject, relation, seed.value, polarity=-1, active_only=False
+                )
                 if negative:
                     if derived_conf > negative.confidence:
                         negative.confidence = derived_conf
                         negative.updated_at = now
+                        self._feedback.record_rule_outcome(rule.id, outcome=True, weight=derived_conf)
                         updates.append(negative)
                     continue
                 subject_record = self.entity_linker.get(seed.subject)
@@ -528,10 +618,17 @@ class BeliefGraph:
                     stability=relation_def.stability,
                 )
                 new_b.justifications.append(
-                    Evidence.new("reasoning", f"rule:{rule.id}", f"Contradiction dérivée de {seed.id}", weight=derived_conf)
+                    Evidence.new(
+                        "reasoning",
+                        f"rule:{rule.id}",
+                        f"Contradiction dérivée de {seed.id}",
+                        weight=derived_conf,
+                    )
                 )
                 self._cache[new_b.id] = new_b
                 self._register_belief_entities(new_b)
+                self._feedback.ensure_belief(new_b.id)
+                self._feedback.record_rule_outcome(rule.id, outcome=True, weight=derived_conf)
                 updates.append(new_b)
         return updates
 
@@ -643,7 +740,10 @@ class BeliefGraph:
             if evidence:
                 match.justifications.append(evidence)
             self._register_belief_entities(match)
+            self._feedback.ensure_belief(match.id)
+            self._observe_cooccurrences(match)
             self._apply_rules(match)
+            self._maybe_autoadapt_rules()
             self._flush()
             return match
 
@@ -678,7 +778,10 @@ class BeliefGraph:
         self._normalize_belief(new_belief)
         self._cache[new_belief.id] = new_belief
         self._register_belief_entities(new_belief)
+        self._feedback.ensure_belief(new_belief.id)
+        self._observe_cooccurrences(new_belief)
         self._apply_rules(new_belief)
+        self._maybe_autoadapt_rules()
         self._flush()
         return new_belief
 
@@ -702,7 +805,30 @@ class BeliefGraph:
         b.justifications.append(evidence); b.updated_at = time.time()
         # ajustement léger : plus d’évidences → confiance monte un peu (capée)
         b.confidence = float(min(1.0, b.confidence + 0.05*evidence.weight))
+        self._feedback.record_evidence(belief_id, evidence.weight)
         self._flush()
+        return True
+
+    def record_feedback(
+        self,
+        belief_id: str,
+        *,
+        success: Optional[bool],
+        weight: float = 1.0,
+    ) -> bool:
+        belief = self._cache.get(belief_id)
+        if not belief:
+            return False
+        self._feedback.record_belief_outcome(
+            belief_id,
+            outcome=success,
+            weight=weight,
+            stability=belief.stability,
+        )
+        if belief.created_by.startswith("rule:"):
+            rule_id = belief.created_by.split(":", 1)[1]
+            self._feedback.record_rule_outcome(rule_id, outcome=success, weight=weight)
+        self._maybe_autoadapt_rules()
         return True
 
     def retire(self, belief_id: str) -> bool:
@@ -728,7 +854,11 @@ class BeliefGraph:
         now = now or time.time()
         dirty = False
         for b in list(self._cache.values()):
-            rate = self.decay_rates.get(b.stability, 0.0)
+            base_rate = self.decay_rates.get(b.stability, 0.0)
+            if base_rate <= 0.0:
+                continue
+            modifier = self._feedback.decay_modifier(b.id, b.stability)
+            rate = base_rate * modifier
             previous = b.confidence
             b.decay(now=now, rate=rate)
             if b.confidence != previous:
