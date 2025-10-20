@@ -1,11 +1,13 @@
 # AGI_Evolutive/social/tactic_selector.py
-# Sélection contextuelle d'une tactique sociale (bandit contextuel "diagonal LinUCB")
+# Sélection contextuelle d'une tactique sociale (bandit contextuel LinUCB plein)
 # Combine: match des prédicats, utilité attendue (effets postérieurs), reward EMA,
 # anti-répétition (récence), garde-fous Policy, et incertitude (terme UCB).
 from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 from collections import defaultdict
 import time, math, random
+
+import numpy as np
 
 from AGI_Evolutive.social.interaction_rule import (
     InteractionRule, ContextBuilder, Predicate, TacticSpec, clamp
@@ -35,10 +37,199 @@ _DEFAULT_CFG = {
     },
     "bandit": {
         "alpha": 0.6,             # intensité de l'exploration UCB
-        "dim": 16                 # dimension du vecteur de contexte φ(s)
+        "dim": 16,                # dimension du vecteur de contexte φ(s)
+        "type": "linucb_full",   # modèle par défaut (compatible diag)
+        "l2": 1.0,                # régularisation de la matrice A
+        "forget": 0.98            # facteur d'oubli exponentiel (<1.0 pour drift)
     },
     "epsilon": 0.08               # epsilon-greedy: chance de prendre la 2e meilleure
 }
+
+# ---------------- LinUCB plein avec oubli ----------------
+class FullLinUCB:
+    """LinUCB complet avec mise à jour Sherman–Morrison et facteur d'oubli."""
+
+    TYPE = "linucb_full"
+
+    def __init__(self, dim: int, alpha: float = 0.6, l2: float = 1.0, forget: float = 1.0):
+        self.d = dim
+        self.alpha = alpha
+        self.l2 = l2
+        self.forget = max(0.8, min(1.0, float(forget)))  # bornes de sécurité
+        self.A = np.eye(dim, dtype=float) * float(l2)
+        self.A_inv = np.linalg.inv(self.A)
+        self.b = np.zeros(dim, dtype=float)
+        self.n = 0
+
+    def _theta(self) -> np.ndarray:
+        return self.A_inv @ self.b
+
+    def score(self, x: List[float]) -> float:
+        vec = np.asarray(x, dtype=float)
+        theta = self._theta()
+        mean = float(theta @ vec)
+        conf_sq = float(vec @ self.A_inv @ vec)
+        conf_sq = max(conf_sq, 0.0)
+        conf = math.sqrt(conf_sq)
+        return float(mean + self.alpha * conf)
+
+    def update(self, x: List[float], r01: float) -> None:
+        vec = np.asarray(x, dtype=float)
+        reward = float(r01)
+        self.n += 1
+
+        if self.forget < 1.0:
+            self.A *= self.forget
+            self.b *= self.forget
+            self.A_inv /= self.forget
+
+        Av = self.A_inv @ vec
+        denom = 1.0 + float(vec @ Av)
+        if denom <= 1e-8:
+            self.A += np.outer(vec, vec)
+            self.A_inv = np.linalg.inv(self.A)
+        else:
+            outer = np.outer(Av, Av) / denom
+            self.A_inv -= outer
+            self.A += np.outer(vec, vec)
+
+        self.b += reward * vec
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "type": self.TYPE,
+            "dim": self.d,
+            "alpha": self.alpha,
+            "l2": self.l2,
+            "forget": self.forget,
+            "A": self.A.tolist(),
+            "A_inv": self.A_inv.tolist(),
+            "b": self.b.tolist(),
+            "n": self.n,
+        }
+
+    @classmethod
+    def load(cls, payload: Dict[str, Any], default_cfg: Dict[str, Any]) -> "FullLinUCB":
+        dim = int(payload.get("dim", default_cfg["bandit"]["dim"]))
+        alpha = float(payload.get("alpha", default_cfg["bandit"]["alpha"]))
+        l2 = float(payload.get("l2", default_cfg["bandit"].get("l2", 1.0)))
+        forget = float(payload.get("forget", default_cfg["bandit"].get("forget", 1.0)))
+        inst = cls(dim=dim, alpha=alpha, l2=l2, forget=forget)
+        if "A" in payload and isinstance(payload["A"], list):
+            mat = np.asarray(payload["A"], dtype=float)
+            if mat.shape == (dim, dim):
+                inst.A = mat
+        if "A_inv" in payload and isinstance(payload["A_inv"], list):
+            mat_inv = np.asarray(payload["A_inv"], dtype=float)
+            if mat_inv.shape == (dim, dim):
+                inst.A_inv = mat_inv
+        else:
+            inst.A_inv = np.linalg.inv(inst.A)
+        if "b" in payload and isinstance(payload["b"], list):
+            vec = np.asarray(payload["b"], dtype=float)
+            if vec.shape == (dim,):
+                inst.b = vec
+        inst.n = int(payload.get("n", 0))
+        return inst
+
+    @classmethod
+    def from_diag(cls, diag: "DiagLinUCB", default_cfg: Dict[str, Any]) -> "FullLinUCB":
+        inst = cls(
+            dim=diag.d,
+            alpha=diag.alpha,
+            l2=default_cfg["bandit"].get("l2", 1.0),
+            forget=default_cfg["bandit"].get("forget", 1.0),
+        )
+        inst.A = np.diag(np.asarray(diag.D, dtype=float))
+        inst.A_inv = np.linalg.inv(inst.A)
+        inst.b = np.asarray(diag.b, dtype=float)
+        inst.n = diag.n
+        return inst
+
+# ---------------- Modèle logistique online pour les poids ----------------
+class OnlineLogisticWeights:
+    """Régression logistique online pour pondérer match/utilité/etc."""
+
+    def __init__(self,
+                 feature_keys: List[str],
+                 lr: float = 0.05,
+                 l2: float = 0.001,
+                 warmup: int = 25,
+                 init_weights: Optional[Dict[str, float]] = None,
+                 state: Optional[Dict[str, Any]] = None) -> None:
+        self.feature_keys = list(feature_keys)
+        self.lr = lr
+        self.l2 = l2
+        self.warmup = warmup
+        self._weights = np.zeros(len(self.feature_keys) + 1, dtype=float)
+        self._updates = 0
+        if init_weights:
+            for idx, key in enumerate(self.feature_keys, start=1):
+                if key in init_weights:
+                    self._weights[idx] = float(init_weights[key])
+        if state:
+            self._load_state(state)
+
+    def _sigmoid(self, z: float) -> float:
+        if z >= 0:
+            ez = math.exp(-z)
+            return 1.0 / (1.0 + ez)
+        ez = math.exp(z)
+        return ez / (1.0 + ez)
+
+    def _vectorize(self, features: Dict[str, float]) -> np.ndarray:
+        vec = [1.0]
+        for key in self.feature_keys:
+            vec.append(float(features.get(key, 0.0)))
+        return np.asarray(vec, dtype=float)
+
+    def predict(self, features: Dict[str, float], fallback: Optional[float] = None) -> float:
+        x = self._vectorize(features)
+        z = float(self._weights @ x)
+        p = self._sigmoid(z)
+        if self._updates < self.warmup and fallback is not None:
+            return float(fallback)
+        return p
+
+    def update(self, features: Dict[str, float], label: float) -> None:
+        x = self._vectorize(features)
+        y = max(0.0, min(1.0, float(label)))
+        z = float(self._weights @ x)
+        p = self._sigmoid(z)
+        error = p - y
+        grad = error * x
+        reg = np.concatenate(([0.0], self._weights[1:]))
+        self._weights -= self.lr * (grad + self.l2 * reg)
+        self._updates += 1
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "feature_keys": list(self.feature_keys),
+            "lr": self.lr,
+            "l2": self.l2,
+            "warmup": self.warmup,
+            "weights": self._weights.tolist(),
+            "updates": self._updates,
+        }
+
+    def _load_state(self, state: Dict[str, Any]) -> None:
+        if isinstance(state, dict):
+            weights = state.get("weights")
+            if isinstance(weights, list) and len(weights) == len(self.feature_keys) + 1:
+                self._weights = np.asarray(weights, dtype=float)
+            self._updates = int(state.get("updates", self._updates))
+
+    @classmethod
+    def load(cls, feature_keys: List[str], state: Optional[Dict[str, Any]], init_weights: Optional[Dict[str, float]]) -> "OnlineLogisticWeights":
+        lr = 0.05
+        l2 = 0.001
+        warmup = 25
+        if isinstance(state, dict):
+            lr = float(state.get("lr", lr))
+            l2 = float(state.get("l2", l2))
+            warmup = int(state.get("warmup", warmup))
+        return cls(feature_keys=feature_keys, lr=lr, l2=l2, warmup=warmup, init_weights=init_weights, state=state)
+
 
 # ---------------- Petit bandit diagonal (sans numpy) ----------------
 class DiagLinUCB:
@@ -91,9 +282,51 @@ class TacticSelector:
     Combine: match (prédicats), utilité attendue, reward EMA, bandit (incertitude), recency.
     Vérifie la Policy si dispo. Garde-fous: risque/contexte/persona.
     """
+    SCORE_FEATURES = ["match", "utility", "ema_reward", "ucb", "recency"]
+
     def __init__(self, arch, cfg: Optional[Dict[str, Any]] = None):
         self.arch = arch
         self.cfg = cfg or getattr(arch, "tactic_selector_cfg", None) or _DEFAULT_CFG
+        self._score_model = self._init_score_model()
+
+    def _init_score_model(self) -> OnlineLogisticWeights:
+        state_container = getattr(self.arch, "tactic_selector_state", None)
+        if state_container is None or not isinstance(state_container, dict):
+            state_container = {}
+            setattr(self.arch, "tactic_selector_state", state_container)
+        init_weights = self.cfg.get("weights", {})
+        stored = state_container.get("score_model")
+        model = OnlineLogisticWeights.load(self.SCORE_FEATURES, stored, init_weights)
+        state_container["score_model"] = model.to_dict()
+        return model
+
+    def _persist_score_model(self) -> None:
+        state_container = getattr(self.arch, "tactic_selector_state", None)
+        if isinstance(state_container, dict):
+            state_container["score_model"] = self._score_model.to_dict()
+
+    def _create_bandit(self) -> FullLinUCB:
+        cfg_src = self.cfg if "bandit" in self.cfg else _DEFAULT_CFG
+        bcfg = cfg_src.get("bandit", {})
+        return FullLinUCB(
+            dim=int(bcfg.get("dim", _DEFAULT_CFG["bandit"]["dim"])),
+            alpha=float(bcfg.get("alpha", _DEFAULT_CFG["bandit"]["alpha"])),
+            l2=float(bcfg.get("l2", _DEFAULT_CFG["bandit"].get("l2", 1.0))),
+            forget=float(bcfg.get("forget", _DEFAULT_CFG["bandit"].get("forget", 1.0))),
+        )
+
+    def _load_bandit(self, state: Optional[Dict[str, Any]]) -> FullLinUCB:
+        cfg_src = self.cfg if "bandit" in self.cfg else _DEFAULT_CFG
+        if isinstance(state, dict):
+            btype = state.get("type")
+            if btype == FullLinUCB.TYPE:
+                return FullLinUCB.load(state, cfg_src)
+            if "A" in state or "A_inv" in state:
+                return FullLinUCB.load(state, cfg_src)
+            if "D" in state and "b" in state:
+                diag = DiagLinUCB.load(state)
+                return FullLinUCB.from_diag(diag, cfg_src)
+        return self._create_bandit()
 
     # ---------- Construction du contexte φ(s) ----------
     def _risk_num(self, level: str) -> float:
@@ -180,69 +413,83 @@ class TacticSelector:
         return True, "ok"
 
     # ---------- Scoring combiné ----------
-    def _score_rule(self, rule: Dict[str, Any], ctx: Dict[str, Any]) -> Tuple[float, Dict[str, Any]]:
-        W = self.cfg["weights"]
+    def _compute_score_components(self,
+                                  rule: Dict[str, Any],
+                                  ctx: Dict[str, Any],
+                                  now: Optional[float] = None) -> Tuple[Dict[str, float], Dict[str, Any], FullLinUCB, List[float]]:
         th = self.cfg["thresholds"]
-        now = _now()
+        now = now or _now()
 
-        # a) match (prédicats)
         try:
             rr = InteractionRule.from_dict(rule)
             match = rr.match_score(ctx)
         except Exception:
             match = 0.0
-        if match < float(th["match_min"]):
-            return 0.0, {"skip":"low_match","match":round(match,3)}
 
-        # b) utilité attendue (effets postérieurs)
+        if match < float(th["match_min"]):
+            return {}, {"skip": "low_match", "match": round(match, 3)}, self._create_bandit(), []
+
         try:
             util = rr.expected_utility(weights=self.cfg.get("utility_weights"), exploration_bonus=0.0)
         except Exception:
             util = 0.5
 
-        # c) reward EMA appris (Social Critic)
         ema = float(rule.get("ema_reward", 0.5))
 
-        # d) bandit UCB (incertitude / exploration)
         bandit_state = rule.get("bandit") or {}
-        blin = DiagLinUCB.load(bandit_state)
+        bandit_model = self._load_bandit(bandit_state)
         x = self._phi(ctx, rule)
-        ucb = blin.score(x)
+        ucb = bandit_model.score(x)
 
-        # Malus si même tactique utilisée très récemment
         last_used = float(rule.get("last_used_ts", 0.0))
-        recency = max(0.0, 1.0 - ((now - last_used) / 60.0))
-        diversity_penalty = 0.08 * recency
+        recency_factor = max(0.0, 1.0 - ((now - last_used) / 60.0))
+        diversity_penalty = 0.08 * recency_factor
         ucb -= diversity_penalty
 
-        # Coût optionnel si défini dans la règle
         cost = float(rule.get("cost", 0.0))
         ucb -= 0.10 * cost
 
-        # e) pénalité de récence
-        last_ts = float(rule.get("last_used_ts", 0.0))
         recent_pen = 0.0
-        if last_ts > 0 and (now - last_ts) < float(th["recent_sec"]):
-            recent_pen = 1.0  # sera multiplié par W["recency"] (négatif)
+        if last_used > 0 and (now - last_used) < float(th["recent_sec"]):
+            recent_pen = 1.0
 
-        # score final
-        score = (
-            float(W["match"])   * match +
-            float(W["utility"]) * util  +
-            float(W["ema_reward"])* ema +
-            float(W["bandit"])  * ucb   +
-            float(W["recency"]) * recent_pen
-        )
-
-        why = {
-            "match": round(match,3),
-            "utility": round(util,3),
-            "ema_reward": round(ema,3),
-            "ucb": round(ucb,3),
-            "recent_pen": recent_pen,
-            "tactic": (rule.get("tactic") or {}).get("name","")
+        components = {
+            "match": float(match),
+            "utility": float(util),
+            "ema_reward": float(ema),
+            "ucb": float(ucb),
+            "recency": float(recent_pen),
         }
-        return float(score), why
+
+        meta = {
+            "match": round(match, 3),
+            "utility": round(util, 3),
+            "ema_reward": round(ema, 3),
+            "ucb": round(ucb, 3),
+            "recent_pen": recent_pen,
+            "tactic": (rule.get("tactic") or {}).get("name", ""),
+        }
+
+        return components, meta, bandit_model, x
+
+    def _score_rule(self, rule: Dict[str, Any], ctx: Dict[str, Any]) -> Tuple[float, Dict[str, Any]]:
+        components, meta, _, _ = self._compute_score_components(rule, ctx)
+        if not components:
+            return 0.0, meta
+
+        W = self.cfg["weights"]
+        linear_score = (
+            float(W["match"]) * components["match"] +
+            float(W["utility"]) * components["utility"] +
+            float(W["ema_reward"]) * components["ema_reward"] +
+            float(W["bandit"]) * components["ucb"] +
+            float(W["recency"]) * components["recency"]
+        )
+        linear_score = clamp(linear_score, 0.0, 1.0)
+
+        score = self._score_model.predict(components, fallback=linear_score)
+        meta["score_linear"] = round(linear_score, 3)
+        return float(score), meta
 
     # ---------- Pick principal ----------
     def pick(self, ctx: Optional[Dict[str, Any]] = None) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
@@ -292,14 +539,17 @@ class TacticSelector:
 
         # 4) self-prompting court (explication interne) — pour traçabilité
         best_why["score"] = round(best_s,3)
-        best_why["reason"] = f"match={best_why['match']}, util={best_why['utility']}, ema={best_why['ema_reward']}, ucb={best_why['ucb']}, policy={best_why.get('policy','ok')}"
+        best_why["reason"] = (
+            f"match={best_why['match']}, util={best_why['utility']}, ema={best_why['ema_reward']}, "
+            f"ucb={best_why['ucb']}, policy={best_why.get('policy','ok')}"
+        )
 
         return (best_r, best_why)
 
     # ---------- Hook d'update bandit (appelé par Social Critic APRÈS feedback) ----------
     def bandit_update(self, rule_id: str, ctx: Dict[str, Any], reward01: float) -> Optional[Dict[str, Any]]:
         """
-        Met à jour l'état du bandit de la règle (DiagLinUCB) à partir du contexte utilisé et du reward 0..1.
+        Met à jour l'état du bandit de la règle (LinUCB plein) à partir du contexte utilisé et du reward 0..1.
         Persiste en mémoire (update/add). Retourne la règle persistée (dict) ou None.
         """
         try:
@@ -313,10 +563,11 @@ class TacticSelector:
         if not rule:
             return None
 
-        x = self._phi(ctx, rule)
-        blin = DiagLinUCB.load(rule.get("bandit") or {})
-        blin.update(x, float(reward01))
-        rule["bandit"] = blin.to_dict()
+        components, _, bandit_model, x = self._compute_score_components(rule, ctx)
+        if not x:
+            x = self._phi(ctx, rule)
+        bandit_model.update(x, float(reward01))
+        rule["bandit"] = bandit_model.to_dict()
 
         # légère adaptation de cooldown en fonction du reward (punitif si très bas)
         cd = float(rule.get("cooldown", 0.0))
@@ -325,6 +576,10 @@ class TacticSelector:
         elif reward01 > 0.75:
             cd = max(0.0, cd * 0.9)
         rule["cooldown"] = cd
+
+        if components:
+            self._score_model.update(components, float(reward01))
+            self._persist_score_model()
 
         if hasattr(self.arch.memory, "update_memory"):
             self.arch.memory.update_memory(rule)
