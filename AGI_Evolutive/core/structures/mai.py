@@ -16,8 +16,11 @@ from __future__ import annotations
 
 import time
 import uuid
+import random
 from dataclasses import dataclass, field, asdict
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Callable, ClassVar, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+from AGI_Evolutive.cognition.meta_cognition import OnlineLinear
 
 # ---------- Types ----------
 Expr = Dict[str, Any]  # {"op":"and","args":[...]} | {"op":"atom","name":"has_commitment","args":[...]}
@@ -153,6 +156,15 @@ class MAI:
         "regret": 0.0,
         "rollbacks": 0.0,
     })
+    adaptive_state: Dict[str, Any] = field(default_factory=dict)
+
+    _ADAPTIVE_MODELS: ClassVar[Tuple[str, ...]] = ("expected_info_gain", "urgency", "affect_value", "cost")
+    _DEFAULT_BANDIT_OFFSETS: ClassVar[Tuple[Dict[str, float], ...]] = (
+        {"expected_info_gain": 0.0, "urgency": 0.0, "affect_value": 0.0, "cost": 0.0},
+        {"expected_info_gain": 0.15, "urgency": 0.1, "affect_value": 0.05, "cost": 0.05},
+        {"expected_info_gain": -0.1, "urgency": -0.05, "affect_value": 0.1, "cost": -0.05},
+        {"expected_info_gain": 0.05, "urgency": 0.2, "affect_value": -0.05, "cost": 0.1},
+    )
 
     # ---- Helpers ----
     def _iter_preconditions(self) -> Iterable[Any]:
@@ -240,6 +252,12 @@ class MAI:
     def propose(self, state: Mapping[str, Any]) -> List[Bid]:
         now = time.time()
         proposals: List[Bid] = []
+        features = self._collect_features(state)
+        models = self._ensure_models()
+        predictions = self._predict_metrics(models, features)
+        offsets, chosen_idx = self._select_bandit_offsets()
+        last_base: Dict[str, float] = {}
+        last_adapted: Dict[str, float] = {}
         for conf in self._iter_bid_configs():
             action_hint = str(conf.get("action_hint", "ClarifyIntent"))
             expected_info_gain = float(conf.get("expected_info_gain", self.expected_impact.confidence))
@@ -248,6 +266,20 @@ class MAI:
             cost = float(conf.get("cost", 0.0))
             rationale = conf.get("rationale")
             target = conf.get("target")
+
+            base_metrics = {
+                "expected_info_gain": expected_info_gain,
+                "urgency": urgency,
+                "affect_value": affect_value,
+                "cost": cost,
+            }
+            adapted = self._blend_metrics(base_metrics, predictions, offsets)
+            last_base = dict(base_metrics)
+            last_adapted = dict(adapted)
+            expected_info_gain = adapted["expected_info_gain"]
+            urgency = adapted["urgency"]
+            affect_value = adapted["affect_value"]
+            cost = adapted["cost"]
 
             # normalize expiration
             expires_at = conf.get("expires_at")
@@ -279,6 +311,8 @@ class MAI:
                     evidence_refs=list(self.provenance_docs),
                 )
             )
+        if proposals:
+            self._record_last_context(features, last_base, predictions, offsets, chosen_idx, last_adapted)
         return proposals
 
     def touch(self) -> None:
@@ -287,7 +321,213 @@ class MAI:
     def update_from_feedback(self, delta: Mapping[str, float]) -> None:
         for key, value in delta.items():
             self.runtime_counters[key] = self.runtime_counters.get(key, 0.0) + float(value)
+        self._update_bandit(delta)
+        self._train_models(delta)
         self.touch()
+
+    # ---- Adaptive helpers ----
+    def _ensure_models(self) -> Dict[str, OnlineLinear]:
+        cache = getattr(self, "_adaptive_models_cache", None)
+        if cache is not None:
+            return cache
+        models_state = {}
+        if isinstance(self.adaptive_state, Mapping):
+            models_state = self.adaptive_state.get("models", {}) if isinstance(self.adaptive_state.get("models"), Mapping) else {}
+        cache = {}
+        for name in self._ADAPTIVE_MODELS:
+            state = models_state.get(name) if isinstance(models_state, Mapping) else None
+            cache[name] = OnlineLinear.from_state(
+                state,
+                bounds=(0.0, 1.0),
+                lr=0.04,
+                l2=0.0015,
+                max_grad=0.25,
+                warmup=10,
+                init_weight=0.1,
+            )
+        setattr(self, "_adaptive_models_cache", cache)
+        return cache
+
+    def _collect_features(self, state: Mapping[str, Any]) -> Dict[str, float]:
+        features: Dict[str, float] = {}
+        runtime = self.runtime_counters
+        activation = float(runtime.get("activation", 0.0))
+        wins = float(runtime.get("wins", 0.0))
+        regret = float(runtime.get("regret", 0.0))
+        benefit = float(runtime.get("benefit", 0.0))
+        rollbacks = float(runtime.get("rollbacks", 0.0))
+        total = max(1.0, activation)
+        features["activation_norm"] = min(activation / 100.0, 1.0)
+        features["win_rate"] = max(0.0, min(1.0, wins / total))
+        features["benefit_avg"] = max(-1.0, min(1.0, benefit / total))
+        features["regret_avg"] = max(0.0, min(1.0, regret / total))
+        features["rollback_rate"] = max(0.0, min(1.0, rollbacks / total))
+
+        if isinstance(state, Mapping):
+            meta = state.get("meta") if isinstance(state.get("meta"), Mapping) else {}
+            drives = state.get("drives") if isinstance(state.get("drives"), Mapping) else {}
+            context = state.get("context") if isinstance(state.get("context"), Mapping) else {}
+            features["state_uncertainty"] = self._safe_float(meta.get("uncertainty", meta.get("confidence", 0.5)), 0.5) if meta else 0.5
+            features["state_urgency"] = self._safe_float(meta.get("urgency", meta.get("pressure", 0.3)), 0.3) if meta else 0.3
+            features["drive_survive"] = self._safe_float(drives.get("survive", 0.5), 0.5) if drives else 0.5
+            features["drive_evolve"] = self._safe_float(drives.get("evolve", 0.5), 0.5) if drives else 0.5
+            features["drive_interact"] = self._safe_float(drives.get("interact", 0.5), 0.5) if drives else 0.5
+            if context:
+                features["context_complexity"] = self._safe_float(context.get("complexity", 0.3), 0.3)
+                features["context_priority"] = self._safe_float(context.get("priority", 0.3), 0.3)
+            workspace = state.get("workspace") if isinstance(state.get("workspace"), Mapping) else {}
+            if workspace:
+                features["workspace_focus"] = self._safe_float(workspace.get("focus", 0.4), 0.4)
+                features["workspace_load"] = self._safe_float(workspace.get("load", 0.5), 0.5)
+        return {k: float(v) for k, v in features.items() if isinstance(v, (int, float))}
+
+    @staticmethod
+    def _safe_float(value: Any, default: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _predict_metrics(
+        self,
+        models: Mapping[str, OnlineLinear],
+        features: Mapping[str, float],
+    ) -> Dict[str, float]:
+        predictions: Dict[str, float] = {}
+        for name, model in models.items():
+            try:
+                predictions[name] = float(model.predict(dict(features)))
+            except Exception:
+                predictions[name] = 0.5
+        return predictions
+
+    def _select_bandit_offsets(self) -> Tuple[Dict[str, float], int]:
+        if not isinstance(self.adaptive_state, dict):
+            self.adaptive_state = {}
+        bandit = self.adaptive_state.setdefault("bandit", {})
+        offsets = bandit.setdefault("offsets", [dict(candidate) for candidate in self._DEFAULT_BANDIT_OFFSETS])
+        stats = bandit.setdefault("stats", {str(idx): {"alpha": 1.0, "beta": 1.0} for idx in range(len(offsets))})
+        best_idx = 0
+        best_score = -1.0
+        for idx, _ in enumerate(offsets):
+            key = str(idx)
+            entry = stats.setdefault(key, {"alpha": 1.0, "beta": 1.0})
+            alpha = max(1e-3, float(entry.get("alpha", 1.0)))
+            beta = max(1e-3, float(entry.get("beta", 1.0)))
+            sample = random.betavariate(alpha, beta)
+            if sample > best_score:
+                best_score = sample
+                best_idx = idx
+        bandit["last_choice"] = best_idx
+        return offsets[best_idx], best_idx
+
+    def _blend_metrics(
+        self,
+        base: Mapping[str, float],
+        predictions: Mapping[str, float],
+        offsets: Mapping[str, float],
+    ) -> Dict[str, float]:
+        adapted: Dict[str, float] = {}
+        models = self._ensure_models()
+        for name in self._ADAPTIVE_MODELS:
+            base_val = float(base.get(name, 0.0))
+            pred = float(predictions.get(name, base_val))
+            offset = float(offsets.get(name, 0.0))
+            model = models.get(name)
+            confidence = float(model.confidence()) if model else 0.0
+            exploration_weight = max(0.0, 0.4 * (1.0 - confidence))
+            offset_value = max(0.0, min(1.0, base_val + offset))
+            blended = (
+                (1.0 - confidence - exploration_weight) * base_val
+                + confidence * pred
+                + exploration_weight * offset_value
+            )
+            adapted[name] = max(0.0, min(1.0, blended))
+        return adapted
+
+    def _record_last_context(
+        self,
+        features: Mapping[str, float],
+        base: Mapping[str, float],
+        predictions: Mapping[str, float],
+        offsets: Mapping[str, float],
+        candidate_idx: int,
+        final_metrics: Mapping[str, float],
+    ) -> None:
+        if not isinstance(self.adaptive_state, dict):
+            self.adaptive_state = {}
+        self.adaptive_state["last_context"] = {
+            "ts": time.time(),
+            "features": dict(features),
+            "base": dict(base),
+            "predictions": dict(predictions),
+            "offsets": dict(offsets),
+            "candidate": int(candidate_idx),
+            "final": dict(final_metrics),
+        }
+
+    def _update_bandit(self, delta: Mapping[str, float]) -> None:
+        if not isinstance(self.adaptive_state, dict):
+            return
+        bandit = self.adaptive_state.get("bandit")
+        if not isinstance(bandit, dict):
+            return
+        stats = bandit.get("stats")
+        if not isinstance(stats, dict):
+            return
+        choice = bandit.get("last_choice")
+        if choice is None:
+            return
+        entry = stats.setdefault(str(int(choice)), {"alpha": 1.0, "beta": 1.0})
+        activation = max(0.0, float(delta.get("activation", 0.0)))
+        wins = max(0.0, float(delta.get("wins", 0.0)))
+        benefit = float(delta.get("benefit", 0.0))
+        regret = max(0.0, float(delta.get("regret", 0.0)))
+        success = max(0.0, wins + max(0.0, benefit))
+        failure = max(0.0, activation - wins + regret)
+        entry["alpha"] = max(1e-3, float(entry.get("alpha", 1.0)) + success)
+        entry["beta"] = max(1e-3, float(entry.get("beta", 1.0)) + failure)
+
+    def _train_models(self, delta: Mapping[str, float]) -> None:
+        if not isinstance(self.adaptive_state, dict):
+            return
+        last = self.adaptive_state.get("last_context")
+        if not isinstance(last, Mapping):
+            return
+        features = last.get("features")
+        if not isinstance(features, Mapping):
+            return
+        activation = max(0.0, float(delta.get("activation", 0.0)))
+        wins = max(0.0, float(delta.get("wins", 0.0)))
+        benefit = float(delta.get("benefit", 0.0))
+        regret = max(0.0, float(delta.get("regret", 0.0)))
+        total = max(1.0, activation)
+        success_ratio = max(0.0, min(1.0, wins / total))
+        net_benefit = max(-1.0, min(1.0, benefit - regret))
+        regret_norm = max(0.0, min(1.0, regret))
+        targets = {
+            "expected_info_gain": max(0.0, min(1.0, 0.4 * success_ratio + 0.6 * max(0.0, benefit))),
+            "affect_value": max(0.0, min(1.0, 0.5 + 0.4 * net_benefit)),
+            "urgency": max(0.0, min(1.0, 0.2 + 0.5 * success_ratio + 0.3 * regret_norm)),
+            "cost": max(0.0, min(1.0, 0.4 - 0.3 * net_benefit + 0.2 * regret_norm)),
+        }
+        models = self._ensure_models()
+        for name, target in targets.items():
+            model = models.get(name)
+            if model is None:
+                continue
+            try:
+                model.update(dict(features), float(target))
+            except Exception:
+                continue
+        self.adaptive_state.setdefault("models", {})
+        model_state = self.adaptive_state["models"]
+        if isinstance(model_state, dict):
+            for name, model in models.items():
+                try:
+                    model_state[name] = model.to_state()
+                except Exception:
+                    continue
 
 
 # ---------- Factory ----------
