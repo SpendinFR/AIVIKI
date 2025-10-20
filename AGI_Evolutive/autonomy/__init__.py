@@ -3,9 +3,9 @@
 # Aucune dépendance externe (stdlib uniquement). Logs lisibles dans ./logs/autonomy.log
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
-from collections import deque
-import os, time, uuid, json, threading
+from typing import Any, Dict, List, Optional, Tuple
+from collections import deque, defaultdict
+import os, time, uuid, json, threading, random, math
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
 
@@ -24,6 +24,162 @@ class AgendaItem:
     dedupe_key: Optional[str] = None
 
 # --------- Autonomy Manager ---------
+
+class AdaptiveEMA:
+    """EMA avec choix dynamique de beta via Thompson Sampling."""
+
+    def __init__(self,
+                 betas: Tuple[float, ...] = (0.2, 0.4, 0.6, 0.8),
+                 error_threshold: float = 0.05,
+                 drift_threshold: float = 0.12,
+                 forgetting: float = 0.975):
+        self.betas = betas
+        self.error_threshold = error_threshold
+        self.drift_threshold = drift_threshold
+        self.forgetting = forgetting
+        self.state: Optional[float] = None
+        self.last_smoothed: Optional[float] = None
+        self.posteriors: Dict[float, Tuple[float, float]] = {
+            b: [1.0, 1.0] for b in betas
+        }
+
+    def _sample_posterior(self, beta: float) -> float:
+        a, b = self.posteriors[beta]
+        return random.betavariate(max(a, 1e-3), max(b, 1e-3))
+
+    def _decay_posteriors(self, beta: float) -> None:
+        a, b = self.posteriors[beta]
+        a = max(1.0, self.forgetting * a)
+        b = max(1.0, self.forgetting * b)
+        self.posteriors[beta] = [a, b]
+
+    def update(self, value: float) -> Dict[str, float]:
+        if value is None or math.isnan(value):
+            return {
+                "smoothed": self.state if self.state is not None else 0.0,
+                "beta": self.betas[-1],
+                "error": 0.0,
+                "drift": 0.0,
+                "error_threshold": self.error_threshold,
+                "drift_threshold": self.drift_threshold,
+            }
+
+        if self.state is None:
+            self.state = value
+            self.last_smoothed = value
+            return {
+                "smoothed": value,
+                "beta": self.betas[-1],
+                "error": 0.0,
+                "drift": 0.0,
+                "error_threshold": self.error_threshold,
+                "drift_threshold": self.drift_threshold,
+            }
+
+        sampled = {b: self._sample_posterior(b) for b in self.betas}
+        chosen_beta = max(sampled.items(), key=lambda kv: kv[1])[0]
+        self._decay_posteriors(chosen_beta)
+
+        prev_state = self.state
+        self.state = (chosen_beta * value) + ((1.0 - chosen_beta) * self.state)
+        error = abs(self.state - value)
+        drift = abs(self.state - (self.last_smoothed if self.last_smoothed is not None else prev_state))
+        success = 1 if error <= self.error_threshold else 0
+        a, b = self.posteriors[chosen_beta]
+        self.posteriors[chosen_beta] = [a + success, b + (1 - success)]
+        self.last_smoothed = self.state
+
+        return {
+            "smoothed": self.state,
+            "beta": chosen_beta,
+            "error": error,
+            "drift": drift,
+            "error_threshold": self.error_threshold,
+            "drift_threshold": self.drift_threshold,
+        }
+
+
+class StreamingCorrelation:
+    """Corrélation glissante avec facteur d'oubli."""
+
+    def __init__(self, forgetting: float = 0.97):
+        self.forgetting = forgetting
+        self.mean_x = 0.0
+        self.mean_y = 0.0
+        self.var_x = 1e-6
+        self.var_y = 1e-6
+        self.cov_xy = 0.0
+
+    def update(self, x: float, y: float) -> float:
+        decay = self.forgetting
+        prev_mean_x = self.mean_x
+        prev_mean_y = self.mean_y
+        self.mean_x = (decay * self.mean_x) + ((1 - decay) * x)
+        self.mean_y = (decay * self.mean_y) + ((1 - decay) * y)
+        self.cov_xy = (decay * self.cov_xy) + ((1 - decay) * (x - prev_mean_x) * (y - prev_mean_y))
+        self.var_x = (decay * self.var_x) + ((1 - decay) * (x - prev_mean_x) * (x - self.mean_x))
+        self.var_y = (decay * self.var_y) + ((1 - decay) * (y - prev_mean_y) * (y - self.mean_y))
+
+        if self.var_x <= 1e-8 or self.var_y <= 1e-8:
+            return 0.0
+        corr = max(-1.0, min(1.0, self.cov_xy / math.sqrt(self.var_x * self.var_y)))
+        return corr
+
+
+class OnlineWeightLearner:
+    """Mise à jour en ligne type ridge pour pondérer les priorités."""
+
+    def __init__(self, l2: float = 0.1, max_step: float = 0.05, forgetting: float = 0.98):
+        self.l2 = l2
+        self.max_step = max_step
+        self.forgetting = forgetting
+        self.weights: Dict[str, float] = defaultdict(lambda: 0.8)
+
+    def update(self, key: str, feature: float, target: float) -> float:
+        if feature <= 0:
+            return self.weights[key]
+        weight = self.weights[key] * self.forgetting
+        prediction = weight * feature
+        gradient = (target - prediction) * feature - (self.l2 * weight)
+        step = max(-self.max_step, min(self.max_step, gradient))
+        weight = max(0.1, min(2.5, weight + step))
+        self.weights[key] = weight
+        return weight
+
+
+class MetricLearningState:
+    """Suivi des métriques faibles avec lissage adaptatif et poids appris."""
+
+    def __init__(self, name: str, forgetting: float = 0.97):
+        self.name = name
+        self.ema = AdaptiveEMA()
+        self.last_raw: Optional[float] = None
+        self.forgetting = forgetting
+        self.correlation = StreamingCorrelation(forgetting=forgetting)
+        self.last_corr = 0.0
+
+    def observe(self, value: float, learner: OnlineWeightLearner) -> Dict[str, float]:
+        ema_state = self.ema.update(value)
+        improvement = 0.0 if self.last_raw is None else value - self.last_raw
+        severity = max(0.0, 1.0 - ema_state["smoothed"])
+        weight = learner.update(self.name, severity, max(0.0, -improvement))
+        corr = self.correlation.update(ema_state["smoothed"], max(0.0, -improvement))
+        self.last_raw = value
+
+        return {
+            "metric": self.name,
+            "smoothed": ema_state["smoothed"],
+            "beta": ema_state["beta"],
+            "error": ema_state["error"],
+            "drift": ema_state["drift"],
+            "weight": weight,
+            "correlation": corr,
+            "severity": severity,
+            "improvement": improvement,
+            "error_threshold": ema_state.get("error_threshold", 0.05),
+            "drift_threshold": ema_state.get("drift_threshold", 0.12),
+        }
+
 
 class AutonomyManager:
     """
@@ -95,6 +251,8 @@ class AutonomyManager:
         self.ticks_without_useful: int = 0
         self.last_tick = 0.0
         self._lock = threading.Lock()
+        self.metric_states: Dict[str, MetricLearningState] = {}
+        self.weight_learner = OnlineWeightLearner()
 
         # Journal
         self.log_dir = "./logs"
@@ -158,12 +316,14 @@ class AutonomyManager:
 
         # a) lacunes / signaux faibles depuis la métacognition
         weak = self._detect_weak_capabilities()
-        for cap, score in weak:
+        for cap_state in weak:
+            cap = cap_state["metric"]
+            score = cap_state["smoothed"]
             props.append({
                 "title": f'Améliorer la capacité "{cap}"',
                 "kind": "learning",
-                "priority": 0.7 + (0.15 * (1.0 - score)),
-                "rationale": f'La métrique "{cap}" est faible ({score:.2f}).',
+                "priority": self._priority_from_metric(cap_state),
+                "rationale": self._rationale_from_metric(cap_state),
                 "payload": {"action": "improve_metric", "metric": cap}
             })
 
@@ -344,9 +504,9 @@ class AutonomyManager:
 
     # ---------- Capteurs/état ----------
 
-    def _detect_weak_capabilities(self) -> List[tuple]:
-        """Retourne [(metric, score)] pour les métriques basses."""
-        res: List[tuple] = []
+    def _detect_weak_capabilities(self) -> List[Dict[str, float]]:
+        """Retourne les métriques faibles avec lissage adaptatif et poids dynamiques."""
+        res: List[Dict[str, float]] = []
         try:
             perf = (self.metacog.cognitive_monitoring.get("performance_tracking", {})
                     if self.metacog else {})
@@ -355,11 +515,49 @@ class AutonomyManager:
                 if not data:
                     continue
                 val = data[-1]["value"] if isinstance(data, list) and data else 0.0
-                if val < 0.55:
-                    res.append((metric, float(val)))
+                if metric not in self.metric_states:
+                    self.metric_states[metric] = MetricLearningState(metric)
+                state = self.metric_states[metric].observe(float(val), self.weight_learner)
+                if state["smoothed"] < 0.7:
+                    res.append(state)
+                    self._maybe_log_metric_events(state)
         except Exception:
             pass
+        res.sort(key=lambda s: (s["smoothed"], -s["weight"]))
         return res[:5]
+
+    def _priority_from_metric(self, state: Dict[str, float]) -> float:
+        base = 0.55 + (0.25 * state["weight"])
+        severity = min(0.45, state["severity"] * 0.45)
+        priority = min(0.98, base + severity)
+        return priority
+
+    def _rationale_from_metric(self, state: Dict[str, float]) -> str:
+        metric = state["metric"]
+        smoothed = state["smoothed"]
+        beta = state["beta"]
+        correlation = state["correlation"]
+        return (
+            f'La métrique "{metric}" est lissée à {smoothed:.2f} '
+            f'(β adaptatif={beta:.2f}, corr={correlation:.2f}).'
+        )
+
+    def _maybe_log_metric_events(self, state: Dict[str, float]) -> None:
+        drift = state.get("drift", 0.0)
+        error = state.get("error", 0.0)
+        corr = state.get("correlation", 0.0)
+        metric = state["metric"]
+        drift_threshold = state.get("drift_threshold", 0.12)
+        error_threshold = state.get("error_threshold", 0.2)
+        if drift > drift_threshold:
+            self._log(f"📈 Drift détecté sur {metric} (Δ={drift:.3f})")
+        if error > error_threshold:
+            self._log(f"📉 Signal bruité pour {metric} (erreur={error:.3f})")
+        prev_corr = getattr(self.metric_states[metric], "last_corr", 0.0)
+        if abs(corr - prev_corr) > 0.05:
+            trend = "↑" if corr > prev_corr else "↓"
+            self._log(f"🔁 Corrélation {trend} pour {metric}: {prev_corr:.2f} → {corr:.2f}")
+            self.metric_states[metric].last_corr = corr
 
     def _context_is_fuzzy(self) -> bool:
         """Vérifie s'il y a assez d'infos pour agir sans demander à l'utilisateur."""
