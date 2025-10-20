@@ -1,11 +1,13 @@
 # 🚀 main.py - Point d'entrée AGI Évolutive
 import glob
+import json
 import os
 import re
 import sys
 import time
 import traceback
-from typing import Any, Dict, List, Optional
+import unicodedata
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from AGI_Evolutive.language.quote_memory import QuoteMemory  # type: ignore
@@ -72,6 +74,7 @@ from AGI_Evolutive.language.lexicon import LiveLexicon
 from AGI_Evolutive.language.style_observer import StyleObserver
 from AGI_Evolutive.conversation.context import ContextBuilder
 from AGI_Evolutive.language.renderer import LanguageRenderer
+from AGI_Evolutive.language import OnlineNgramClassifier
 from AGI_Evolutive.memory.concept_extractor import ConceptExtractor
 from AGI_Evolutive.memory.prefs_bridge import PrefsBridge as PreferencesAdapter
 
@@ -91,6 +94,163 @@ Commandes disponibles :
 Astuce : déposez vos fichiers (.txt, .md, .json, etc.) dans ./inbox/
          ils seront intégrés automatiquement en mémoire.
 """
+
+
+_FEEDBACK_STATE_PATH = os.path.join("data", "evolution", "cli_feedback_classifier.json")
+
+
+def _normalize_feedback_text(text: str) -> str:
+    base = unicodedata.normalize("NFKD", text or "")
+    base = "".join(ch for ch in base if not unicodedata.combining(ch))
+    base = base.replace("’", "'")
+    base = base.lower()
+    base = re.sub(r"[^a-z0-9+?!\s]", " ", base)
+    return re.sub(r"\s+", " ", base).strip()
+
+
+_POSITIVE_PATTERNS: Tuple[Tuple[str, re.Pattern], ...] = (
+    ("plusplus", re.compile(r"\+\+")),
+    ("merci", re.compile(r"\bmerci(?:\s+(?:beaucoup|bcp|d avance|infiniment))?\b")),
+    ("parfait", re.compile(r"\b(?:parfait|parfaite|top|nickel|exactement|genial|super|au top)\b")),
+    ("appreciation", re.compile(r"\b(?:jadore|jaime|japprecie|love|amazing|bravo)\b")),
+    ("cest_bien", re.compile(r"\best\s+(?:un|une|le|la|l)\s+(?:bon|bonne|plaisir|delight|top)\b")),
+)
+
+_NEGATIVE_PATTERNS: Tuple[Tuple[str, re.Pattern], ...] = (
+    ("trop_long", re.compile(r"\btrop\s+(?:long|lent|lourd)\b")),
+    ("pas_clair", re.compile(r"\bpas\s+(?:clair|compr(?:is|ehensible)|terrible)\b")),
+    ("bof", re.compile(r"\b(?:bof|mediocre|pas top|moyen)\b")),
+    ("critique", re.compile(r"\b(?:naime pas|naimeplus|deteste|horrible)\b")),
+    ("cest_nul", re.compile(r"\bc\s*est\s+(?:pas\s+)?(?:terrible|nul|faux|mauvais|decevant)\b")),
+)
+
+_POSITIVE_EMOJI_RE = re.compile(r"[👍👏🙏😊😁😄😍🤩❤♥️💖💙💚💛💜💗]")
+_NEGATIVE_EMOJI_RE = re.compile(r"[😞😠😡☹🙁😤😒😕😔😩😫😢😭👎]")
+
+
+def _detect_feedback_label(text: str) -> Tuple[Optional[str], Optional[str]]:
+    normalized = _normalize_feedback_text(text)
+    for name, pattern in _NEGATIVE_PATTERNS:
+        if pattern.search(normalized):
+            return "negative", name
+    if _NEGATIVE_EMOJI_RE.search(text):
+        return "negative", "emoji_negative"
+    for name, pattern in _POSITIVE_PATTERNS:
+        if pattern.search(normalized):
+            return "positive", name
+    if "++" in normalized:
+        return "positive", "plusplus"
+    if _POSITIVE_EMOJI_RE.search(text):
+        return "positive", "emoji_positive"
+    return None, None
+
+
+class CLIAdaptiveFeedback:
+    """Gère l'apprentissage en ligne du feedback utilisateur côté CLI."""
+
+    def __init__(
+        self,
+        state_path: str = _FEEDBACK_STATE_PATH,
+        min_confidence: float = 0.68,
+    ) -> None:
+        self.state_path = state_path
+        self.min_confidence = float(min_confidence)
+        self.classifier = OnlineNgramClassifier(labels=("positive", "negative"))
+        try:
+            self.evolution = EvolutionManager.shared()
+        except Exception:
+            self.evolution = None
+        self._load()
+
+    def _load(self) -> None:
+        if not os.path.exists(self.state_path):
+            return
+        try:
+            with open(self.state_path, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except Exception:
+            return
+        state = payload.get("classifier") if isinstance(payload, dict) else None
+        if isinstance(state, dict):
+            try:
+                self.classifier.from_state(state)
+            except Exception:
+                pass
+        if isinstance(payload, dict):
+            self.min_confidence = float(payload.get("min_confidence", self.min_confidence))
+
+    def _persist(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(self.state_path), exist_ok=True)
+            with open(self.state_path, "w", encoding="utf-8") as fh:
+                json.dump(
+                    {
+                        "classifier": self.classifier.to_state(),
+                        "min_confidence": self.min_confidence,
+                    },
+                    fh,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+        except Exception:
+            pass
+
+    def _record_event(
+        self,
+        *,
+        label: str,
+        success: Optional[bool],
+        confidence: float,
+        origin: str,
+        heuristic: Optional[str] = None,
+    ) -> None:
+        if not self.evolution:
+            return
+        try:
+            self.evolution.record_feedback_event(
+                "cli_feedback",
+                label=label,
+                success=success,
+                confidence=confidence,
+                heuristic=heuristic,
+                payload={"origin": origin},
+            )
+        except Exception:
+            pass
+
+    def register_ground_truth(self, text: str, label: str, pattern: Optional[str]) -> None:
+        try:
+            self.classifier.partial_fit(text, label)
+            self._persist()
+        except Exception:
+            pass
+        self._record_event(
+            label=label,
+            success=True,
+            confidence=1.0,
+            origin="heuristic",
+            heuristic=pattern,
+        )
+
+    def classify(self, text: str) -> Optional[Dict[str, float]]:
+        if not text.strip():
+            return None
+        try:
+            label, confidence = self.classifier.predict(text)
+        except Exception:
+            return None
+        if confidence >= self.min_confidence:
+            return {"label": label, "confidence": float(confidence)}
+        return None
+
+    def record_prediction(self, label: str, confidence: float) -> None:
+        self._record_event(
+            label=label,
+            success=None,
+            confidence=confidence,
+            origin="classifier",
+            heuristic="classifier",
+        )
 
 def list_inbox(inbox_dir="inbox"):
     files = [os.path.basename(p) for p in glob.glob(os.path.join(inbox_dir, "*"))]
@@ -198,6 +358,7 @@ def run_cli():
     voice = arch.voice_profile
     concept_extractor = ConceptExtractor(getattr(getattr(arch, "memory", None), "store", None))
     prefs = PreferencesAdapter(getattr(arch, "beliefs_graph", None))
+    feedback_adapter = CLIAdaptiveFeedback()
     _last_cleanup_ts = 0.0
 
     print("✅ AGI initialisée. (Persistance & mémoire prêtes)")
@@ -356,34 +517,54 @@ def run_cli():
             continue
 
         # ==== INTERACTION ====
-        t = msg.lower()
-        if any(kw in t for kw in ["++", "parfait", "top", "merci beaucoup", "exactement"]):
+        feedback_label: Optional[str] = None
+        feedback_confidence = 0.0
+
+        heur_label, heur_pattern = _detect_feedback_label(msg)
+        if heur_label:
+            feedback_label = heur_label
+            feedback_confidence = 1.0
+            feedback_adapter.register_ground_truth(msg, heur_label, heur_pattern)
+        else:
+            prediction = feedback_adapter.classify(msg)
+            if prediction:
+                feedback_label = prediction["label"]
+                feedback_confidence = prediction["confidence"]
+                feedback_adapter.record_prediction(prediction["label"], prediction["confidence"])
+
+        if feedback_label == "positive":
             voice.update_from_feedback(msg, positive=True)
-        elif any(kw in t for kw in ["trop long", "bof", "pas clair", "trop familier", "trop froid"]):
+        elif feedback_label == "negative":
             voice.update_from_feedback(msg, positive=False)
 
         try:
-            t = msg.lower()
-            pos = any(kw in t for kw in ["++", "parfait", "top", "merci beaucoup", "exactement"])
-            neg = any(kw in t for kw in ["trop long", "bof", "pas clair", "trop familier", "trop froid"])
+            pos = feedback_label == "positive"
+            neg = feedback_label == "negative"
             if pos or neg:
-                sign = 1 if pos and not neg else -1
+                sign = 1 if pos else -1
                 raw_concepts = concept_extractor._extract_concepts(msg) or []
                 targets = [str(c).strip().lower() for c in raw_concepts if c and len(str(c)) >= 3][:5]
                 if targets:
                     evidence_id = f"user:{int(time.time())}"
-                    strength = 1.0 if sign > 0 else 0.8
+                    base_strength = 1.0 if sign > 0 else 0.8
+                    strength = max(0.3, base_strength * (0.6 + 0.4 * feedback_confidence))
                     for c in targets:
-                        prefs.observe_feedback(concept=c, sign=sign, evidence_id=evidence_id, strength=strength)
+                        prefs.observe_feedback(
+                            concept=c,
+                            sign=sign,
+                            evidence_id=evidence_id,
+                            strength=strength,
+                        )
 
                 selector = getattr(arch, "tactic_selector", None)
                 if selector and hasattr(selector, "feedback"):
                     try:
                         arm = getattr(arch, "_last_macro", None)
-                        if pos and not neg:
-                            selector.feedback(+1.0, arm=arm)
-                        elif neg and not pos:
-                            selector.feedback(-1.0, arm=arm)
+                        reward = feedback_confidence if pos else -feedback_confidence
+                        if reward > 0:
+                            selector.feedback(reward, arm=arm)
+                        elif reward < 0:
+                            selector.feedback(reward, arm=arm)
                     except Exception:
                         pass
 
@@ -394,11 +575,10 @@ def run_cli():
                     qm_for_feedback = getattr(arch, "quote_memory", None)
                 if qm_for_feedback:
                     try:
-                        if pos and not neg:
-                            qm_for_feedback.reward_last(+1.0)
-                        if neg and not pos:
-                            qm_for_feedback.reward_last(-1.0)
-                        qm_for_feedback.save()
+                        reward = feedback_confidence if pos else -feedback_confidence
+                        if reward:
+                            qm_for_feedback.reward_last(reward)
+                            qm_for_feedback.save()
                     except Exception:
                         pass
 
@@ -418,12 +598,13 @@ def run_cli():
                             if alts:
                                 loser = (alts[0] or {}).get("text") if isinstance(alts[0], dict) else None
                             if winner and loser:
-                                if pos and not neg:
-                                    ranker.update_pair(ctx_for_rank, winner, loser, lr=0.15)
+                                lr_scale = max(0.2, min(1.0, feedback_confidence))
+                                if pos:
+                                    ranker.update_pair(ctx_for_rank, winner, loser, lr=0.15 * lr_scale)
                                     if hasattr(ranker, "save"):
                                         ranker.save()
-                                elif neg and not pos:
-                                    ranker.update_pair(ctx_for_rank, loser, winner, lr=0.10)
+                                elif neg:
+                                    ranker.update_pair(ctx_for_rank, loser, winner, lr=0.10 * lr_scale)
                                     if hasattr(ranker, "save"):
                                         ranker.save()
                     except Exception:
