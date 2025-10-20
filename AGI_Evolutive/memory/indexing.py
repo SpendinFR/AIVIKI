@@ -166,7 +166,7 @@ class InMemoryIndex:
         return scores[: max(1, top_k)]
 
     def search_text(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
-        qvec = self.encoder.encode(query or "")
+        qvec = self.encoder.encode(query or "", train=False)
         hits = self._search_vec(qvec, top_k=top_k)
         # Résolution en docs
         out = []
@@ -231,7 +231,11 @@ class InMemoryIndex:
             recency = math.exp(-age / (60.0 * 60.0 * 24.0))
         else:
             recency = 0.0
-        salience = float(meta.get("salience", meta.get("priority", 0.0)))
+        salience_value = meta.get("salience", meta.get("priority", 0.0))
+        try:
+            salience = float(salience_value)
+        except (TypeError, ValueError):
+            salience = 0.0
         salience = max(0.0, min(1.0, salience))
         novelty = 1.0 / (1.0 + float(self._usage.get(doc["id"], 0)))
         bridge = self._bridge_signal(doc, meta)

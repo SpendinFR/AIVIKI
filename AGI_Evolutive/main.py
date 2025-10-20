@@ -400,6 +400,8 @@ def run_cli():
             print("👋 Fin de session.")
             break
 
+        msg_lower = msg.lower()
+
         # --- Réponse à une question : "a <num> <réponse>" / "answer <num> ..."
         m = re.match(r"^\s*(a|answer|reponds?|réponds?)\s+(\d+)\s+(.+)$", msg, flags=re.IGNORECASE)
         if m:
@@ -616,7 +618,7 @@ def run_cli():
         final_pack_override: Optional[Dict[str, Any]] = None
         selected_macro_override = None
 
-        if t.startswith("j'aime") and "inbox/" in t:
+        if msg_lower.startswith("j'aime") and "inbox/" in msg_lower:
             import re as _re
             m = _re.search(r"(?:\"([^\"]+)\"|'([^']+)')", msg)
             if m:
