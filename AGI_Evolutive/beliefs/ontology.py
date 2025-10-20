@@ -1,8 +1,14 @@
 """Lightweight ontology definitions for entity and relation types used by the belief graph."""
 from __future__ import annotations
 
+import json
+import logging
 from dataclasses import dataclass
-from typing import Dict, Iterable, Optional, Set
+from pathlib import Path
+from typing import Any, Dict, Iterable, Mapping, Optional, Set
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -80,6 +86,9 @@ class Ontology:
     # ------------------------------------------------------------------
     # Registration helpers
     def register_entity(self, name: str, *, parent: Optional[str] = None) -> None:
+        if parent and parent not in self.entity_types:
+            logger.debug("Auto-registering missing parent entity '%s' for '%s'", parent, name)
+            self.entity_types[parent] = EntityType(name=parent, parent="Entity" if parent != "Entity" else None)
         self.entity_types[name] = EntityType(name=name, parent=parent)
 
     def register_relation(
@@ -106,6 +115,104 @@ class Ontology:
             name=name,
             roles={role: set(options) for role, options in roles.items()},
         )
+
+    # ------------------------------------------------------------------
+    # Configuration helpers
+    def load_from_mapping(
+        self,
+        config: Mapping[str, Any],
+        *,
+        clear_existing: bool = False,
+    ) -> None:
+        """Populate the ontology from a mapping structure.
+
+        The mapping follows a lightweight schema::
+
+            {
+                "entities": [
+                    {"name": "Agent", "parent": "Entity"},
+                    "CustomEntity"
+                ],
+                "relations": [
+                    {
+                        "name": "knows",
+                        "domain": ["Agent"],
+                        "range": ["Agent"],
+                        "polarity_sensitive": false,
+                        "temporal": true,
+                        "stability": "episode"
+                    }
+                ],
+                "events": [
+                    {
+                        "name": "meeting",
+                        "roles": {"host": ["Agent"]}
+                    }
+                ]
+            }
+
+        Missing optional fields fall back to sensible defaults, so the method
+        is resilient to partial configurations.
+        """
+
+        if clear_existing:
+            self.entity_types.clear()
+            self.relation_types.clear()
+            self.event_types.clear()
+
+        for entity_entry in config.get("entities", []) or []:
+            if isinstance(entity_entry, str):
+                self.register_entity(entity_entry)
+            else:
+                name = entity_entry.get("name")
+                if not name:
+                    logger.warning("Skipping entity definition without a name: %s", entity_entry)
+                    continue
+                self.register_entity(name, parent=entity_entry.get("parent"))
+
+        for relation_entry in config.get("relations", []) or []:
+            if not isinstance(relation_entry, Mapping):
+                logger.warning("Skipping invalid relation definition: %s", relation_entry)
+                continue
+            name = relation_entry.get("name")
+            domain = relation_entry.get("domain", ["Entity"])
+            range_ = relation_entry.get("range", ["Entity"])
+            if not name:
+                logger.warning("Skipping relation definition without a name: %s", relation_entry)
+                continue
+            self.register_relation(
+                name,
+                domain=domain,
+                range=range_,
+                polarity_sensitive=relation_entry.get("polarity_sensitive", True),
+                temporal=relation_entry.get("temporal", False),
+                stability=relation_entry.get("stability", "anchor"),
+            )
+
+        for event_entry in config.get("events", []) or []:
+            if not isinstance(event_entry, Mapping):
+                logger.warning("Skipping invalid event definition: %s", event_entry)
+                continue
+            name = event_entry.get("name")
+            roles = event_entry.get("roles", {})
+            if not name:
+                logger.warning("Skipping event definition without a name: %s", event_entry)
+                continue
+            if not isinstance(roles, Mapping):
+                logger.warning("Skipping event '%s' with invalid roles: %s", name, roles)
+                continue
+            self.register_event(name, roles={role: list(options) for role, options in roles.items()})
+
+    def load_from_file(self, path: Path | str, *, clear_existing: bool = False) -> None:
+        """Load ontology definitions from a JSON file."""
+
+        data: Mapping[str, Any]
+        raw_path = Path(path)
+        with raw_path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        if not isinstance(data, Mapping):
+            raise ValueError(f"Expected a mapping at the top-level of {raw_path}")
+        self.load_from_mapping(data, clear_existing=clear_existing)
 
     # ------------------------------------------------------------------
     # Lookup helpers
@@ -158,6 +265,15 @@ class Ontology:
         onto.register_entity("Habit", parent="Entity")
         onto.register_entity("Activity", parent="Entity")
         onto.register_entity("TemporalSegment", parent="Entity")
+        onto.register_entity("Context", parent="Entity")
+        onto.register_entity("Emotion", parent="Entity")
+        onto.register_entity("Goal", parent="Entity")
+        onto.register_entity("Intention", parent="Goal")
+        onto.register_entity("Resource", parent="Object")
+        onto.register_entity("Tool", parent="Resource")
+        onto.register_entity("Knowledge", parent="Entity")
+        onto.register_entity("Experience", parent="Entity")
+        onto.register_entity("Communication", parent="Activity")
 
         # Relations
         onto.register_relation("likes", domain=["Agent"], range=["Entity"], stability="anchor")
@@ -199,6 +315,52 @@ class Ontology:
             range=["Entity"],
             stability="anchor",
         )
+        onto.register_relation(
+            "located_in",
+            domain=["Entity"],
+            range=["Place"],
+            stability="anchor",
+        )
+        onto.register_relation(
+            "uses",
+            domain=["Agent"],
+            range=["Tool", "Resource"],
+            temporal=True,
+            stability="episode",
+        )
+        onto.register_relation(
+            "has_goal",
+            domain=["Agent"],
+            range=["Goal", "Intention"],
+            stability="anchor",
+        )
+        onto.register_relation(
+            "influences",
+            domain=["Agent", "Organization", "Context"],
+            range=["Agent", "Context", "Emotion"],
+            temporal=True,
+            stability="episode",
+        )
+        onto.register_relation(
+            "reports_on",
+            domain=["Agent", "Organization"],
+            range=["Knowledge", "Experience"],
+            stability="anchor",
+        )
+        onto.register_relation(
+            "expresses",
+            domain=["Agent"],
+            range=["Emotion", "Intention"],
+            temporal=True,
+            stability="episode",
+        )
+        onto.register_relation(
+            "precedes",
+            domain=["Activity", "TemporalSegment"],
+            range=["Activity", "TemporalSegment"],
+            temporal=True,
+            stability="episode",
+        )
 
         # Events
         onto.register_event(
@@ -217,5 +379,30 @@ class Ontology:
         onto.register_event(
             "routine",
             roles={"actor": ["Agent"], "activity": ["Activity"], "timeslot": ["TemporalSegment"]},
+        )
+        onto.register_event(
+            "collaboration",
+            roles={
+                "participants": ["Agent", "Organization"],
+                "goal": ["Goal", "Intention"],
+                "resource": ["Resource", "Tool"],
+                "context": ["Context", "Place"],
+            },
+        )
+        onto.register_event(
+            "observation",
+            roles={
+                "observer": ["Agent"],
+                "subject": ["Entity"],
+                "insight": ["Knowledge", "Experience"],
+            },
+        )
+        onto.register_event(
+            "goal_progress",
+            roles={
+                "agent": ["Agent"],
+                "goal": ["Goal", "Intention"],
+                "milestone": ["TemporalSegment", "Experience"],
+            },
         )
         return onto
