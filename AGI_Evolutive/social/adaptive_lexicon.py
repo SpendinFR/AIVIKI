@@ -7,7 +7,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from typing import Dict, Any, List, Optional, Tuple
-import re, json, os, time, math, unicodedata
+import re, json, os, time, math, unicodedata, random
 
 # ----------------- utilitaires -----------------
 def _now(): return time.time()
@@ -19,6 +19,20 @@ je tu il elle on nous vous ils elles ne pas plus moins très trop ce cette ces
 mon ton son ma ta sa mes tes ses est es suis êtes sont c'est ça ok d' l'
 """.split())
 
+
+def _strip_accents(text: str) -> str:
+    normalized = unicodedata.normalize("NFD", text)
+    return "".join(ch for ch in normalized if not unicodedata.combining(ch))
+
+
+def _normalize(s: str) -> str:
+    s = unicodedata.normalize("NFKC", s or "")
+    s = _strip_accents(s)
+    s = s.strip().lower()
+    s = re.sub(r"[^\w\s'"+"]", " ", s)
+    s = re.sub(r"\s+", " ", s)
+    return s
+
 _EMOJI_RE = re.compile(
     "["                       # basic emoji ranges
     "\U0001F300-\U0001F6FF"
@@ -26,13 +40,6 @@ _EMOJI_RE = re.compile(
     "\U00002600-\U000026FF"
     "\U00002700-\U000027BF"
     "]+", flags=re.UNICODE)
-
-def _normalize(s: str) -> str:
-    s = unicodedata.normalize("NFKC", s or "")
-    s = s.strip().lower()
-    s = re.sub(r"[^\w\s'"+"]", " ", s)
-    s = re.sub(r"\s+", " ", s)
-    return s
 
 def _ngrams(tokens: List[str], nmin=1, nmax=3):
     for n in range(nmin, nmax+1):
@@ -56,6 +63,112 @@ def _tokenize(s: str) -> List[str]:
         out.append(t)
     return out
 
+
+class OnlineLogisticCalibrator:
+    """Logistic calibration mise à jour en ligne pour ajuster les incréments."""
+
+    def __init__(self, lr: float = 0.05, l2: float = 1e-4, clip: float = 6.0):
+        self.lr = lr
+        self.l2 = l2
+        self.clip = clip
+        self.n_features = 10
+        self.weights: List[float] = [0.0 for _ in range(self.n_features)]
+
+    def _sigmoid(self, x: float) -> float:
+        if x >= 0:
+            z = math.exp(-x)
+            return 1.0 / (1.0 + z)
+        z = math.exp(x)
+        return z / (1.0 + z)
+
+    def _features(
+        self,
+        entry: "LexEntry",
+        reward: float,
+        confidence: float,
+        now_ts: float,
+        prev_last_ts: Optional[float],
+        was_dormant: bool,
+    ) -> List[float]:
+        phrase = entry.phrase
+        ttl = max(1.0, float(getattr(entry, "ttl_days", 0.0) or 1.0))
+        recency = 0.0
+        if prev_last_ts:
+            recency = math.tanh((now_ts - float(prev_last_ts)) / (ttl * 86400.0))
+        uses_signal = math.tanh(math.log1p(max(0.0, float(entry.uses))))
+        total = float(entry.total_pos + entry.total_neg)
+        balance = 0.0
+        if total > 0:
+            balance = math.tanh((entry.total_pos - entry.total_neg) / total)
+        features = [
+            1.0,
+            reward,
+            reward * reward,
+            confidence,
+            uses_signal,
+            1.0 if was_dormant else 0.0,
+            recency,
+            math.tanh(len(phrase.split()) / 4.0),
+            1.0 if _EMOJI_RE.search(phrase) else 0.0,
+            balance,
+        ]
+        return features
+
+    def predict(self, features: List[float]) -> float:
+        z = sum(w * f for w, f in zip(self.weights, features))
+        return self._sigmoid(z)
+
+    def update(self, features: List[float], target: float) -> None:
+        pred = self.predict(features)
+        error = pred - clamp(target, 0.0, 1.0)
+        for i, f in enumerate(features):
+            grad = error * f + self.l2 * self.weights[i]
+            self.weights[i] -= self.lr * grad
+            self.weights[i] = clamp(self.weights[i], -self.clip, self.clip)
+
+    def score(
+        self,
+        entry: "LexEntry",
+        reward: float,
+        confidence: float,
+        now_ts: float,
+        prev_last_ts: Optional[float],
+        was_dormant: bool,
+    ) -> float:
+        features = self._features(entry, reward, confidence, now_ts, prev_last_ts, was_dormant)
+        prob = self.predict(features)
+        self.update(features, reward)
+        return prob
+
+
+class DiscreteThompsonSampler:
+    """Bandit Thompson Sampling discret pour choisir la demi-vie/TTL."""
+
+    def __init__(self, candidates: List[float]):
+        self.candidates = list(candidates)
+        if not self.candidates:
+            raise ValueError("Need at least one TTL candidate")
+        self.alpha: List[float] = [1.0 for _ in self.candidates]
+        self.beta: List[float] = [1.0 for _ in self.candidates]
+
+    def sample(self) -> Tuple[int, float]:
+        best_idx = 0
+        best_val = -1.0
+        for i, (a, b) in enumerate(zip(self.alpha, self.beta)):
+            val = random.betavariate(a, b)
+            if val > best_val:
+                best_val = val
+                best_idx = i
+        return best_idx, self.candidates[best_idx]
+
+    def update(self, idx: int, success: bool) -> None:
+        if idx < 0 or idx >= len(self.candidates):
+            return
+        if success:
+            self.alpha[idx] += 1.0
+        else:
+            self.beta[idx] += 1.0
+
 # ----------------- entrées -----------------
 @dataclass
 class LexEntry:
@@ -75,6 +188,8 @@ class LexEntry:
     total_neg: int = 0
     first_seen_ts: float = field(default_factory=_now)
     dormant: bool = False
+    ttl_days: float = 60.0
+    ttl_arm: int = -1
 
     def p_pos(self) -> float:
         return self.alpha_pos / (self.alpha_pos + self.beta_pos)
@@ -110,6 +225,23 @@ class AdaptiveLexicon:
 
         self.entries: Dict[str, LexEntry] = {}
         self.archive: Dict[str, ArchiveEntry] = {}
+
+        retention_cfg = self.cfg.get("lexicon_retention", {})
+        default_days = float(retention_cfg.get("dormant_after_days", 60) or 60)
+        ttl_candidates = retention_cfg.get("ttl_candidates_days") or [
+            max(3.0, default_days / 4.0),
+            max(5.0, default_days / 2.0),
+            default_days,
+            default_days * 1.5,
+        ]
+        self.ttl_candidates = sorted({float(max(1.0, c)) for c in ttl_candidates})
+        self.ttl_bandits: Dict[str, DiscreteThompsonSampler] = {}
+        self.calibrator = OnlineLogisticCalibrator(
+            lr=float(retention_cfg.get("calibrator_lr", 0.05)),
+            l2=float(retention_cfg.get("calibrator_l2", 1e-4)),
+            clip=float(retention_cfg.get("calibrator_clip", 6.0)),
+        )
+
         self._load_active()
         self._load_archive()
 
@@ -141,7 +273,11 @@ class AdaptiveLexicon:
             "floor_alpha_beta": 1.0,        # plancher (rien n'est effacé)
             "dormant_after_days": 60,       # au-delà → dormant (si pas revu)
             "revive_boost": 0.4,            # boost à la réactivation
-            "archive_path": "data/lexicon_archive.json"
+            "archive_path": "data/lexicon_archive.json",
+            "ttl_candidates_days": [7, 14, 30, 60, 90],
+            "calibrator_lr": 0.05,
+            "calibrator_l2": 1e-4,
+            "calibrator_clip": 6.0,
         }}
 
     # ------------- I/O -------------
@@ -151,7 +287,9 @@ class AdaptiveLexicon:
                 raw = json.load(open(self.path, "r", encoding="utf-8")) or {}
                 for phrase, d in raw.items():
                     # compat: anciennes versions n’ont pas tous les champs
-                    self.entries[phrase] = LexEntry(phrase=phrase, **{k:v for k,v in d.items() if k != "phrase"})
+                    entry = LexEntry(phrase=phrase, **{k: v for k, v in d.items() if k != "phrase"})
+                    self._ensure_entry_ttl(entry)
+                    self.entries[phrase] = entry
         except Exception:
             self.entries = {}
 
@@ -183,22 +321,93 @@ class AdaptiveLexicon:
     # ------------- helpers -------------
     def _ensure_active(self, phrase: str) -> LexEntry:
         if phrase not in self.entries:
-            self.entries[phrase] = LexEntry(phrase=phrase)
-        return self.entries[phrase]
+            entry = LexEntry(phrase=phrase)
+            self._assign_ttl(entry)
+            self.entries[phrase] = entry
+        else:
+            entry = self.entries[phrase]
+            self._ensure_entry_ttl(entry)
+        return entry
 
     def _ensure_archive(self, phrase: str) -> ArchiveEntry:
         if phrase not in self.archive:
             self.archive[phrase] = ArchiveEntry(phrase=phrase)
         return self.archive[phrase]
 
-    def _refresh_dormant_flags(self):
-        days = float(self.cfg["lexicon_retention"].get("dormant_after_days", 60))
-        if days <= 0: 
+    def _marker_family(self, phrase: str, entry: Optional[LexEntry] = None) -> str:
+        if entry and entry.tags:
+            for tag in entry.tags:
+                if tag.startswith("family:"):
+                    return tag.split(":", 1)[1]
+        if _EMOJI_RE.search(phrase):
+            return "emoji"
+        length = len(phrase.split())
+        if length <= 1:
+            return "unigram"
+        if length == 2:
+            return "bigram"
+        return "trigram_plus"
+
+    def _get_bandit(self, family: str) -> DiscreteThompsonSampler:
+        if family not in self.ttl_bandits:
+            self.ttl_bandits[family] = DiscreteThompsonSampler(self.ttl_candidates)
+        return self.ttl_bandits[family]
+
+    def _assign_ttl(self, entry: LexEntry) -> None:
+        family = self._marker_family(entry.phrase, entry)
+        sampler = self._get_bandit(family)
+        arm_idx, ttl = sampler.sample()
+        entry.ttl_arm = arm_idx
+        entry.ttl_days = float(ttl)
+
+    def _ensure_entry_ttl(self, entry: LexEntry) -> None:
+        family = self._marker_family(entry.phrase, entry)
+        sampler = self._get_bandit(family)
+        if getattr(entry, "ttl_days", None) in (None, 0):
+            self._assign_ttl(entry)
             return
-        horizon = days * 86400.0
+        if getattr(entry, "ttl_arm", None) is None or entry.ttl_arm < 0 or entry.ttl_arm >= len(sampler.candidates):
+            self._assign_ttl(entry)
+            return
+        ttl_value = float(entry.ttl_days)
+        if ttl_value <= 0 or not any(abs(ttl_value - c) < 1e-6 for c in sampler.candidates):
+            self._assign_ttl(entry)
+
+    def _record_ttl_feedback(
+        self,
+        entry: LexEntry,
+        success: bool,
+        prev_last_ts: Optional[float] = None,
+        now_ts: Optional[float] = None,
+    ) -> None:
+        if entry.ttl_days is None:
+            return
+        family = self._marker_family(entry.phrase, entry)
+        sampler = self._get_bandit(family)
+        if entry.ttl_arm is None or entry.ttl_arm < 0 or entry.ttl_arm >= len(sampler.candidates):
+            return
+        if success:
+            if prev_last_ts is None or now_ts is None:
+                return
+            ttl_seconds = float(entry.ttl_days) * 86400.0
+            if ttl_seconds <= 0:
+                return
+            if (now_ts - float(prev_last_ts)) < 0.25 * ttl_seconds:
+                return
+        sampler.update(entry.ttl_arm, success)
+
+    def _refresh_dormant_flags(self):
         now = _now()
         for e in self.entries.values():
+            self._ensure_entry_ttl(e)
+            days = float(e.ttl_days or self.cfg["lexicon_retention"].get("dormant_after_days", 60))
+            if days <= 0:
+                continue
+            horizon = days * 86400.0
+            was_dormant = e.dormant
             e.dormant = (now - float(e.last_ts)) > horizon
+            if e.dormant and not was_dormant:
+                self._record_ttl_feedback(e, success=False)
 
     def _apply_decay_and_floor(self, e: LexEntry):
         decay = float(self.cfg["lexicon_retention"].get("decay", 0.995))
@@ -241,7 +450,10 @@ class AdaptiveLexicon:
             a = self._ensure_archive(g)
 
             # réactivation éventuelle si dormant
+            was_dormant = e.dormant
+            prev_last_ts = e.last_ts
             self._reactivate_if_resurfaced(e)
+            self._ensure_entry_ttl(e)
 
             # decay doux + plancher
             self._apply_decay_and_floor(e)
@@ -250,16 +462,36 @@ class AdaptiveLexicon:
             r = clamp(float(reward01), 0.0, 1.0)
             conf = clamp(float(confidence), 0.0, 1.0)
 
+            prob = self.calibrator.score(
+                entry=e,
+                reward=r,
+                confidence=conf,
+                now_ts=now,
+                prev_last_ts=prev_last_ts,
+                was_dormant=was_dormant,
+            )
+            pos_factor = 0.6 + 0.4 * prob
+            neg_factor = 0.6 + 0.4 * (1.0 - prob)
+
             if r >= 0.6:
-                e.alpha_pos += conf
+                e.alpha_pos += conf * pos_factor
                 e.total_pos += 1  # ARCHIVE: totaux stables
+                if not was_dormant:
+                    self._record_ttl_feedback(
+                        e,
+                        success=True,
+                        prev_last_ts=prev_last_ts,
+                        now_ts=now,
+                    )
             elif r <= 0.4:
-                e.beta_pos  += conf
-                e.alpha_neg += conf * 0.6
+                e.beta_pos  += conf * neg_factor
+                e.alpha_neg += conf * (0.3 + 0.5 * (1.0 - prob))
                 e.total_neg += 1  # ARCHIVE
+                if was_dormant:
+                    self._record_ttl_feedback(e, success=False)
             else:
                 # neutre: micro stabilisation côté "neg" pour éviter sur-confiance
-                e.beta_neg  += conf * 0.1
+                e.beta_neg  += conf * 0.1 * (0.5 + 0.5 * (1.0 - prob))
 
             e.uses += 1
             e.last_ts = now
@@ -267,14 +499,17 @@ class AdaptiveLexicon:
             # per-user
             if user_id:
                 u = e.per_user.setdefault(user_id, {"pos":1.0,"neg":1.0,"uses":0,"last":now})
-                if r >= 0.6: u["pos"] += conf
-                elif r <= 0.4: u["neg"] += conf
+                if r >= 0.6:
+                    u["pos"] += conf * pos_factor
+                elif r <= 0.4:
+                    u["neg"] += conf * neg_factor
                 u["uses"] += 1; u["last"] = now
 
             # ARCHIVE : totaux & timestamps sans decay
             a.uses += 1
             a.last_seen_ts = now
-            if a.first_seen_ts <= 0: a.first_seen_ts = now
+            if a.first_seen_ts <= 0:
+                a.first_seen_ts = now
 
         # maj dormant flags (si longue inactivité sur d'autres entrées)
         self._refresh_dormant_flags()
