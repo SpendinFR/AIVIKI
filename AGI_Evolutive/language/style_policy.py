@@ -273,10 +273,14 @@ class StylePolicy:
 
         for param, model in self.adaptive_models.items():
             coeff = model.predict(features)
+            current_value = self.params.get(param, 0.5)
             delta = coeff * reward
-            target = self.params.get(param, 0.5) + delta
+            target = current_value + delta
             self._bounded_update(param, target, apply_decay=True)
-            model.update(features, reward)
+            applied_delta = self.params.get(param, 0.5) - current_value
+            if abs(reward) >= 1e-6:
+                target_coeff = applied_delta / reward
+                model.update(features, target_coeff)
 
         self.mode_bandit.update(self.current_mode, reward)
         self.ttl_bandit.update(str(self.current_ttl), reward)
