@@ -755,6 +755,89 @@ class EvolutionManager:
         _safe_write_json(self.paths["dashboard"], dash)
         return dash
 
+    def record_feedback_event(
+        self,
+        source: str,
+        *,
+        label: str,
+        success: Optional[bool],
+        confidence: float,
+        heuristic: Optional[str] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Archive les signaux de feedback textuel pour ajuster les habitudes."""
+
+        with self._state_lock:
+            registry = self.state.setdefault("feedback_events", {})
+            entry = registry.setdefault(
+                source,
+                {
+                    "total": 0,
+                    "success": 0,
+                    "failure": 0,
+                    "pending": 0,
+                    "labels": {},
+                    "heuristics": {},
+                    "confidence_history": [],
+                    "last": {},
+                },
+            )
+
+            entry["total"] = int(entry.get("total", 0)) + 1
+            if success is True:
+                entry["success"] = int(entry.get("success", 0)) + 1
+            elif success is False:
+                entry["failure"] = int(entry.get("failure", 0)) + 1
+            else:
+                entry["pending"] = int(entry.get("pending", 0)) + 1
+
+            conf_hist = list(entry.get("confidence_history", []))
+            conf_hist.append(float(confidence))
+            if len(conf_hist) > 200:
+                conf_hist = conf_hist[-200:]
+            entry["confidence_history"] = conf_hist
+
+            labels_map = entry.setdefault("labels", {})
+            label_stats = labels_map.setdefault(
+                label,
+                {"observations": 0, "success": 0, "failure": 0, "pending": 0},
+            )
+            label_stats["observations"] = int(label_stats.get("observations", 0)) + 1
+            if success is True:
+                label_stats["success"] = int(label_stats.get("success", 0)) + 1
+            elif success is False:
+                label_stats["failure"] = int(label_stats.get("failure", 0)) + 1
+            else:
+                label_stats["pending"] = int(label_stats.get("pending", 0)) + 1
+
+            if heuristic:
+                heuristics_map = entry.setdefault("heuristics", {})
+                heur_stats = heuristics_map.setdefault(
+                    heuristic,
+                    {"observations": 0, "success": 0, "failure": 0, "pending": 0},
+                )
+                heur_stats["observations"] = int(heur_stats.get("observations", 0)) + 1
+                if success is True:
+                    heur_stats["success"] = int(heur_stats.get("success", 0)) + 1
+                elif success is False:
+                    heur_stats["failure"] = int(heur_stats.get("failure", 0)) + 1
+                else:
+                    heur_stats["pending"] = int(heur_stats.get("pending", 0)) + 1
+
+            entry["last"] = {
+                "ts": _now(),
+                "label": label,
+                "success": success,
+                "confidence": float(confidence),
+                "heuristic": heuristic,
+                "payload": payload or {},
+            }
+
+            observed = max(1, label_stats["success"] + label_stats["failure"])
+            self.habits_strength[f"{source}::{label}"] = label_stats["success"] / observed
+
+            _safe_write_json(self.paths["state"], self.state)
+
     # ---------- legacy compatibility helpers ----------
     def log_cycle(
         self,
