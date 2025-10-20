@@ -471,12 +471,29 @@ class SocialCritic:
             return None
 
     # ----------- apprentissage pondéré & dérive ----------
+    def _normalize_ctx_value(self, value: Any) -> Any:
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, (list, tuple, set)):
+            return tuple(self._normalize_ctx_value(v) for v in value)
+        if isinstance(value, dict):
+            return tuple(
+                sorted(
+                    (self._normalize_ctx_value(k), self._normalize_ctx_value(v))
+                    for k, v in value.items()
+                )
+            )
+        return str(value)
+
     def _context_key(self, decision_trace: Dict[str, Any], post_ctx: Dict[str, Any]) -> Tuple[Any, ...]:
         persona = (decision_trace or {}).get("persona_id") or getattr(self.arch, "persona_id", None)
         channel = (decision_trace or {}).get("channel") or getattr(self.arch, "channel", None)
         tactic = (decision_trace or {}).get("selected_tactic")
         user_segment = post_ctx.get("user_segment") if isinstance(post_ctx, dict) else None
-        return (persona, channel, tactic, user_segment)
+        return tuple(
+            self._normalize_ctx_value(val)
+            for val in (persona, channel, tactic, user_segment)
+        )
 
     def _learn_from_outcome(self, outcome: Optional[Dict[str, Any]]) -> None:
         if not outcome:
