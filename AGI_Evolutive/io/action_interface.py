@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import random
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from AGI_Evolutive.beliefs.graph import Evidence
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
@@ -27,6 +29,181 @@ class Action:
     status: str = "queued"
     result: Optional[Dict[str, Any]] = None
     context: Dict[str, Any] = field(default_factory=dict)
+    meta: Dict[str, Any] = field(default_factory=dict)
+
+
+class DiscreteThompsonSampling:
+    """Simple Thompson Sampling helper on a discrete candidate set."""
+
+    def __init__(self, options: Sequence[Any]) -> None:
+        if not options:
+            raise ValueError("options must not be empty")
+        self._options: Tuple[Any, ...] = tuple(options)
+        self._success: Dict[Any, float] = {opt: 1.0 for opt in self._options}
+        self._failure: Dict[Any, float] = {opt: 1.0 for opt in self._options}
+
+    def select(self) -> Any:
+        best_opt = self._options[0]
+        best_score = -1.0
+        for opt in self._options:
+            score = random.betavariate(self._success[opt], self._failure[opt])
+            if score > best_score:
+                best_opt = opt
+                best_score = score
+        return best_opt
+
+    def update(self, option: Any, reward: float) -> None:
+        if option not in self._success:
+            return
+        reward = max(-1.0, min(1.0, float(reward)))
+        prob = 0.5 + 0.5 * reward
+        self._success[option] += prob
+        self._failure[option] += 1.0 - prob
+
+
+class AdaptiveEMA:
+    """Adaptive exponential moving average controlled by Thompson Sampling."""
+
+    def __init__(self, betas: Sequence[float]) -> None:
+        candidates = [float(b) for b in betas if 0.0 < float(b) < 1.0]
+        if not candidates:
+            raise ValueError("AdaptiveEMA requires betas in (0,1)")
+        self.selector = DiscreteThompsonSampling(tuple(candidates))
+        self.value: float = 0.5
+
+    def step(self, observation: float, reward: float) -> Tuple[float, float, float]:
+        obs = max(0.0, min(1.0, observation))
+        beta = float(self.selector.select())
+        updated = beta * self.value + (1.0 - beta) * obs
+        drift = updated - self.value
+        self.value = updated
+        self.selector.update(beta, reward)
+        return beta, self.value, drift
+
+
+@dataclass
+class ActionStats:
+    ema_selector: AdaptiveEMA
+    ema: float = 0.5
+    weight_count: float = 0.0
+    last_feedback_at: float = field(default_factory=_now)
+    last_enqueue_at: float = field(default_factory=_now)
+    last_reward: float = 0.0
+    last_beta: float = 0.5
+    drift: float = 0.0
+    last_drift_log_at: float = 0.0
+
+    def touch_enqueue(self) -> None:
+        self.last_enqueue_at = _now()
+
+    def update(self, reward: float) -> Dict[str, float]:
+        scaled = max(0.0, min(1.0, 0.5 + 0.5 * reward))
+        beta, ema, drift = self.ema_selector.step(scaled, reward)
+        self.ema = ema
+        self.weight_count = self.weight_count * 0.97 + 1.0
+        now = _now()
+        age = now - self.last_feedback_at
+        self.last_feedback_at = now
+        self.last_reward = reward
+        self.last_beta = beta
+        self.drift = drift
+        return {"beta": beta, "drift": drift, "age": age, "ema": ema}
+
+    def recency(self, now: float, horizon: float) -> float:
+        age = max(0.0, now - self.last_feedback_at)
+        if horizon <= 0:
+            return 0.0
+        return max(0.0, min(1.0, age / horizon))
+
+    def drift_feature(self) -> float:
+        return max(0.0, min(1.0, abs(self.drift) * 4.0))
+
+
+class PriorityLearner:
+    """Online GLM-style learner to adapt action priorities."""
+
+    def __init__(self) -> None:
+        self.feature_count = 5
+        self.weights: List[float] = [0.0] * (self.feature_count + 1)
+        self.lr = 0.08
+        self.max_step = 0.05
+        self.weight_clamp = 4.0
+        self.recency_horizon = 120.0
+        self.mix_options: Tuple[Tuple[float, float, float], ...] = (
+            (0.60, 0.30, 0.10),
+            (0.45, 0.45, 0.10),
+            (0.35, 0.55, 0.10),
+            (0.50, 0.25, 0.25),
+        )
+        self.mix_selector = DiscreteThompsonSampling(self.mix_options)
+
+    def _sigmoid(self, value: float) -> float:
+        return 1.0 / (1.0 + math.exp(-value))
+
+    def predict(self, features: Sequence[float]) -> float:
+        z = self.weights[0]
+        for idx, feature in enumerate(features):
+            z += self.weights[idx + 1] * feature
+        return self._sigmoid(z)
+
+    def compute_priority(
+        self,
+        base_priority: float,
+        success_score: float,
+        context_signal: float,
+        recency: float,
+        drift: float,
+    ) -> Dict[str, Any]:
+        features = [
+            max(0.0, min(1.0, base_priority)),
+            max(0.0, min(1.0, success_score)),
+            max(0.0, min(1.0, context_signal)),
+            max(0.0, min(1.0, recency)),
+            max(0.0, min(1.0, drift)),
+        ]
+        learned = self.predict(features)
+        mix = self.mix_selector.select()
+        base_w, learned_w, context_w = mix
+        residual = max(0.0, 1.0 - (base_w + learned_w + context_w))
+        priority = (
+            base_w * features[0]
+            + learned_w * learned
+            + context_w * features[2]
+            + residual * features[1]
+        )
+        priority = max(0.0, min(1.0, priority))
+        return {
+            "priority": priority,
+            "features": features,
+            "mix": mix,
+            "learned": learned,
+            "context_signal": features[2],
+            "base_priority": features[0],
+        }
+
+    def update(self, info: Optional[Dict[str, Any]], reward: float) -> None:
+        if not info:
+            return
+        features = info.get("features")
+        if not features:
+            return
+        target = max(0.0, min(1.0, 0.5 + 0.5 * reward))
+        pred = self.predict(features)
+        error = pred - target
+        bias_step = max(-self.max_step, min(self.max_step, self.lr * error))
+        self.weights[0] -= bias_step
+        self.weights[0] = max(-self.weight_clamp, min(self.weight_clamp, self.weights[0]))
+        for idx, feature in enumerate(features):
+            grad = self.lr * error * feature
+            grad = max(-self.max_step, min(self.max_step, grad))
+            self.weights[idx + 1] -= grad
+            self.weights[idx + 1] = max(
+                -self.weight_clamp, min(self.weight_clamp, self.weights[idx + 1])
+            )
+        mix = info.get("mix")
+        if mix:
+            self.mix_selector.update(tuple(mix), reward)
+        self.lr = max(0.01, self.lr * 0.999)
 
 
 class ActionInterface:
@@ -58,6 +235,9 @@ class ActionInterface:
         self.cooldown_s = 0.0
         self._legacy_handlers: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {}
         self.current_mode: Optional[str] = None
+        self._priority_learner = PriorityLearner()
+        self._action_stats: Dict[str, ActionStats] = {}
+        self._last_emotion_modulators: Dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Binding helpers
@@ -103,13 +283,15 @@ class ActionInterface:
         priority: float = 0.5,
         context: Optional[Dict[str, Any]] = None,
     ) -> str:
+        base_priority = float(priority)
         act = Action(
             id=str(uuid.uuid4()),
             type=type_,
             payload=payload or {},
-            priority=float(priority),
+            priority=base_priority,
             context=context or {},
         )
+        self._prepare_priority_learning(act, base_priority, adjust_priority=True)
         self.queue.append(act)
         self.queue.sort(key=lambda a: a.priority, reverse=True)
         return act.id
@@ -120,26 +302,121 @@ class ActionInterface:
             if goals and hasattr(goals, "pop_next_action"):
                 nxt = goals.pop_next_action()
                 if nxt:
-                    return Action(
+                    act = Action(
                         id=str(uuid.uuid4()),
                         type=nxt.get("type", "reflect"),
                         payload=nxt.get("payload", {}),
                         priority=float(nxt.get("priority", 0.5)),
                         context={"source": "goals"},
                     )
+                    self._prepare_priority_learning(act, act.priority, adjust_priority=True)
+                    return act
             elif goals and hasattr(goals, "get_next_action"):
                 nxt = goals.get_next_action()
                 if nxt:
-                    return Action(
+                    act = Action(
                         id=str(uuid.uuid4()),
                         type=nxt.get("type", "reflect"),
                         payload=nxt.get("payload", {}),
                         priority=float(nxt.get("priority", 0.5)),
                         context={"source": "goals"},
                     )
+                    self._prepare_priority_learning(act, act.priority, adjust_priority=True)
+                    return act
         except Exception:
             pass
         return None
+
+    def _get_action_stats(self, action_type: str) -> ActionStats:
+        stats = self._action_stats.get(action_type)
+        if stats is None:
+            stats = ActionStats(AdaptiveEMA([0.2, 0.4, 0.6, 0.8]))
+            self._action_stats[action_type] = stats
+        return stats
+
+    def _prepare_priority_learning(
+        self, act: Action, base_priority: float, adjust_priority: bool = True
+    ) -> None:
+        stats = self._get_action_stats(act.type)
+        now = _now()
+        success_score = stats.ema_selector.value
+        context_signal = self._compute_context_signal(act, stats)
+        recency = stats.recency(now, self._priority_learner.recency_horizon)
+        drift = stats.drift_feature()
+        info = self._priority_learner.compute_priority(
+            base_priority,
+            success_score,
+            context_signal,
+            recency,
+            drift,
+        )
+        info.update(
+            {
+                "action_type": act.type,
+                "ema_value": stats.ema,
+                "selected_beta": stats.last_beta,
+                "timestamp": now,
+            }
+        )
+        act.meta["priority_model"] = info
+        if adjust_priority:
+            act.priority = info["priority"]
+        stats.touch_enqueue()
+
+    def _compute_context_signal(self, act: Action, stats: ActionStats) -> float:
+        urgency = float(act.context.get("urgency") or act.payload.get("urgency") or 0.0)
+        urgency = max(0.0, min(1.0, urgency))
+        novelty = float(act.context.get("novelty", 0.0))
+        novelty = max(0.0, min(1.0, novelty))
+        mods = self._last_emotion_modulators or {}
+        exploration = float(mods.get("exploration_rate", 0.15))
+        exploration = max(0.0, min(1.0, exploration))
+        curiosity = float(mods.get("curiosity_gain", 0.15))
+        curiosity = max(0.0, min(1.0, curiosity))
+        load = float(mods.get("cognitive_load", 0.0))
+        load = max(0.0, min(1.0, load))
+        base_context = 0.45 * urgency + 0.25 * exploration + 0.2 * curiosity + 0.1 * novelty
+        if act.context.get("auto"):
+            base_context *= 0.9
+        if stats.weight_count > 0.0:
+            base_context *= 1.0 + 0.05 * math.log1p(stats.weight_count)
+        if load > 0.0:
+            base_context *= max(0.2, 1.0 - 0.5 * load)
+        return max(0.0, min(1.0, base_context))
+
+    def _update_learning_signals(self, act: Action, reward: float) -> None:
+        stats = self._get_action_stats(act.type)
+        feedback = stats.update(reward)
+        if abs(feedback.get("drift", 0.0)) > 0.15:
+            self._record_drift_event(act.type, stats, feedback["drift"], feedback.get("beta", 0.0))
+        model_info = act.meta.get("priority_model")
+        if model_info is not None:
+            model_info["reward"] = reward
+        self._priority_learner.update(model_info, reward)
+
+    def _record_drift_event(
+        self, action_type: str, stats: ActionStats, drift: float, beta: float
+    ) -> None:
+        now = _now()
+        if now - stats.last_drift_log_at < 60.0:
+            return
+        stats.last_drift_log_at = now
+        memory = self.bound.get("memory")
+        payload = {
+            "kind": "action_drift",
+            "content": f"Drift détecté pour {action_type}",
+            "metadata": {
+                "drift": drift,
+                "beta": beta,
+                "ema": stats.ema,
+                "weight_count": stats.weight_count,
+            },
+        }
+        if memory and hasattr(memory, "add_memory"):
+            try:
+                memory.add_memory(payload)
+            except Exception:
+                pass
 
     def _maybe_offload(self, act, handler):
         """
@@ -189,9 +466,11 @@ class ActionInterface:
         emo = self.bound.get("emotions")
         if emo and hasattr(emo, "get_emotional_modulators"):
             mods = emo.get_emotional_modulators() or {}
+            self._last_emotion_modulators = dict(mods)
             exploration = float(mods.get("exploration_rate", 0.15))
             self.cooldown_s = max(0.0, 1.0 - 0.8 * exploration)
         else:
+            self._last_emotion_modulators = {}
             self.cooldown_s = 0.5
 
         if not self.queue:
@@ -229,6 +508,7 @@ class ActionInterface:
             priority=float(action.get("priority", 0.5)),
             context=context,
         )
+        self._prepare_priority_learning(act, act.priority, adjust_priority=False)
         previous_mode = self.current_mode
         try:
             if act.context.get("mode") is not None:
@@ -377,6 +657,7 @@ class ActionInterface:
             except Exception:
                 pass
 
+        self._update_learning_signals(act, reward)
         self._log(act, reward=reward)
         self._memorize_action(act, reward=reward)
 
