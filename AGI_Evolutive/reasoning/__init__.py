@@ -1,10 +1,69 @@
 """Reasoning system responsible for producing structured hypothesis/test plans."""
 
+import math
+import random
 import time
 from collections import deque
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .structures import Evidence, Hypothesis, Test, episode_record
+
+
+class OnlineLinear:
+    """Simple online generalized linear model with bounded weights."""
+
+    def __init__(
+        self,
+        feature_names: Sequence[str],
+        learning_rate: float = 0.15,
+        l2: float = 0.01,
+        weight_bounds: Sequence[float] = (0.0, 1.5),
+    ) -> None:
+        self.feature_names = list(feature_names)
+        self.learning_rate = learning_rate
+        self.l2 = l2
+        self.low, self.high = weight_bounds
+        self.weights: Dict[str, float] = {name: 0.0 for name in self.feature_names}
+
+    def predict(self, features: Dict[str, float]) -> float:
+        z = sum(self.weights.get(name, 0.0) * features.get(name, 0.0) for name in self.feature_names)
+        # Logistic squashing to keep score in [0, 1]
+        return 1.0 / (1.0 + math.exp(-z))
+
+    def update(self, features: Dict[str, float], target: float) -> float:
+        prediction = self.predict(features)
+        error = prediction - target
+        for name in self.feature_names:
+            value = features.get(name, 0.0)
+            grad = error * value + self.l2 * self.weights.get(name, 0.0)
+            self.weights[name] = float(min(self.high, max(self.low, self.weights.get(name, 0.0) - self.learning_rate * grad)))
+        return prediction
+
+
+class ThompsonSelector:
+    """Discrete Thompson Sampling helper for adaptively choosing options."""
+
+    def __init__(self, option_keys: Sequence[str]) -> None:
+        self.params: Dict[str, Dict[str, float]] = {
+            key: {"alpha": 1.0, "beta": 1.0} for key in option_keys
+        }
+
+    def draw(self, option: str) -> float:
+        params = self.params.setdefault(option, {"alpha": 1.0, "beta": 1.0})
+        return random.betavariate(params["alpha"], params["beta"])
+
+    def sample(self) -> str:
+        return max(
+            self.params,
+            key=lambda key: self.draw(key),
+        )
+
+    def update(self, option: str, reward: float) -> None:
+        if option not in self.params:
+            self.params[option] = {"alpha": 1.0, "beta": 1.0}
+        # Reward expected in [0, 1]
+        self.params[option]["alpha"] += max(0.0, min(1.0, reward))
+        self.params[option]["beta"] += max(0.0, min(1.0, 1.0 - reward))
 
 
 class ReasoningSystem:
@@ -14,6 +73,32 @@ class ReasoningSystem:
         self.arch = architecture
         self.memory = memory_system
         self.perception = perception_system
+
+        self._feature_names = [
+            "bias",
+            "prompt_len",
+            "contains_question",
+            "contains_test",
+            "strategy_match",
+            "hypothesis_prior",
+        ]
+        self.strategy_models: Dict[str, OnlineLinear] = {
+            strategy: OnlineLinear(self._feature_names)
+            for strategy in ("abduction", "deduction", "analogy")
+        }
+
+        self._test_templates = self._build_test_templates()
+        self.test_bandits: Dict[str, ThompsonSelector] = {}
+        for strategy in ("abduction", "deduction", "analogy"):
+            templates = list(self._test_templates.get("common", [])) + list(
+                self._test_templates.get(strategy, [])
+            )
+            option_keys = [self._test_option_key(strategy, t["key"]) for t in templates]
+            self.test_bandits[strategy] = ThompsonSelector(option_keys)
+
+        smoothing_keys = ["beta_0.2", "beta_0.4", "beta_0.6", "beta_0.8"]
+        self.preference_smoother = ThompsonSelector(smoothing_keys)
+        self._current_smoothing_key: Optional[str] = None
 
         self.reasoning_history: Dict[str, Any] = {
             "recent_inferences": deque(maxlen=200),
@@ -35,12 +120,13 @@ class ReasoningSystem:
         """Réalise un raisonnement structuré sur *prompt* et retourne un épisode détaillé."""
         t0 = time.time()
 
+        smoothing_value = self._select_smoothing_factor()
         strategy = self._pick_strategy(prompt)
         hypos = self._make_hypotheses(prompt, strategy=strategy)
-        scores = self._score_hypotheses(prompt, hypos, strategy)
+        scores, features_by_idx = self._score_hypotheses(prompt, hypos, strategy)
         chosen_idx = max(range(len(scores)), key=lambda i: scores[i]) if scores else 0
 
-        tests = self._propose_tests(prompt, strategy=strategy)
+        tests, chosen_test_keys = self._propose_tests(prompt, strategy=strategy)
         note = self._simulate_micro_inference(prompt, strategy, hypos[chosen_idx])
         evidence = Evidence(notes=note, confidence=min(0.55 + 0.15 * scores[chosen_idx], 0.95))
 
@@ -60,11 +146,14 @@ class ReasoningSystem:
         ep["reasoning_time"] = reasoning_time
         ep["complexity"] = complexity
         ep["strategy"] = strategy
+        ep["hypothesis_features"] = features_by_idx
+        ep["smoothing_value"] = smoothing_value
+        ep["test_keys"] = chosen_test_keys
 
         self._push_episode(ep)
 
         summary = self._make_readable_summary(strategy, hypos, chosen_idx, tests, evidence, final_conf)
-        self._learn(final_conf, strategy)
+        self._learn(final_conf, strategy, features_by_idx.get(chosen_idx, {}), smoothing_value, chosen_test_keys)
 
         try:
             if hasattr(self.arch, "logger") and self.arch.logger:
@@ -116,32 +205,56 @@ class ReasoningSystem:
             base.append(Hypothesis(content="tu veux comparer avec un cas passé", prior=0.48))
         return base
 
-    def _score_hypotheses(self, prompt: str, hypos: List[Hypothesis], strategy: str) -> List[float]:
+    def _score_hypotheses(
+        self, prompt: str, hypos: List[Hypothesis], strategy: str
+    ) -> Tuple[List[float], Dict[int, Dict[str, float]]]:
         lowered = prompt.lower()
         scores: List[float] = []
-        for hypo in hypos:
-            score = hypo.prior
+        features_by_idx: Dict[int, Dict[str, float]] = {}
+        for idx, hypo in enumerate(hypos):
+            features = self._extract_features(lowered, hypo, strategy)
+            model = self.strategy_models[strategy]
+            learned_score = model.predict(features)
+            # Blend learned score with prior for stability
+            score = 0.55 * learned_score + 0.45 * min(1.0, max(0.0, hypo.prior))
+            # Encourage hypotheses aligned with explicit cues
             if "test" in lowered and "test" in hypo.content:
-                score += 0.1
-            if strategy == "abduction" and "pourquoi" in lowered:
-                score += 0.1
+                score += 0.05
+            features_by_idx[idx] = features
             scores.append(min(1.0, score))
-        return scores
+        return scores, features_by_idx
 
-    def _propose_tests(self, prompt: str, strategy: str) -> List[Test]:
-        base_tests = [
-            Test(description="Formuler 2 hypothèses alternatives et demander validation", cost_est=0.3, expected_information_gain=0.55),
-            Test(description="Rechercher 2 exemples récents similaires", cost_est=0.2, expected_information_gain=0.45),
-        ]
-        if strategy == "deduction":
-            base_tests.append(
+    def _propose_tests(self, prompt: str, strategy: str) -> Tuple[List[Test], List[str]]:
+        lowered = prompt.lower()
+        templates = list(self._test_templates.get("common", [])) + list(self._test_templates.get(strategy, []))
+        bandit_key = strategy
+        if bandit_key not in self.test_bandits:
+            option_keys = [self._test_option_key(strategy, t["key"]) for t in templates]
+            self.test_bandits[bandit_key] = ThompsonSelector(option_keys)
+        bandit = self.test_bandits[bandit_key]
+
+        scored_templates = []
+        for template in templates:
+            option_key = self._test_option_key(strategy, template["key"])
+            posterior_sample = bandit.draw(option_key)
+            keyword_bonus = 0.05 if any(word in lowered for word in template.get("keywords", [])) else 0.0
+            score = posterior_sample + keyword_bonus + template.get("base_gain", 0.0)
+            scored_templates.append((score, template, option_key))
+
+        scored_templates.sort(key=lambda x: x[0], reverse=True)
+        selected = scored_templates[:3]
+        tests: List[Test] = []
+        chosen_keys: List[str] = []
+        for _, template, option_key in selected:
+            tests.append(
                 Test(
-                    description="Détailler un plan en 3 étapes avec vérification de chaque sous-résultat",
-                    cost_est=0.35,
-                    expected_information_gain=0.6,
+                    description=template["description"],
+                    cost_est=template["cost_est"],
+                    expected_information_gain=min(1.0, max(0.0, template.get("expected_information_gain", 0.5))),
                 )
             )
-        return base_tests
+            chosen_keys.append(option_key)
+        return tests, chosen_keys
 
     def _simulate_micro_inference(self, prompt: str, strategy: str, hypothesis: Hypothesis) -> str:
         if strategy == "abduction":
@@ -184,7 +297,144 @@ class ReasoningSystem:
         )
         history["stats"]["n_episodes"] += 1
 
-    def _learn(self, confidence: float, strategy: str) -> None:
+    def _learn(
+        self,
+        confidence: float,
+        strategy: str,
+        features: Dict[str, float],
+        smoothing_value: float,
+        test_keys: List[str],
+    ) -> None:
         self.reasoning_history["learning_trajectory"].append({"ts": time.time(), "confidence": confidence})
-        prefs = self.reasoning_history["stats"].setdefault("strategy_preferences", {})
-        prefs[strategy] = prefs.get(strategy, 0.0) * 0.8 + 0.2
+        stats = self.reasoning_history["stats"]
+        prefs = stats.setdefault("strategy_preferences", {})
+        for strat in self.strategy_models.keys():
+            prefs.setdefault(strat, 1.0 / len(self.strategy_models))
+
+        baseline = stats.get("avg_confidence", 0.5)
+
+        # Update strategy preference with adaptive smoothing
+        old_pref = prefs.get(strategy, baseline)
+        prefs[strategy] = (1.0 - smoothing_value) * old_pref + smoothing_value * confidence
+        for strat in prefs:
+            if strat != strategy:
+                prefs[strat] *= 1.0 - 0.05 * smoothing_value
+        self._normalize_preferences(prefs)
+
+        stats["avg_confidence"] = (1.0 - smoothing_value) * baseline + smoothing_value * confidence
+
+        if features:
+            model = self.strategy_models[strategy]
+            model.update(features, confidence)
+
+        smoothing_key = self._current_smoothing_key
+        if smoothing_key:
+            reward = 1.0 if confidence >= baseline else 0.0
+            self.preference_smoother.update(smoothing_key, reward)
+        self._current_smoothing_key = None
+
+        reward_conf = max(0.0, min(1.0, confidence))
+        bandit = self.test_bandits.get(strategy)
+        if bandit:
+            for key in test_keys:
+                bandit.update(key, reward_conf)
+
+    # ------------------- helpers adaptatifs -------------------
+    def _select_smoothing_factor(self) -> float:
+        key = self.preference_smoother.sample()
+        self._current_smoothing_key = key
+        try:
+            return float(key.split("_")[1])
+        except (IndexError, ValueError):
+            return 0.4
+
+    def _test_option_key(self, strategy: str, key: str) -> str:
+        return f"{strategy}:{key}"
+
+    def _build_test_templates(self) -> Dict[str, List[Dict[str, Any]]]:
+        return {
+            "common": [
+                {
+                    "key": "alt_hypotheses",
+                    "description": "Formuler 2 hypothèses alternatives et demander validation",
+                    "cost_est": 0.3,
+                    "expected_information_gain": 0.55,
+                    "base_gain": 0.25,
+                    "keywords": ["hypothèse", "pourquoi"],
+                },
+                {
+                    "key": "retrieve_examples",
+                    "description": "Rechercher 2 exemples récents similaires",
+                    "cost_est": 0.2,
+                    "expected_information_gain": 0.45,
+                    "base_gain": 0.2,
+                    "keywords": ["exemple", "analogie"],
+                },
+            ],
+            "abduction": [
+                {
+                    "key": "root_cause",
+                    "description": "Identifier la cause racine supposée et vérifier un symptôme clé",
+                    "cost_est": 0.28,
+                    "expected_information_gain": 0.6,
+                    "base_gain": 0.3,
+                    "keywords": ["cause", "pourquoi"],
+                }
+            ],
+            "deduction": [
+                {
+                    "key": "step_plan",
+                    "description": "Détailler un plan en 3 étapes avec vérification de chaque sous-résultat",
+                    "cost_est": 0.35,
+                    "expected_information_gain": 0.62,
+                    "base_gain": 0.35,
+                    "keywords": ["plan", "étapes", "comment"],
+                },
+                {
+                    "key": "assertion_check",
+                    "description": "Lister les hypothèses critiques et prévoir un test de non-régression",
+                    "cost_est": 0.32,
+                    "expected_information_gain": 0.58,
+                    "base_gain": 0.28,
+                    "keywords": ["test", "vérifier"],
+                },
+            ],
+            "analogy": [
+                {
+                    "key": "case_contrast",
+                    "description": "Comparer avec un cas passé et noter les écarts structurants",
+                    "cost_est": 0.25,
+                    "expected_information_gain": 0.52,
+                    "base_gain": 0.27,
+                    "keywords": ["analogie", "similaire"],
+                }
+            ],
+        }
+
+    def _extract_features(self, lowered_prompt: str, hypothesis: Hypothesis, strategy: str) -> Dict[str, float]:
+        return {
+            "bias": 1.0,
+            "prompt_len": min(1.0, len(lowered_prompt) / 400.0),
+            "contains_question": 1.0
+            if any(token in lowered_prompt for token in ["?", "pourquoi", "why", "comment", "how"])
+            else 0.0,
+            "contains_test": 1.0
+            if any(token in lowered_prompt for token in ["test", "verifier", "vérifier", "validation"])
+            else 0.0,
+            "strategy_match": 1.0 if self._strategy_keyword_match(lowered_prompt, strategy) else 0.0,
+            "hypothesis_prior": min(1.0, max(0.0, hypothesis.prior)),
+        }
+
+    def _strategy_keyword_match(self, lowered_prompt: str, strategy: str) -> bool:
+        keywords = {
+            "abduction": ["cause", "pourquoi", "root"],
+            "deduction": ["plan", "étapes", "steps", "procedure"],
+            "analogy": ["comme", "similaire", "analogie", "exemple"],
+        }
+        return any(word in lowered_prompt for word in keywords.get(strategy, []))
+
+    def _normalize_preferences(self, prefs: Dict[str, float]) -> None:
+        total = sum(prefs.values())
+        if total > 0:
+            for key in prefs:
+                prefs[key] = float(prefs[key] / total)
