@@ -4,10 +4,131 @@
 
 from __future__ import annotations
 
+import math
 import time
 import uuid
 from collections import deque
-from typing import Any, Deque, Dict, Iterable, List, Optional
+from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
+
+import numpy as np
+
+
+class _FeatureHasher:
+    """Encode context / metadata into a small dense feature vector."""
+
+    def __init__(self, dim: int = 24) -> None:
+        if dim < 8:
+            raise ValueError("Feature dimension trop faible pour l'encodage")
+        self.dim = dim
+
+    def encode(
+        self,
+        payload: Dict[str, Any],
+        *,
+        now: float,
+        novelty: float,
+        asked_recently: Dict[str, float],
+    ) -> np.ndarray:
+        meta = payload.get("meta") or {}
+        x = np.zeros(self.dim, dtype=float)
+
+        # Bias
+        x[0] = 1.0
+
+        severity = float(meta.get("severity", payload.get("score", 0.5)))
+        severity = max(0.0, min(1.0, severity))
+        x[1] = severity
+        x[2] = severity * severity
+
+        ts = float(meta.get("ts") or now)
+        elapsed = max(0.0, now - ts)
+        # Recence normalisée (<=1)
+        x[3] = math.exp(-elapsed / 3600.0)
+
+        # Cooldown déjà respecté ?
+        text = payload.get("text", "")
+        last_asked = asked_recently.get(text, 0.0)
+        delta = max(0.0, now - last_asked)
+        x[4] = math.exp(-delta / 1800.0)
+
+        # Mesure de nouveauté contrôlée
+        x[5] = max(0.0, min(1.5, novelty))
+
+        # Hachage léger sur type / source / topic
+        cursor = 6
+        cursor = self._hash_feature(cursor, x, "type", payload.get("type"))
+        cursor = self._hash_feature(cursor, x, "topic", meta.get("topic"))
+        cursor = self._hash_feature(cursor, x, "source", meta.get("source"))
+
+        # Flag sur présence d'une suggestion explicite
+        x[min(self.dim - 1, cursor)] = 1.0 if meta.get("explicit") else 0.0
+        return x
+
+    def _hash_feature(self, cursor: int, x: np.ndarray, name: str, value: Optional[str]) -> int:
+        if value:
+            bucket = 1 + (hash((name, value)) % (self.dim - cursor - 1))
+            idx = min(self.dim - 2, cursor + bucket)
+            x[idx] += 1.0
+            return idx
+        return cursor
+
+
+class LinearBanditScorer:
+    """Petit LinUCB avec dérive et forgetting factor."""
+
+    def __init__(
+        self,
+        dim: int,
+        *,
+        alpha: float = 0.4,
+        ridge: float = 1.0,
+        forget: float = 0.98,
+    ) -> None:
+        self.dim = dim
+        self.alpha = alpha
+        self.forget = forget
+        self.A = np.eye(dim, dtype=float) * ridge
+        self.b = np.zeros(dim, dtype=float)
+        self._last_theta = np.zeros(dim, dtype=float)
+        self._last_decay = time.time()
+
+    def _apply_decay(self) -> None:
+        if self.forget >= 1.0:
+            return
+        now = time.time()
+        if now - self._last_decay < 30.0:
+            return
+        # Décroissance exponentielle
+        factor = self.forget ** ((now - self._last_decay) / 30.0)
+        self.A *= factor
+        self.b *= factor
+        self._last_decay = now
+
+    def predict(self, features: np.ndarray, *, base: float) -> float:
+        self._apply_decay()
+        try:
+            theta = np.linalg.solve(self.A, self.b)
+            self._last_theta = theta
+        except np.linalg.LinAlgError:
+            theta = self._last_theta
+        mean = float(features @ theta)
+        try:
+            inv_A_x = np.linalg.solve(self.A, features)
+            ucb = math.sqrt(max(0.0, float(features @ inv_A_x)))
+        except np.linalg.LinAlgError:
+            ucb = 0.0
+        score = mean + self.alpha * ucb
+        # Mélange léger avec le score historique
+        return 0.6 * score + 0.4 * base
+
+    def update(self, features: np.ndarray, reward: float) -> None:
+        if features.shape != (self.dim,):
+            raise ValueError("Dimension de features inattendue")
+        self._apply_decay()
+        x = features.reshape(-1, 1)
+        self.A += x @ x.T
+        self.b += reward * features
+
 
 
 def _clip(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
@@ -50,10 +171,15 @@ class QuestionManager:
         self.uncertainty_log: Deque[Dict[str, Any]] = deque(maxlen=200)
         self.asked_recently: Dict[str, float] = {}
         self.question_history: Deque[Dict[str, Any]] = deque(maxlen=200)
+        self.feedback_history: Deque[Dict[str, Any]] = deque(maxlen=200)
         self.max_queue = 10
         self.last_generated = 0.0
         self.cooldown = 8.0  # secondes minimum entre générations
         self.reask_cooldown = 3600.0
+        self._feature_hasher = _FeatureHasher()
+        self._bandit = LinearBanditScorer(self._feature_hasher.dim)
+        self._novelty_tracker: Dict[str, int] = {}
+        self._asked_features: Dict[str, Tuple[float, Tuple[float, ...]]] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -69,12 +195,13 @@ class QuestionManager:
         if not text:
             return
 
+        now = time.time()
         entry = {
             "id": metadata.get("id") if metadata else str(uuid.uuid4()),
             "type": qtype,
             "text": text.strip(),
             "score": _clip(priority),
-            "meta": metadata or {},
+            "meta": {**(metadata or {}), "ts": now},
         }
         self._push_to_bank(entry)
         if entry["text"] and not any(entry["text"] == q.get("text") for q in self.pending_questions):
@@ -106,12 +233,19 @@ class QuestionManager:
             question_text = self._design_question(topic, metadata)
         if not question_text:
             return
+        payload_meta = {
+            **entry["metadata"],
+            "topic": topic,
+            "severity": entry["severity"],
+            "ts": ts,
+            "explicit": bool(explicit_question),
+        }
         payload = {
-            "id": entry["metadata"].get("id") if entry["metadata"] else str(uuid.uuid4()),
-            "type": entry["metadata"].get("type", topic),
+            "id": payload_meta.get("id") or str(uuid.uuid4()),
+            "type": payload_meta.get("type", topic),
             "text": question_text,
             "score": _clip(0.4 + 0.6 * entry["severity"]),
-            "meta": entry["metadata"],
+            "meta": payload_meta,
         }
         self._push_to_bank(payload)
 
@@ -153,9 +287,50 @@ class QuestionManager:
             if not text:
                 continue
             self.asked_recently[text] = now
-            self.question_history.append({"ts": now, "question": text, "meta": q.get("meta", {})})
+            meta = q.get("meta", {})
+            qid = q.get("id", str(uuid.uuid4()))
+            features = q.get("_features")
+            if features:
+                self._asked_features[qid] = (now, tuple(features))
+            self.question_history.append({"ts": now, "id": qid, "question": text, "meta": meta})
+            self._novelty_tracker[text] = self._novelty_tracker.get(text, 0) + 1
             out.append(q)
         return out
+
+    def register_outcome(
+        self,
+        question_id: str,
+        *,
+        success: bool,
+        latency: float = 0.0,
+        reward: Optional[float] = None,
+        notes: Optional[str] = None,
+    ) -> None:
+        """Met à jour le bandit avec un feedback utilisateur."""
+
+        if question_id not in self._asked_features:
+            return
+
+        asked_ts, features = self._asked_features.pop(question_id)
+        features_vec = np.asarray(features, dtype=float)
+        if reward is None:
+            base = 1.0 if success else -0.3
+            delay_penalty = min(0.6, max(0.0, latency) / 120.0)
+            freshness_penalty = min(0.3, max(0.0, time.time() - asked_ts - 30.0) / 600.0)
+            reward_value = base - delay_penalty - freshness_penalty
+        else:
+            reward_value = reward
+        self._bandit.update(features_vec, reward_value)
+        self.feedback_history.append(
+            {
+                "ts": time.time(),
+                "question_id": question_id,
+                "success": success,
+                "latency": latency,
+                "reward": reward_value,
+                "notes": notes or "",
+            }
+        )
 
     # ------------------------------------------------------------------
     # Internals
@@ -167,13 +342,19 @@ class QuestionManager:
         if intent_model and hasattr(intent_model, "pending_clarifications"):
             for item in intent_model.pending_clarifications():
                 question, priority, meta = item
+                base_meta = meta or {}
+                enriched_meta = {
+                    **base_meta,
+                    "ts": time.time(),
+                    "source": base_meta.get("source", "intent"),
+                }
                 self._push_to_bank(
                     {
-                        "id": meta.get("id", str(uuid.uuid4())),
-                        "type": meta.get("type", "intent_confirmation"),
+                        "id": enriched_meta.get("id", str(uuid.uuid4())),
+                        "type": enriched_meta.get("type", "intent_confirmation"),
                         "text": question,
                         "score": _clip(priority),
-                        "meta": meta,
+                        "meta": enriched_meta,
                     }
                 )
 
@@ -184,17 +365,26 @@ class QuestionManager:
         except Exception:
             awareness = 0.5
         if awareness > 0.45:
-            self.record_information_need("goal_focus", awareness, metadata={"source": "metacog"})
+            self.record_information_need(
+                "goal_focus",
+                awareness,
+                metadata={"source": "metacog", "type": "goal_focus", "topic": "goal_focus"},
+            )
 
     def _push_to_bank(self, payload: Dict[str, Any]) -> None:
         text = payload.get("text", "").strip()
         if not text:
             return
 
+        score, features = self._score_with_bandit(payload)
+        payload["score"] = score
+        payload["_features"] = tuple(features)
+
         existing = next((q for q in self.question_bank if q.get("text") == text), None)
         if existing:
             existing["score"] = max(existing.get("score", 0.0), payload.get("score", 0.0))
             existing.setdefault("meta", {}).update(payload.get("meta", {}))
+            existing["_features"] = payload["_features"]
             return
 
         self.question_bank.append(payload)
@@ -213,6 +403,21 @@ class QuestionManager:
             if candidate not in history:
                 return candidate
         return next(iter(library), None)
+
+    def _score_with_bandit(self, payload: Dict[str, Any]) -> Tuple[float, np.ndarray]:
+        base_score = _clip(payload.get("score", 0.5))
+        now = time.time()
+        text = payload.get("text", "")
+        novelty = 1.0 / (1 + self._novelty_tracker.get(text, 0))
+        features = self._feature_hasher.encode(
+            payload,
+            now=now,
+            novelty=novelty,
+            asked_recently=self.asked_recently,
+        )
+        learned_score = self._bandit.predict(features, base=base_score)
+        final_score = _clip(0.5 * base_score + 0.5 * learned_score)
+        return final_score, features
 
     def _purge_stale_bank(self, now: float) -> None:
         freshness_horizon = 8 * 3600  # 8h
