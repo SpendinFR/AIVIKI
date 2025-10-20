@@ -319,37 +319,55 @@ class OnlineTextNoveltyClassifier:
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
 
 class CalibrationMeter:
-    def __init__(self, path: str = "data/calibration.jsonl") -> None:
+    def __init__(self, path: str = "data/calibration.jsonl", max_history: Optional[int] = 2048) -> None:
         self.path = path
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         self._calibrator_cache: Dict[str, Dict[str, Any]] = {}
+        self.max_history = max_history if (isinstance(max_history, int) and max_history > 0) else None
 
     def _invalidate_cache(self) -> None:
         self._calibrator_cache.clear()
+
+    def _read_rows(self) -> List[Dict[str, Any]]:
+        if not os.path.exists(self.path):
+            return []
+        with open(self.path, "r", encoding="utf-8") as f:
+            return [json.loads(line) for line in f]
+
+    def _write_rows(self, rows: Iterable[Dict[str, Any]]) -> None:
+        with open(self.path, "w", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(json_sanitize(row), ensure_ascii=False) + "\n")
+
+    def _enforce_max_history(self) -> None:
+        if not self.max_history:
+            return
+        rows = self._read_rows()
+        if len(rows) <= self.max_history:
+            return
+        self._write_rows(rows[-self.max_history:])
 
     def log_prediction(self, domain: str, p: float, meta: Optional[Dict[str, Any]] = None) -> str:
         eid = str(uuid.uuid4())
         row = {"id": eid, "t": time.time(), "domain": domain, "p": float(p), "meta": meta or {}}
         with open(self.path, "a", encoding="utf-8") as f:
             f.write(json.dumps(json_sanitize(row), ensure_ascii=False) + "\n")
+        self._enforce_max_history()
         self._invalidate_cache()
         return eid
 
     def log_outcome(self, event_id: str, success: bool) -> None:
-        items = []
-        if os.path.exists(self.path):
-            items = [json.loads(l) for l in open(self.path, "r", encoding="utf-8")]
+        items = self._read_rows()
         for it in items:
             if it.get("id") == event_id:
-                it["success"] = bool(success); break
-        with open(self.path, "w", encoding="utf-8") as f:
-            for it in items:
-                f.write(json.dumps(json_sanitize(it), ensure_ascii=False) + "\n")
+                it["success"] = bool(success)
+                break
+        self._write_rows(items)
+        self._enforce_max_history()
         self._invalidate_cache()
 
     def _iter(self) -> List[Dict[str, Any]]:
-        if not os.path.exists(self.path): return []
-        return [json.loads(l) for l in open(self.path, "r", encoding="utf-8")]
+        return self._read_rows()
 
     def _recent_rows(self, domain: Optional[str] = None, limit: int = 512) -> List[Dict[str, Any]]:
         rows = [
