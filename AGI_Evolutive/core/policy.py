@@ -22,18 +22,44 @@ def rag_quality_signal(signals: dict) -> float:
     return max(0.0, min(1.0, 0.45*top1 + 0.35*mean + 0.15*div + 0.05*min(n/5.0,1.0)))
 
 
-class _SimpleBanditSelector:
-    """Minimal epsilon-greedy selector for bid arbitration."""
+class _ThompsonBidSelector:
+    """Beta–Bernoulli Thompson sampling over action success, folded into the same multi-criteria score."""
 
-    def __init__(self, epsilon: float = 0.15) -> None:
-        self.epsilon = max(0.0, min(1.0, float(epsilon)))
+    def __init__(self, prior_alpha: float = 1.0, prior_beta: float = 1.0):
+        self.alpha = defaultdict(lambda: prior_alpha)
+        self.beta = defaultdict(lambda: prior_beta)
+
+    def _key(self, b: Bid) -> str:
+        # clé stable par type d’action ; ajuste si tu veux plus fin
+        return f"{b.action_hint}"
+
+    def update(self, action_hint: str, success: bool) -> None:
+        a = self.alpha[action_hint]
+        b = self.beta[action_hint]
+        if success:
+            self.alpha[action_hint] = a + 1.0
+        else:
+            self.beta[action_hint] = b + 1.0
+
+    def _sample_p(self, k: str) -> float:
+        # échantillon Beta via deux Gamma
+        a = self.alpha[k]
+        b = self.beta[k]
+        x = random.gammavariate(a, 1.0)
+        y = random.gammavariate(b, 1.0)
+        return (x / (x + y)) if (x + y) else 0.5
 
     def choose(self, bids: List[Bid]) -> Bid:
         if not bids:
             raise ValueError("bids list cannot be empty")
-        if random.random() < self.epsilon:
-            return random.choice(bids)
-        return max(bids, key=lambda b: (b.expected_info_gain - 0.3 * b.cost, b.urgency, b.affect_value))
+
+        def score(b: Bid):
+            k = self._key(b)
+            p = self._sample_p(k)  # “propension au succès” estimée
+            base = (b.expected_info_gain - 0.3 * b.cost)
+            return (p * base, b.urgency, b.affect_value)
+
+        return max(bids, key=score)
 
 
 class PolicyEngine:
@@ -52,7 +78,7 @@ class PolicyEngine:
         self._last_confidence = 0.55
         self.last_decision: Optional[Dict[str, Any]] = None
         self._mechanisms = MechanismStore()
-        self._bandit_selector = _SimpleBanditSelector()
+        self._bandit_selector = _ThompsonBidSelector()
         self.self_model: Optional[Any] = None
 
         # Stats légères pour la policy (modes d'action)
@@ -104,6 +130,14 @@ class PolicyEngine:
             self._stats[k]["n"] += 1
             self._stats[k]["s"] += 1 if success else 0
             self._stats_save()
+        except Exception:
+            pass
+        # Propager le feedback au bandit des bids si l'action est connue
+        try:
+            if self.last_decision and isinstance(self._bandit_selector, _ThompsonBidSelector):
+                action = self.last_decision.get("decision")
+                if isinstance(action, str) and action:
+                    self._bandit_selector.update(action, bool(success))
         except Exception:
             pass
         mode = None
