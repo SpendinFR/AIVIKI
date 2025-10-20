@@ -106,7 +106,18 @@ class SemanticUnderstanding:
         try:
             arch = getattr(self, "arch", None) or getattr(self, "architecture", None) or getattr(getattr(self, "state", None), "architecture", None)
             if arch and getattr(arch, "rag", None):
+                rag_context = None
+                try:
+                    if hasattr(arch, "prepare_rag_query"):
+                        rag_context = arch.prepare_rag_query(text)
+                except Exception:
+                    rag_context = None
                 rag_out = arch.rag.ask(text)
+                try:
+                    if hasattr(arch, "observe_rag_outcome"):
+                        arch.observe_rag_outcome(text, rag_out, context=rag_context)
+                except Exception:
+                    pass
                 if rag_out.get("status") == "ok":
                     parts.append("Réponse appuyée par sources :")
                     parts.append(rag_out["answer"])

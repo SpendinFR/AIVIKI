@@ -1,5 +1,5 @@
 from dataclasses import dataclass, asdict
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple, Callable
 import math
 import re
 import time
@@ -210,6 +210,7 @@ class RewardEngine:
 
         model_state_path = os.path.join(self.persist_dir, "logs", "reward_model.json")
         self.classifier = OnlineCalibratedClassifier(state_path=model_state_path)
+        self._listeners: List[Callable[[RewardEvent], None]] = []
 
     def ingest_user_message(
         self,
@@ -226,7 +227,22 @@ class RewardEngine:
         self._apply_reward(ev)
         self._log_reward_event(ev)
         self._notify_metacognition(ev)
+        self._notify_listeners(ev)
         return ev
+
+    def register_listener(self, listener: Callable[[RewardEvent], None]) -> None:
+        if not callable(listener):
+            return
+        self._listeners.append(listener)
+
+    def _notify_listeners(self, event: RewardEvent) -> None:
+        if not self._listeners:
+            return
+        for listener in list(self._listeners):
+            try:
+                listener(event)
+            except Exception:
+                continue
 
     def _analyze_feedback(
         self, user_id: str, text: str, context: Dict[str, Any], channel: str

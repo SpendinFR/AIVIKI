@@ -910,7 +910,13 @@ class EmotionEngine:
                 except Exception: pass
 
         # **Compat 3**: Global activation bump explicite
-        if arch is not None and hasattr(arch, "global_activation"):
+        if arch is not None and hasattr(arch, "bump_global_activation"):
+            if not mods.get("_activation_handled"):
+                try:
+                    arch.bump_global_activation(float(mods.get("activation_delta", 0.0)))
+                except Exception:
+                    pass
+        elif arch is not None and hasattr(arch, "global_activation"):
             try:
                 ga = float(getattr(arch, "global_activation", 0.5))
                 ga = clip(ga + float(mods.get("activation_delta", 0.0)), 0.0, 1.0)
