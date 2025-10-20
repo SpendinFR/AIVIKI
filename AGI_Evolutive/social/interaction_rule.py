@@ -221,7 +221,13 @@ class EffectPosterior:
     def _select_decay(self):
         # Thompson discret simplifié → choisir la valeur à espérance max.
         best_decay = self.decay
-        best_score = -1.0
+        current = self.decay_posteriors.get(self.decay)
+        if current:
+            a_cur, b_cur = current
+            denom = a_cur + b_cur
+            best_score = a_cur / denom if denom > 0 else 0.5
+        else:
+            best_score = -1.0
         for decay_value, (a, b) in self.decay_posteriors.items():
             denom = a + b
             score = a / denom if denom > 0 else 0.5

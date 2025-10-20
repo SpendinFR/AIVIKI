@@ -20,7 +20,7 @@ from __future__ import annotations
 import math
 import time
 import random
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -58,7 +58,11 @@ class DiscreteThompsonSampler:
             tmp = [(str(k), float(v)) for k, v in choices.items()]
         else:
             for idx, value in enumerate(choices):
-                if isinstance(value, tuple) and len(value) == 2:
+                if (
+                    isinstance(value, Sequence)
+                    and not isinstance(value, (str, bytes))
+                    and len(value) == 2
+                ):
                     key, val = value
                 else:
                     key, val = str(idx), float(value)  # type: ignore[arg-type]
