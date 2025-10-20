@@ -1,9 +1,9 @@
 # Gestionnaire de jobs complet (priorités, deux files, budgets, annulation,
 # idempotence, progrès, persistance JSONL, drain des complétions côté thread principal).
 from __future__ import annotations
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional, List, Deque, Tuple
-import time, threading, heapq, os, json, uuid, traceback, collections
+import time, threading, heapq, os, json, uuid, traceback, collections, math, random
 
 
 def _now() -> float:
@@ -41,6 +41,10 @@ class Job:
     result: Any = None
     error: Optional[str] = None
     trace: Optional[str] = None
+    base_priority: float = 0.0
+    predicted_priority: float = 0.0
+    context_features: Dict[str, float] = field(default_factory=dict, repr=False)
+    metrics: Dict[str, Any] = field(default_factory=dict, repr=False)
 
 
 class JobContext:
@@ -55,6 +59,70 @@ class JobContext:
 
     def cancelled(self) -> bool:
         return self._jm._is_cancelled(self._job_id)
+
+
+class _OnlinePriorityModel:
+    """Petit modèle logistique online pour ajuster les priorités."""
+
+    def __init__(
+        self,
+        lr: float = 0.2,
+        l2: float = 1e-4,
+        min_weight: float = 0.1,
+        max_weight: float = 0.6,
+        exploration: float = 0.05,
+    ):
+        self.lr = lr
+        self.l2 = l2
+        self.min_weight = min_weight
+        self.max_weight = max_weight
+        self.exploration = exploration
+        self.weights: Dict[str, float] = collections.defaultdict(float)
+        self._updates = 0
+
+    def _iter_features(self, feats: Dict[str, float]):
+        for key, value in feats.items():
+            try:
+                v = float(value)
+            except Exception:
+                continue
+            if math.isnan(v) or math.isinf(v):
+                continue
+            yield key, v
+        yield "__bias__", 1.0
+
+    def _linear_sum(self, feats: Dict[str, float]) -> float:
+        return sum(self.weights[key] * value for key, value in self._iter_features(feats))
+
+    def predict(self, feats: Dict[str, float]) -> float:
+        z = self._linear_sum(feats)
+        if z >= 30:
+            return 1.0
+        if z <= -30:
+            return 0.0
+        return 1.0 / (1.0 + math.exp(-z))
+
+    def update(self, feats: Dict[str, float], reward: float) -> float:
+        reward = max(0.0, min(1.0, float(reward)))
+        pred = self.predict(feats)
+        error = pred - reward
+        for key, value in self._iter_features(feats):
+            grad = error * value + self.l2 * self.weights[key]
+            self.weights[key] -= self.lr * grad
+        self._updates += 1
+        return pred
+
+    @property
+    def confidence(self) -> float:
+        return min(self.max_weight, self.min_weight + 0.02 * self._updates)
+
+    @property
+    def noise_scale(self) -> float:
+        return max(0.0, self.exploration / (1.0 + 0.05 * self._updates))
+
+    @property
+    def updates(self) -> int:
+        return self._updates
 
 
 class JobManager:
@@ -74,6 +142,8 @@ class JobManager:
         os.makedirs(os.path.dirname(self.paths["log"]), exist_ok=True)
 
         self._lock = threading.RLock()
+        self._model_lock = threading.RLock()
+        self._stats_lock = threading.RLock()
         self._seq = 0
         self._jobs: Dict[str, Job] = {}
         self._key_map: Dict[str, str] = {}  # key -> job_id (idempotence)
@@ -81,11 +151,20 @@ class JobManager:
         self._pq_inter: List[_PQItem] = []
         self._pq_back: List[_PQItem] = []
         self._completions: Deque[Dict[str, Any]] = collections.deque(maxlen=512)
+        self._priority_model = _OnlinePriorityModel()
 
         # budgets (ajuste si besoin)
         self.budgets = {
             "interactive": {"max_running": workers_interactive},
             "background": {"max_running": workers_background},
+        }
+        self._lane_capacity = {
+            "interactive": max(1, int(workers_interactive)),
+            "background": max(1, int(workers_background)),
+        }
+        self._lane_stats: Dict[str, Dict[str, Any]] = {
+            "interactive": {"count": 0},
+            "background": {"count": 0},
         }
         self._running_inter = 0
         self._running_back = 0
@@ -101,6 +180,53 @@ class JobManager:
             t = threading.Thread(target=self._worker_loop, args=("background",), daemon=True)
             t.start()
             self._workers.append(t)
+
+    def _current_focus_topic(self) -> Optional[str]:
+        arch = getattr(self, "arch", None)
+        if arch is None:
+            return None
+        return getattr(arch, "_current_topic", None) or getattr(arch, "current_topic", None)
+
+    def _build_context_features_locked(self, job: Job, base_priority: float) -> Dict[str, float]:
+        """Construit des features (suppose self._lock détenu)."""
+        features: Dict[str, float] = {
+            "base_priority": float(base_priority),
+            "queue_interactive": 1.0 if job.queue == "interactive" else 0.0,
+            "queue_background": 1.0 if job.queue == "background" else 0.0,
+            "priority_offset": float(base_priority) - 0.5,
+        }
+        features[f"kind={job.kind}"] = 1.0
+        running_inter = self._running_inter
+        running_back = self._running_back
+        pq_inter = len(self._pq_inter)
+        pq_back = len(self._pq_back)
+        cap_inter = max(1, self._lane_capacity["interactive"])
+        cap_back = max(1, self._lane_capacity["background"])
+        features["running_inter_norm"] = running_inter / cap_inter
+        features["running_back_norm"] = running_back / cap_back
+        features["queue_inter_norm"] = pq_inter / float(cap_inter * 4)
+        features["queue_back_norm"] = pq_back / float(cap_back * 4)
+        features["budget_inter_norm"] = self.budgets["interactive"]["max_running"] / cap_inter
+        features["budget_back_norm"] = self.budgets["background"]["max_running"] / cap_back
+        load_total = (running_inter + pq_inter + running_back + pq_back)
+        features["global_pressure"] = load_total / float(cap_inter + cap_back)
+        if job.timeout_s is not None:
+            features["timeout_norm"] = min(1.0, float(job.timeout_s) / 60.0)
+            features["has_timeout"] = 1.0
+        else:
+            features["has_timeout"] = 0.0
+        args_len = len(job.args or {})
+        features["args_size_norm"] = min(1.0, args_len / 8.0)
+        focus = self._current_focus_topic()
+        if focus:
+            features[f"focus={str(focus)[:48]}"] = 1.0
+        return features
+
+    @staticmethod
+    def _blend_priority(base_priority: float, model_pred: float, confidence: float, noise: float) -> float:
+        alpha = max(0.0, min(1.0, confidence))
+        blended = (1.0 - alpha) * float(base_priority) + alpha * float(model_pred) + float(noise)
+        return max(0.0, min(1.0, blended))
 
     # ------------------- API publique -------------------
     def submit(
@@ -137,6 +263,29 @@ class JobManager:
                 key=key,
                 timeout_s=timeout_s,
             )
+            job.base_priority = priority
+            job.metrics["base_priority"] = priority
+            context_features = self._build_context_features_locked(job, priority)
+            job.context_features = context_features
+            with self._model_lock:
+                model_pred = self._priority_model.predict(context_features)
+                confidence = self._priority_model.confidence
+                noise_scale = self._priority_model.noise_scale
+            noise = random.uniform(-noise_scale, noise_scale) if noise_scale > 0 else 0.0
+            adjusted_priority = self._blend_priority(priority, model_pred, confidence, noise)
+            job.predicted_priority = model_pred
+            job.priority = adjusted_priority
+            job.metrics.update(
+                {
+                    "model_prediction": model_pred,
+                    "confidence": confidence,
+                    "exploration_noise": noise,
+                    "adjusted_priority": adjusted_priority,
+                    "context_size": len(context_features),
+                }
+            )
+            if context_features:
+                job.metrics["context_preview"] = dict(list(context_features.items())[:8])
             self._jobs[jid] = job
             if key:
                 self._key_map[key] = jid
@@ -198,6 +347,105 @@ class JobManager:
             item = heapq.heappop(pq)
             return item.job_id
 
+    def _compute_reward(self, j: Job) -> Tuple[float, float]:
+        finished = j.finished_ts or _now()
+        started = j.started_ts or j.created_ts or finished
+        latency = max(0.0, finished - started)
+        success = 1.0 if j.status == "done" else 0.0
+        progress_bonus = max(0.0, min(1.0, j.progress)) * 0.2
+        ref_latency = 2.0 if j.queue == "interactive" else 10.0
+        latency_penalty = min(0.7, latency / max(0.1, ref_latency) * 0.7)
+        reward = success + progress_bonus - latency_penalty
+        if j.status == "error":
+            reward *= 0.5
+        if j.status == "cancelled":
+            reward *= 0.2
+        return max(0.0, min(1.0, reward)), latency
+
+    def _update_priority_model(self, job: Job, reward: float):
+        if not job.context_features:
+            return
+        with self._model_lock:
+            self._priority_model.update(job.context_features, reward)
+
+    def _lane_snapshot(self, lane: str) -> Tuple[int, int, int]:
+        with self._lock:
+            if lane == "interactive":
+                return (
+                    len(self._pq_inter),
+                    self._running_inter,
+                    self.budgets["interactive"]["max_running"],
+                )
+            return (
+                len(self._pq_back),
+                self._running_back,
+                self.budgets["background"]["max_running"],
+            )
+
+    @staticmethod
+    def _ema(previous: Optional[float], value: float, alpha: float) -> float:
+        if previous is None:
+            return value
+        return (1.0 - alpha) * previous + alpha * value
+
+    def _record_completion_metrics(self, job: Job, reward: float, latency: float):
+        lane = job.queue
+        stats = self._lane_stats.get(lane)
+        if stats is None:
+            return
+        ema_alpha = 0.2
+        queue_len, running, lane_budget = self._lane_snapshot(lane)
+        load = queue_len + running
+        with self._stats_lock:
+            stats["count"] = stats.get("count", 0) + 1
+            stats["ema_reward"] = self._ema(stats.get("ema_reward"), reward, ema_alpha)
+            stats["ema_latency"] = self._ema(stats.get("ema_latency"), latency, ema_alpha)
+            stats["ema_load"] = self._ema(stats.get("ema_load"), float(load), ema_alpha)
+            stats["ema_success"] = self._ema(stats.get("ema_success"), 1.0 if job.status == "done" else 0.0, ema_alpha)
+            stats["last_latency"] = latency
+            stats["last_reward"] = reward
+            stats["last_load"] = load
+            stats["last_status"] = job.status
+            job.metrics["lane_budget_before"] = lane_budget
+            self._maybe_adjust_budgets(lane, stats)
+            with self._lock:
+                job.metrics["lane_budget_after"] = self.budgets[lane]["max_running"]
+        job.metrics["lane_load_after"] = load
+
+    def _maybe_adjust_budgets(self, lane: str, stats: Dict[str, Any]):
+        now = _now()
+        last_adjust = stats.get("last_adjust_ts", 0.0)
+        if stats.get("count", 0) < 8:
+            return
+        if now - last_adjust < 5.0:
+            return
+        ema_reward = stats.get("ema_reward")
+        ema_load = stats.get("ema_load")
+        if ema_reward is None or ema_load is None:
+            stats["last_adjust_ts"] = now
+            return
+        with self._lock:
+            current = self.budgets[lane]["max_running"]
+        capacity = self._lane_capacity[lane]
+        target = current
+        if ema_load > (current * 1.2) and ema_reward >= 0.4 and current < capacity:
+            target = min(capacity, current + 1)
+        elif ema_reward < 0.2 and current > 1:
+            target = max(1, current - 1)
+        stats["last_adjust_ts"] = now
+        if target != current:
+            with self._lock:
+                self.budgets[lane]["max_running"] = target
+            self._log(
+                {
+                    "event": "budget_update",
+                    "lane": lane,
+                    "max_running": target,
+                    "ema_reward": ema_reward,
+                    "ema_load": ema_load,
+                }
+            )
+
     def _start_job(self, j: Job):
         j.status = "running"
         j.started_ts = _now()
@@ -217,10 +465,35 @@ class JobManager:
             self._running_inter = max(0, self._running_inter - 1)
         else:
             self._running_back = max(0, self._running_back - 1)
-        ev = {"event": j.status, "job": self._job_view(j)}
+        reward, latency = self._compute_reward(j)
+        success_flag = 1.0 if j.status == "done" else 0.0
+        j.metrics.update(
+            {
+                "reward": reward,
+                "latency_s": latency,
+                "success": success_flag,
+                "finished_ts": j.finished_ts,
+            }
+        )
+        event_payload = {
+            "event": j.status,
+            "job": self._job_view(j),
+            "reward": reward,
+            "latency": latency,
+            "priority": {
+                "base": j.base_priority,
+                "predicted": j.predicted_priority,
+                "adjusted": j.priority,
+            },
+            "metrics": dict(j.metrics),
+        }
+        if error:
+            event_payload["error"] = error
+        self._update_priority_model(j, reward)
+        self._record_completion_metrics(j, reward, latency)
         with self._lock:
-            self._completions.append(ev)
-        self._log(ev)
+            self._completions.append(event_payload)
+        self._log(event_payload)
         self._persist_state()
 
     def _update_progress(self, job_id: str, p: float):
@@ -314,6 +587,8 @@ class JobManager:
                 pq_back = len(self._pq_back)
                 running_inter = self._running_inter
                 running_back = self._running_back
+                budget_inter = self.budgets["interactive"]["max_running"]
+                budget_back = self.budgets["background"]["max_running"]
 
             arch = getattr(self, "arch", None)
             focus_topic = None
@@ -336,6 +611,28 @@ class JobManager:
 
             view["current"]["loads"]["interactive"] = running_inter + pq_inter
             view["current"]["loads"]["background"] = running_back + pq_back
+            view["current"]["budgets"] = {
+                "interactive": budget_inter,
+                "background": budget_back,
+            }
+
+            with self._stats_lock:
+                lane_metrics = {
+                    lane: {
+                        "ema_reward": stats.get("ema_reward"),
+                        "ema_latency": stats.get("ema_latency"),
+                        "ema_load": stats.get("ema_load"),
+                        "count": stats.get("count", 0),
+                    }
+                    for lane, stats in self._lane_stats.items()
+                }
+            with self._model_lock:
+                lane_metrics["model"] = {
+                    "confidence": self._priority_model.confidence,
+                    "noise_scale": self._priority_model.noise_scale,
+                    "updates": self._priority_model.updates,
+                }
+            view["current"]["scheduler_metrics"] = lane_metrics
 
             completed = [
                 j
