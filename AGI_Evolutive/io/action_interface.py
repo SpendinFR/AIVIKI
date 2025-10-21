@@ -9,10 +9,21 @@ import random
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
+from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from AGI_Evolutive.beliefs.graph import Evidence
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+
+try:  # pragma: no cover - fallback exercised in tests when metacognition deps missing
+    from AGI_Evolutive.metacognition import CognitiveDomain as _CognitiveDomain
+except Exception:  # noqa: BLE001 - best-effort import with graceful degradation
+    class _FallbackCognitiveDomain(Enum):
+        REASONING = "reasoning"
+
+    CognitiveDomain = _FallbackCognitiveDomain
+else:
+    CognitiveDomain = _CognitiveDomain
 
 
 def _now() -> float:
@@ -228,6 +239,7 @@ class ActionInterface:
             "metacog": None,
             "emotions": None,
             "language": None,
+            "simulator": None,
             "jobs": None,
         }
 
@@ -250,6 +262,7 @@ class ActionInterface:
         metacog: Any = None,
         emotions: Any = None,
         language: Any = None,
+        simulator: Any = None,
         jobs: Any = None,
         perception: Any = None,
     ) -> None:
@@ -259,6 +272,10 @@ class ActionInterface:
             self.bound["jobs"] = jobs
         if perception is not None:
             self.bound["perception"] = perception
+        if simulator is None and arch is not None:
+            simulator = getattr(arch, "simulator", None)
+        if simulator is not None:
+            self.bound["simulator"] = simulator
         self.bound.update(
             {
                 "arch": arch,
@@ -567,6 +584,9 @@ class ActionInterface:
                 "reflect": self._h_reflect,
                 "learn_concept": self._h_learn_concept,
                 "search_memory": self._h_search_memory,
+                "communicate": self._h_communicate,
+                "log": self._h_log,
+                "plan_step": self._h_plan_step,
                 "update_belief": lambda act: self._h_update_belief(act.payload, act.context),
                 "assert_fact": lambda act: self._h_assert_fact(act.payload, act.context),
                 "link_entity": lambda act: self._h_link_entity(act.payload, act.context),
@@ -707,11 +727,30 @@ class ActionInterface:
         metacog = self.bound.get("metacog")
         if not (metacog and hasattr(metacog, "trigger_reflection")):
             return {"ok": False, "reason": "metacog_unavailable"}
+
         trigger = act.payload.get("trigger", "action_reflect")
-        domain = getattr(getattr(metacog, "CognitiveDomain", None), "REASONING", None)
+        domain_source = getattr(metacog, "CognitiveDomain", None)
+        domain = getattr(domain_source, "REASONING", None) if domain_source else None
+
+        if isinstance(domain, str):
+            domain = getattr(CognitiveDomain, domain, CognitiveDomain.REASONING)
+        if domain is None:
+            domain = CognitiveDomain.REASONING
+
         try:
-            ref = metacog.trigger_reflection(trigger=trigger, domain=domain, urgency=0.4, depth=2)
-            return {"ok": True, "reflection": {"duration": getattr(ref, "duration", None), "quality": getattr(ref, "quality_score", None)}}
+            ref = metacog.trigger_reflection(
+                trigger=trigger,
+                domain=domain,
+                urgency=0.4,
+                depth=2,
+            )
+            return {
+                "ok": True,
+                "reflection": {
+                    "duration": getattr(ref, "duration", None),
+                    "quality": getattr(ref, "quality_score", None),
+                },
+            }
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
@@ -981,15 +1020,76 @@ class ActionInterface:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    def _append_jsonl(self, filename: str, record: Dict[str, Any]) -> str:
+        path = os.path.join(self.output_dir, filename)
+        os.makedirs(self.output_dir, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(json_sanitize(record), ensure_ascii=False) + "\n")
+        return path
+
+    def _remember_simulation_fallback(
+        self,
+        reason: str,
+        query: Dict[str, Any],
+        error: Optional[str] = None,
+    ) -> None:
+        try:
+            record = {
+                "ts": time.time(),
+                "reason": reason,
+                "query": query,
+            }
+            if error is not None:
+                record["error"] = error
+            self._append_jsonl("simulation_fallbacks.jsonl", record)
+            memory = self.bound.get("memory") if hasattr(self, "bound") else None
+            if memory and hasattr(memory, "add_memory"):
+                memory.add_memory(
+                    {
+                        "kind": "simulation_fallback",
+                        "content": reason,
+                        "metadata": {"query": query, "error": error},
+                    }
+                )
+        except Exception:
+            pass
+
     def _h_simulate(self, act: Action) -> Dict[str, Any]:
         arch = self.bound.get("arch")
-        if not arch or not hasattr(arch, "simulator"):
-            return {"ok": False, "error": "simulator_unavailable"}
         query = dict(act.payload or {})
+        simulator = self.bound.get("simulator")
+        if simulator is None and arch is not None:
+            simulator = getattr(arch, "simulator", None)
+        if not simulator or not hasattr(simulator, "run"):
+            self._remember_simulation_fallback("simulator_unavailable", query)
+            return {
+                "ok": True,
+                "simulated": False,
+                "reason": "simulator_unavailable",
+                "supported": False,
+                "success": False,
+                "evidence": [],
+                "intervention": None,
+                "simulations": [],
+                "echo": query,
+            }
         try:
-            report = arch.simulator.run(query)
+            report = simulator.run(query)
         except Exception as exc:
-            return {"ok": False, "error": str(exc)}
+            message = str(exc)
+            self._remember_simulation_fallback("simulator_error", query, error=message)
+            return {
+                "ok": True,
+                "simulated": False,
+                "reason": "simulator_error",
+                "error": message,
+                "supported": False,
+                "success": False,
+                "evidence": [],
+                "intervention": None,
+                "simulations": [],
+                "echo": query,
+            }
         try:
             memory = self.bound.get("memory") if hasattr(self, "bound") else None
             if memory and hasattr(memory, "add_memory"):
@@ -1000,12 +1100,92 @@ class ActionInterface:
                 )
         except Exception:
             pass
+        supported_raw = getattr(report, "supported", None)
+        if supported_raw is None and isinstance(report, dict):
+            supported_raw = report.get("supported", True)
+        supported = bool(True if supported_raw is None else supported_raw)
+        evidence = getattr(report, "evidence", None)
+        if evidence is None and isinstance(report, dict):
+            evidence = report.get("evidence")
+        intervention = getattr(report, "intervention", None)
+        if intervention is None and isinstance(report, dict):
+            intervention = report.get("intervention")
+        simulations = getattr(report, "simulations", None)
+        if simulations is None and isinstance(report, dict):
+            simulations = report.get("simulations")
         return {
             "ok": True,
-            "supported": report.supported,
-            "evidence": report.evidence,
-            "intervention": report.intervention,
-            "simulations": report.simulations,
+            "supported": supported_raw if supported_raw is not None else True,
+            "success": supported,
+            "evidence": evidence or [],
+            "intervention": intervention,
+            "simulations": simulations or [],
+        }
+
+    def _h_communicate(self, act: Action) -> Dict[str, Any]:
+        result = self._h_message_user(act)
+        target = act.payload.get("target") if act.payload else None
+        if target and isinstance(result, dict):
+            result.setdefault("target", target)
+        return result
+
+    def _h_log(self, act: Action) -> Dict[str, Any]:
+        payload = dict(act.payload or {})
+        text = payload.get("text") or payload.get("message") or ""
+        text = str(text)
+        record = {
+            "ts": time.time(),
+            "text": text,
+            "payload": payload,
+        }
+        path = self._append_jsonl("log_entries.jsonl", record)
+        try:
+            memory = self.bound.get("memory") if hasattr(self, "bound") else None
+            if memory and hasattr(memory, "add_memory"):
+                memory.add_memory(
+                    {
+                        "kind": "log_entry",
+                        "content": text,
+                        "metadata": {"source": "action_interface"},
+                    }
+                )
+        except Exception:
+            pass
+        return {"ok": True, "text": text, "path": path}
+
+    def _h_plan_step(self, act: Action) -> Dict[str, Any]:
+        payload = dict(act.payload or {})
+        description = (
+            payload.get("description")
+            or payload.get("desc")
+            or payload.get("text")
+            or ""
+        )
+        description = str(description)
+        record = {
+            "ts": time.time(),
+            "description": description,
+            "goal_id": payload.get("goal_id") or act.context.get("goal_id"),
+            "payload": payload,
+        }
+        path = self._append_jsonl("plan_steps.jsonl", record)
+        try:
+            memory = self.bound.get("memory") if hasattr(self, "bound") else None
+            if memory and hasattr(memory, "add_memory"):
+                memory.add_memory(
+                    {
+                        "kind": "plan_step_recorded",
+                        "content": description,
+                        "metadata": {"goal_id": record.get("goal_id")},
+                    }
+                )
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "description": description,
+            "goal_id": record.get("goal_id"),
+            "path": path,
         }
 
     def _h_simulate_dialogue(self, act: Action) -> Dict[str, Any]:

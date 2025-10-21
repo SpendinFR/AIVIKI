@@ -394,6 +394,7 @@ class CognitiveArchitecture:
             metacog=self.metacognition,
             emotions=self.emotions,
             language=self.language,
+            simulator=self.simulator,
             jobs=self.jobs,
             perception=self.perception_interface,
         )

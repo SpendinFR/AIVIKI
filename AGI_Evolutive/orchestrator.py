@@ -982,6 +982,8 @@ class Orchestrator:
                 bind_kwargs["emotions"] = getattr(self.arch, "emotions", None)
             if bound.get("language") is None:
                 bind_kwargs["language"] = getattr(self.arch, "language", None)
+            if bound.get("simulator") is None:
+                bind_kwargs["simulator"] = getattr(self.arch, "simulator", None)
             if bound.get("memory") is None and self._memory_store is not None:
                 bind_kwargs["memory"] = self._memory_store
             if bound.get("jobs") is None and job_manager is not None:
@@ -996,6 +998,7 @@ class Orchestrator:
                 metacog=getattr(self.arch, "metacognition", None),
                 emotions=getattr(self.arch, "emotions", None),
                 language=getattr(self.arch, "language", None),
+                simulator=getattr(self.arch, "simulator", None),
                 jobs=job_manager,
             )
         self._perception_interface = PerceptionInterface(self._memory_store)
@@ -1461,7 +1464,7 @@ class Orchestrator:
         else:
             action = {"type": "simulate", "desc": desc}
         res = self.io.action.execute(action)
-        self._planner.mark_action_done(picked, step["id"], success=bool(res.get("ok", True)))
+        self._planner.mark_action_done(picked, step["id"], result=res)
 
     def proposals_cycle(self):
         props = self._proposer.run_once_now()
