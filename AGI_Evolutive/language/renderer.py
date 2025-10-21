@@ -14,6 +14,7 @@ from AGI_Evolutive.core.structures.mai import MAI
 
 from .nlg import NLGContext, apply_mai_bids_to_nlg, paraphrase_light, join_tokens
 from .style_critic import StyleCritic
+from AGI_Evolutive.runtime.response import humanize_reasoning_block
 
 
 TOKEN_PATTERN = re.compile(r"[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’\-]{1,}")
@@ -370,7 +371,16 @@ class LanguageRenderer:
 
         self._decrease_cooldowns(cooldown)
         base_text = self._semantics_text(semantics)
-        base = base_text.strip() or "Je te réponds en tenant compte de notre historique."
+        normalized_text, diagnostics = humanize_reasoning_block(base_text)
+        effective_text = normalized_text or base_text
+        base = effective_text.strip() or "Je te réponds en tenant compte de notre historique."
+        if (
+            not dry_run
+            and diagnostics
+            and normalized_text
+            and normalized_text.strip() != base_text.strip()
+        ):
+            ctx.setdefault("reasoning_trace", diagnostics)
         arch = getattr(getattr(self.voice, "self_model", None), "arch", None)
         policy = getattr(arch, "policy", None) if arch else None
         state_snapshot: Dict[str, Any] = {}

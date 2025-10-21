@@ -1,6 +1,197 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+import re
+
+
+def _split_reasoning_bullets(text: str) -> List[str]:
+    if not text:
+        return []
+    items: List[str] = []
+    for chunk in text.split("•"):
+        cleaned = chunk.strip().strip("- ")
+        if cleaned:
+            items.append(cleaned)
+    return items
+
+
+def _split_reasoning_segments(text: str) -> List[str]:
+    segments: List[str] = []
+    for raw_line in (text or "").replace("\r\n", "\n").split("\n"):
+        raw_line = raw_line.strip()
+        if not raw_line:
+            continue
+        parts = re.split(r"\s*\|\s*", raw_line)
+        for part in parts:
+            piece = part.strip()
+            if not piece:
+                continue
+            if " - 🧩" in piece and not piece.strip().startswith("- 🧩"):
+                prefix, rest = piece.split("- 🧩", 1)
+                if prefix.strip():
+                    segments.append(prefix.strip())
+                segments.append("- 🧩" + rest.strip())
+            else:
+                segments.append(piece)
+
+    expanded: List[str] = []
+    for seg in segments:
+        seg = seg.strip()
+        if not seg:
+            continue
+        if " - 🧩" in seg and not seg.startswith("- 🧩"):
+            prefix, rest = seg.split("- 🧩", 1)
+            if prefix.strip():
+                expanded.append(prefix.strip())
+            expanded.append("- 🧩" + rest.strip())
+        else:
+            expanded.append(seg)
+
+    normalized: List[str] = []
+    for seg in expanded:
+        seg = seg.strip()
+        if not seg:
+            continue
+        if "•" in seg and not seg.startswith("•"):
+            if ":" in seg:
+                head, tail = seg.split(":", 1)
+                normalized.append(head.strip() + ":")
+                for item in _split_reasoning_bullets(tail):
+                    normalized.append("• " + item)
+            else:
+                for item in _split_reasoning_bullets(seg):
+                    normalized.append("• " + item)
+        else:
+            normalized.append(seg)
+    return normalized
+
+
+def humanize_reasoning_block(text: str) -> Tuple[str, Optional[Dict[str, Any]]]:
+    if not text:
+        return text, None
+
+    sentinel_tokens = ("Hypothèse prise", "Incertitude", "Ce que j'apprends", "🔧", "❓")
+    if not any(token in text for token in sentinel_tokens):
+        return text, None
+
+    lines = _split_reasoning_segments(text)
+    summary: Optional[str] = None
+    hypothesis: Optional[str] = None
+    incertitude: Optional[float] = None
+    next_test: Optional[str] = None
+    caution_notes: List[str] = []
+    needs: List[str] = []
+    learnings: List[str] = []
+    questions: List[str] = []
+    current_section: Optional[str] = None
+
+    for line in lines:
+        if not line:
+            continue
+        if line.startswith("Reçu:") or line.startswith("⏱️") or line.startswith("🎯"):
+            continue
+        if line.startswith("🧠"):
+            summary = line.lstrip("🧠").strip()
+            continue
+        if line.startswith("⚠️"):
+            caution_notes.append(line.lstrip("⚠️").strip())
+            current_section = None
+            continue
+        if "Hypothèse prise" in line:
+            try:
+                payload = line.split("Hypothèse prise", 1)[1]
+                if ":" in payload:
+                    payload = payload.split(":", 1)[1]
+                hypothesis = payload.strip()
+            except Exception:
+                hypothesis = line
+            current_section = None
+            continue
+        if "Incertitude" in line:
+            match = re.search(r"Incertitude\s*:\s*([0-9]+[,.]?[0-9]*)", line)
+            if match:
+                try:
+                    incertitude = float(match.group(1).replace(",", "."))
+                except ValueError:
+                    incertitude = None
+            current_section = None
+            continue
+        if line.startswith("🧪"):
+            try:
+                next_test = line.split(":", 1)[1].strip()
+            except IndexError:
+                next_test = line.lstrip("🧪").strip()
+            current_section = None
+            continue
+        if line.startswith("📗"):
+            current_section = "learn"
+            rest = line.split(":", 1)[1].strip() if ":" in line else ""
+            for item in _split_reasoning_bullets(rest):
+                learnings.append(item)
+            continue
+        if line.startswith("🔧"):
+            current_section = "need"
+            rest = line.split(":", 1)[1].strip() if ":" in line else ""
+            for item in _split_reasoning_bullets(rest):
+                needs.append(item)
+            continue
+        if line.startswith("•"):
+            item = line.lstrip("• ").strip()
+            if not item:
+                continue
+            if current_section == "need":
+                needs.append(item)
+            elif current_section == "learn":
+                learnings.append(item)
+            continue
+        if line.startswith("❓"):
+            question = line.lstrip("❓").strip()
+            if question:
+                questions.append(question)
+            current_section = None
+            continue
+        current_section = None
+
+    if not (summary or hypothesis or incertitude is not None or next_test or needs or questions or caution_notes):
+        return text, None
+
+    sentences: List[str] = []
+    if hypothesis:
+        sentences.append(f"Je pars de l'hypothèse que {hypothesis}.")
+    if summary:
+        cleaned_summary = summary.rstrip(".")
+        sentences.append(f"Synthèse : {cleaned_summary}.")
+    if incertitude is not None:
+        confidence = max(0.0, min(1.0, 1.0 - incertitude))
+        confidence_pct = int(round(confidence * 100))
+        sentences.append(f"Niveau de confiance approximatif : {confidence_pct}\xa0%.")
+    for note in caution_notes:
+        note_clean = note.rstrip(".")
+        sentences.append(f"Attention : {note_clean}.")
+    if next_test:
+        sentences.append(f"Prochain test envisagé : {next_test}.")
+    if needs:
+        sentences.append("Pour avancer, j'aurais besoin de : " + "; ".join(needs) + ".")
+    if questions:
+        formatted = []
+        for question in questions:
+            stripped = question.rstrip(" ?")
+            formatted.append(stripped + " ?")
+        sentences.append("Peux-tu préciser : " + " ; ".join(formatted))
+
+    normalized_text = " ".join(sentences).strip()
+    if not normalized_text:
+        return text, None
+
+    diagnostics = {
+        "summary": summary,
+        "hypothesis": hypothesis,
+        "incertitude": incertitude,
+        "needs": needs,
+        "questions": questions,
+    }
+    return normalized_text, diagnostics
 
 CONTRACT_KEYS = [
     "hypothese_choisie",
