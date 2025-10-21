@@ -173,6 +173,11 @@ def _from_state(obj, state: Dict[str, Any]):
     if not hasattr(obj, "__dict__"):
         return
     for k, v in state.items():
+        # Les valeurs marquées comme non sérialisables servent uniquement de trace dans le
+        # snapshot. Il ne faut pas écraser l'objet original (ex: moteurs, connexions)
+        # avec cette chaîne sentinelle lors du chargement.
+        if isinstance(v, str) and v.startswith("<non_picklable:") and v.endswith(">"):
+            continue
         try:
             setattr(obj, k, v)
         except Exception:
