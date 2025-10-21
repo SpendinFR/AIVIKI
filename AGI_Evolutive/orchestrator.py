@@ -945,9 +945,30 @@ class Orchestrator:
         self._reflection_loop = ReflectionLoop(self._meta, interval_sec=300)
         self._reflection_loop.start()
         existing_interface = getattr(self.arch, "action_interface", None)
+        bound: Dict[str, Any] = {}
+        existing_jobs = None
+        if isinstance(existing_interface, ActionInterface):
+            bound = getattr(existing_interface, "bound", {}) or {}
+            existing_jobs = bound.get("jobs")
+
+        if existing_jobs is None:
+            arch_jobs = getattr(self.arch, "jobs", None)
+            if isinstance(arch_jobs, JobManager):
+                existing_jobs = arch_jobs
+
         if isinstance(existing_interface, ActionInterface):
             self._action_interface = existing_interface
-            bound = getattr(self._action_interface, "bound", {}) or {}
+        else:
+            self._action_interface = ActionInterface(self._memory_store)
+
+        if existing_jobs is None:
+            job_manager = JobManager(self)
+        else:
+            job_manager = existing_jobs
+
+        self.job_manager = job_manager
+
+        if isinstance(existing_interface, ActionInterface):
             bind_kwargs = {}
             if bound.get("arch") is None:
                 bind_kwargs["arch"] = self.arch
@@ -963,10 +984,11 @@ class Orchestrator:
                 bind_kwargs["language"] = getattr(self.arch, "language", None)
             if bound.get("memory") is None and self._memory_store is not None:
                 bind_kwargs["memory"] = self._memory_store
+            if bound.get("jobs") is None and job_manager is not None:
+                bind_kwargs["jobs"] = job_manager
             if bind_kwargs:
                 self._action_interface.bind(**bind_kwargs)
         else:
-            self._action_interface = ActionInterface(self._memory_store)
             self._action_interface.bind(
                 arch=self.arch,
                 goals=getattr(self.arch, "goals", None),
@@ -974,12 +996,11 @@ class Orchestrator:
                 metacog=getattr(self.arch, "metacognition", None),
                 emotions=getattr(self.arch, "emotions", None),
                 language=getattr(self.arch, "language", None),
+                jobs=job_manager,
             )
         self._perception_interface = PerceptionInterface(self._memory_store)
         self.curiosity = CuriosityEngine(architecture=self.arch)
 
-        self.job_manager = JobManager(self)
-        self._action_interface.bind(jobs=self.job_manager)
         self.scheduler = LightScheduler()
         self._register_jobs()
 
