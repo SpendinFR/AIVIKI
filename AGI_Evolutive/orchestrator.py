@@ -1,7 +1,7 @@
 import math
+import os
 import random
 import re
-import resource
 import logging
 import statistics
 import time
@@ -10,6 +10,11 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 from collections import deque, defaultdict
 from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
+
+try:  # pragma: no cover - platform specific import
+    import resource as _resource
+except ImportError:  # pragma: no cover - Windows compatibility
+    _resource = None
 
 from AGI_Evolutive.cognition.context_inference import infer_where_and_apply
 from AGI_Evolutive.cognition.evolution_manager import EvolutionManager
@@ -68,6 +73,42 @@ _DEFAULT_SJ_CONF = {
     "surprise_importance": 0.70,
     "surprise_immediacy": 0.60,
 }
+
+
+def _get_process_memory_kb() -> float:
+    if _resource is not None:
+        try:
+            return float(_resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss)
+        except Exception:
+            return 0.0
+    if os.name == "nt":  # pragma: no cover - executed on Windows
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+                _fields_ = [
+                    ("cb", wintypes.DWORD),
+                    ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", wintypes.SIZE_T),
+                    ("WorkingSetSize", wintypes.SIZE_T),
+                    ("QuotaPeakPagedPoolUsage", wintypes.SIZE_T),
+                    ("QuotaPagedPoolUsage", wintypes.SIZE_T),
+                    ("QuotaPeakNonPagedPoolUsage", wintypes.SIZE_T),
+                    ("QuotaNonPagedPoolUsage", wintypes.SIZE_T),
+                    ("PagefileUsage", wintypes.SIZE_T),
+                    ("PeakPagefileUsage", wintypes.SIZE_T),
+                ]
+
+            counters = PROCESS_MEMORY_COUNTERS()
+            counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
+            get_process_memory_info = ctypes.windll.psapi.GetProcessMemoryInfo  # type: ignore[attr-defined]
+            get_current_process = ctypes.windll.kernel32.GetCurrentProcess
+            if get_process_memory_info(get_current_process(), ctypes.byref(counters), counters.cb):
+                return float(counters.WorkingSetSize) / 1024.0
+        except Exception:
+            return 0.0
+    return 0.0
 
 
 def _normalize_text(text: str) -> str:
@@ -1736,7 +1777,7 @@ class Orchestrator:
                 stage_metrics.append({"stage": stg.name, "skipped": True, "reason": skip_reason})
                 continue
             stage_start = time.time()
-            mem_before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            mem_before = _get_process_memory_kb()
             try:
                 if stg is Stage.PERCEIVE:
                     ctx["obs"] = self.io.perception.observe(trigger)
@@ -2427,7 +2468,7 @@ class Orchestrator:
                             pass
 
             finally:
-                mem_after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+                mem_after = _get_process_memory_kb()
                 duration_ms = 1000.0 * (time.time() - stage_start)
                 delta_mem_mb = max(0.0, (mem_after - mem_before) / 1024.0)
                 stage_metrics.append({
