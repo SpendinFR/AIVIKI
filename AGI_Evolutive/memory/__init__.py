@@ -8,7 +8,7 @@ import numpy as np
 import time
 from collections import deque
 from datetime import datetime, timedelta
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 from dataclasses import dataclass, field
 from enum import Enum
 import heapq
@@ -363,6 +363,176 @@ class MemorySystem:
             except Exception:
                 pass
         return item_id
+
+    def add_memory(
+        self,
+        entry_or_kind: Any,
+        content: Any = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        *,
+        tags: Optional[Iterable[str]] = None,
+        **extra_metadata: Any,
+    ) -> Dict[str, Any]:
+        """Interface unifiée pour stocker un souvenir dans le ``MemoryStore``.
+
+        L'API accepte soit un dictionnaire complet décrivant la mémoire,
+        soit un raccourci ``kind`` + ``content`` comme historiquement utilisé
+        par plusieurs modules.  Les métadonnées supplémentaires sont fusionnées
+        automatiquement.
+        """
+
+        if self.store is None:
+            raise RuntimeError("Aucun memory_store n'est configuré pour ce MemorySystem")
+
+        if isinstance(entry_or_kind, dict):
+            payload = dict(entry_or_kind)
+        else:
+            payload = {"kind": str(entry_or_kind) if entry_or_kind else "generic"}
+            if content is not None:
+                payload["content"] = content
+            if metadata is not None:
+                payload["metadata"] = dict(metadata)
+        if tags is not None:
+            payload.setdefault("tags", list(tags))
+        if extra_metadata:
+            payload.setdefault("metadata", {}).update(extra_metadata)
+        payload.setdefault("kind", "generic")
+        if not isinstance(payload.get("metadata"), dict):
+            payload["metadata"] = dict(payload.get("metadata") or {})
+
+        record = self.store.add_memory(payload)
+
+        try:
+            self.memory_metadata["total_memories"] = self.memory_metadata.get("total_memories", 0) + 1
+        except Exception:
+            pass
+
+        self._append_recent_snapshot(record)
+        self._notify_semantic_manager(record)
+
+        if self.manager is not None:
+            try:
+                self.manager.on_new_items()
+            except Exception:
+                pass
+
+        return record
+
+    def _append_recent_snapshot(self, record: Dict[str, Any]) -> None:
+        """Insère une vue légère d'un souvenir persistant dans le buffer récent."""
+
+        try:
+            ts = float(record.get("ts", record.get("timestamp", time.time())))
+        except Exception:
+            ts = time.time()
+        entry: Dict[str, Any] = {
+            "id": record.get("id"),
+            "kind": record.get("kind", "generic"),
+            "memory_type": record.get("kind", "generic"),
+            "content": record.get("content"),
+            "metadata": dict(record.get("metadata", {})) if isinstance(record.get("metadata"), dict) else {},
+            "ts": ts,
+            "t": ts,
+        }
+        tags_val = record.get("tags")
+        tags_list: List[str] = []
+        if isinstance(tags_val, (list, tuple, set)):
+            tags_list = [str(tag) for tag in tags_val]
+        elif isinstance(tags_val, str):
+            tags_list = [tags_val]
+        elif tags_val is not None:
+            tags_list = [str(tags_val)]
+        if tags_list:
+            entry["tags"] = tags_list
+        text_field = record.get("text")
+        if not text_field and isinstance(entry.get("content"), str):
+            text_field = entry["content"]
+        if isinstance(text_field, str) and text_field.strip():
+            entry["text"] = text_field
+        self._recent_memories.append(entry)
+
+    def find_recent(
+        self,
+        *,
+        kind: Optional[str] = None,
+        since_sec: Optional[float] = None,
+        where: Optional[Dict[str, Any]] = None,
+        limit: int = 20,
+    ) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
+        """Recherche rapide dans les souvenirs récents.
+
+        La méthode interroge d'abord le buffer circulaire des souvenirs
+        récents, puis – si besoin – tombe en repli sur le ``MemoryStore`` pour
+        compléter les résultats.  Elle renvoie une liste (ou un unique dict si
+        ``limit == 1``) triée par ordre antéchronologique.
+        """
+
+        horizon = None
+        if since_sec is not None:
+            try:
+                horizon = time.time() - float(since_sec)
+            except Exception:
+                horizon = None
+        filters = dict(where or {})
+        seen: set[str] = set()
+        matches: List[Dict[str, Any]] = []
+
+        def _match(entry: Dict[str, Any]) -> bool:
+            if kind and entry.get("kind") != kind:
+                return False
+            ts_value = entry.get("ts") or entry.get("timestamp") or entry.get("t")
+            if horizon is not None:
+                try:
+                    if float(ts_value or 0.0) < horizon:
+                        return False
+                except Exception:
+                    return False
+            meta = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else entry.get("meta", {})
+            for key, expected in filters.items():
+                val = None
+                if meta and isinstance(meta, dict):
+                    val = meta.get(key)
+                if val is None:
+                    val = entry.get(key)
+                if isinstance(expected, (set, list, tuple)):
+                    if val not in expected:
+                        return False
+                elif val != expected:
+                    return False
+            return True
+
+        def _append(entry: Dict[str, Any]):
+            if entry is None:
+                return
+            entry_id = str(entry.get("id")) if entry.get("id") else None
+            if entry_id and entry_id in seen:
+                return
+            snapshot = dict(entry)
+            if entry_id:
+                seen.add(entry_id)
+            matches.append(snapshot)
+
+        for recent in reversed(self._recent_memories):
+            if _match(recent):
+                _append(recent)
+                if limit and len(matches) >= limit:
+                    break
+
+        if limit and len(matches) < limit and self.store is not None:
+            try:
+                items = self.store.all_memories()
+                items.sort(key=lambda it: float(it.get("ts", it.get("timestamp", 0.0)) or 0.0), reverse=True)
+                for item in items:
+                    if _match(item):
+                        _append(item)
+                        if limit and len(matches) >= limit:
+                            break
+            except Exception:
+                pass
+
+        if limit == 1:
+            return matches[0] if matches else {}
+        return matches
 
     def tick(self) -> Dict[str, Any]:
         """Déclenche un cycle de maintenance pour la mémoire sémantique externe."""
