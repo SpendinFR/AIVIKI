@@ -392,6 +392,7 @@ class CognitiveArchitecture:
             emotions=self.emotions,
             language=self.language,
             jobs=self.jobs,
+            perception=self.perception_interface,
         )
         self.perception_interface.bind(
             arch=self,

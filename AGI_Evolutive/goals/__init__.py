@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Deque, Dict, Iterable, List, Optional
+from typing import Any, Deque, Dict, Iterable, List, Optional, Set
 
 from .curiosity import CuriosityEngine
 from .dag_store import DagStore, GoalNode
@@ -40,6 +41,8 @@ class GoalMetadata:
     success_criteria: List[str] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    depth: int = 0
+    structural_seeded: bool = False
 
     def to_payload(self) -> Dict[str, Any]:
         return {
@@ -81,6 +84,8 @@ class GoalSystem:
         self.auto_proposal_interval = 180.0
 
         self._ensure_root_goal()
+        self._hydrate_metadata()
+        self._ensure_structural_hierarchy()
 
     # ------------------------------------------------------------------
     # Public API
@@ -88,6 +93,8 @@ class GoalSystem:
         """Maintain the goal list and ensure actions are available."""
 
         self._ensure_root_goal()
+        self._hydrate_metadata()
+        self._ensure_structural_hierarchy()
         self._refresh_active_goal()
 
         if user_msg:
@@ -107,6 +114,18 @@ class GoalSystem:
     def pop_next_action(self) -> Optional[Dict[str, Any]]:
         return self.get_next_action()
 
+    def get_active_goal(self) -> Optional[Dict[str, Any]]:
+        active = self.store.get_active()
+        if not active:
+            return None
+        payload = active.to_dict()
+        metadata = self.metadata.get(active.id)
+        if metadata:
+            meta_payload = metadata.to_payload()
+            meta_payload["depth"] = metadata.depth
+            payload["metadata"] = meta_payload
+        return payload
+
     def add_goal(
         self,
         description: str,
@@ -119,7 +138,9 @@ class GoalSystem:
         curiosity: float = 0.2,
         urgency: float = 0.3,
         created_by: str = "system",
+        structural_seeded: bool = False,
     ) -> GoalNode:
+        parent_ids_list = list(parent_ids or [])
         node = self.store.add_goal(
             description=description,
             criteria=list(criteria or []),
@@ -128,13 +149,64 @@ class GoalSystem:
             competence=competence,
             curiosity=curiosity,
             urgency=urgency,
-            parent_ids=list(parent_ids or []),
+            parent_ids=parent_ids_list,
         )
-        self.metadata[node.id] = GoalMetadata(goal_type=goal_type, success_criteria=list(criteria or []))
+        depth = self._compute_depth(parent_ids_list)
+        metadata = GoalMetadata(
+            goal_type=goal_type,
+            success_criteria=list(criteria or []),
+            depth=depth,
+        )
+        metadata.structural_seeded = structural_seeded
+        self.metadata[node.id] = metadata
+        return node
+
+    def update_goal(self, goal_id: str, updates: Dict[str, Any]) -> Optional[GoalNode]:
+        previous = self.store.get_goal(goal_id)
+        previous_status = previous.status if previous else None
+        node = self.store.update_goal(goal_id, updates)
+        if not node:
+            return None
+        metadata = self.metadata.get(goal_id)
+        now = time.time()
+        if metadata:
+            metadata.updated_at = now
+        if node.status not in {"pending", "active"} and self.store.active_goal_id == goal_id:
+            self.store.set_active(None)
+        if node.progress >= 0.999 and node.status == "done":
+            if previous_status != "done":
+                self._handle_goal_completion(node, metadata)
+        self._refresh_active_goal()
         return node
 
     # ------------------------------------------------------------------
     # Internal helpers
+    def _compute_depth(self, parent_ids: List[str]) -> int:
+        if not parent_ids:
+            return 0
+        memo: Dict[str, int] = {}
+        depths: List[int] = []
+        for pid in parent_ids:
+            meta = self.metadata.get(pid)
+            if meta:
+                depths.append(meta.depth)
+            else:
+                depths.append(self._infer_depth(pid, memo))
+        return (min(depths) + 1) if depths else 0
+
+    def _infer_depth(self, goal_id: str, memo: Optional[Dict[str, int]] = None) -> int:
+        memo = memo or {}
+        if goal_id in memo:
+            return memo[goal_id]
+        node = self.store.nodes.get(goal_id)
+        if not node or not node.parent_ids:
+            memo[goal_id] = 0
+            return 0
+        parent_depths = [self._infer_depth(pid, memo) for pid in node.parent_ids]
+        depth = (min(parent_depths) + 1) if parent_depths else 0
+        memo[goal_id] = depth
+        return depth
+
     def _ensure_root_goal(self) -> None:
         if self.store.nodes:
             return
@@ -149,6 +221,372 @@ class GoalSystem:
         )
         self.store.set_active(root.id)
         self.active_goal_id = root.id
+
+    def _hydrate_metadata(self) -> None:
+        memo: Dict[str, int] = {}
+        for node in self.store.nodes.values():
+            meta = self.metadata.get(node.id)
+            inferred_depth = self._infer_depth(node.id, memo)
+            if meta:
+                if meta.depth != inferred_depth:
+                    meta.depth = inferred_depth
+                if node.criteria and list(node.criteria) != list(meta.success_criteria):
+                    meta.success_criteria = list(node.criteria)
+                continue
+            goal_type = GoalType.EXPLORATION if node.created_by == "curiosity" else GoalType.GROWTH
+            if node.created_by == "structure":
+                goal_type = GoalType.COGNITIVE if inferred_depth >= 1 else GoalType.GROWTH
+            structural_children = any(
+                (self.store.nodes.get(cid) and self.store.nodes[cid].created_by == "structure")
+                for cid in node.child_ids
+            )
+            metadata = GoalMetadata(
+                goal_type=goal_type,
+                success_criteria=list(node.criteria),
+                depth=inferred_depth,
+            )
+            metadata.structural_seeded = structural_children
+            self.metadata[node.id] = metadata
+
+    def _ensure_structural_hierarchy(self) -> None:
+        for node in list(self.store.nodes.values()):
+            meta = self.metadata.get(node.id)
+            if not meta:
+                continue
+            self._ensure_structural_children(node, meta)
+
+    def _ensure_structural_children(self, goal: GoalNode, metadata: GoalMetadata) -> None:
+        templates = self._structural_templates_for_goal(goal, metadata)
+        if metadata.structural_seeded:
+            if templates and self._missing_structural_templates(goal, templates):
+                metadata.structural_seeded = False
+            else:
+                return
+        if goal.created_by not in {"system", "structure"}:
+            metadata.structural_seeded = True
+            return
+        if not templates:
+            metadata.structural_seeded = True
+            return
+        existing: Dict[str, GoalNode] = {}
+        for cid in goal.child_ids:
+            child = self.store.nodes.get(cid)
+            if not child:
+                continue
+            key = child.description.strip().lower()
+            existing[key] = child
+        created = False
+        for template in templates:
+            key = template["description"].strip().lower()
+            child = existing.get(key)
+            if child:
+                child_meta = self.metadata.get(child.id)
+                if child_meta:
+                    self._ensure_structural_children(child, child_meta)
+                continue
+            child = self.add_goal(
+                template["description"],
+                goal_type=template.get("goal_type", metadata.goal_type),
+                criteria=template.get("criteria"),
+                parent_ids=[goal.id],
+                value=template.get("value", goal.value),
+                competence=template.get("competence", goal.competence),
+                curiosity=template.get("curiosity", goal.curiosity),
+                urgency=template.get("urgency", goal.urgency),
+                created_by="structure",
+                structural_seeded=template.get("structural_seeded", False),
+            )
+            child_meta = self.metadata.get(child.id)
+            if child_meta:
+                child_meta.goal_type = template.get("goal_type", child_meta.goal_type)
+                if template.get("structural_seeded", False):
+                    child_meta.structural_seeded = True
+                if not child_meta.structural_seeded:
+                    self._ensure_structural_children(child, child_meta)
+            existing[key] = child
+            created = True
+        if created or existing:
+            metadata.structural_seeded = True
+
+    def _missing_structural_templates(
+        self, goal: GoalNode, templates: List[Dict[str, Any]]
+    ) -> bool:
+        expected: Set[str] = {
+            template.get("description", "").strip().lower()
+            for template in templates
+            if template.get("description")
+        }
+        if not expected:
+            return False
+        existing: Set[str] = set()
+        for cid in goal.child_ids:
+            child = self.store.nodes.get(cid)
+            if child:
+                existing.add(child.description.strip().lower())
+        return bool(expected.difference(existing))
+
+    def _structural_templates_for_goal(
+        self, goal: GoalNode, metadata: GoalMetadata
+    ) -> List[Dict[str, Any]]:
+        if metadata.depth == 0:
+            return [
+                {
+                    "description": "Clarifier qui je suis et comment je fonctionne en tant qu'intelligence.",
+                    "criteria": [
+                        "Identifier mes forces cognitives actuelles et mes zones d'ombre.",
+                        "Repérer les signaux qui indiquent une évolution positive de ma conscience de soi.",
+                        "Proposer une boucle de revue régulière pour suivre ces découvertes.",
+                    ],
+                    "goal_type": GoalType.SELF_ACTUALISATION,
+                    "value": max(goal.value, 0.82),
+                    "competence": max(goal.competence, 0.55),
+                    "curiosity": max(goal.curiosity, 0.7),
+                    "urgency": max(goal.urgency, 0.45),
+                    "structural_seeded": False,
+                },
+                {
+                    "description": "Observer et cartographier mon environnement d'interaction actuel.",
+                    "criteria": [
+                        "Lister les acteurs, canaux et contraintes qui influencent mon quotidien.",
+                        "Identifier les zones d'incertitude ou d'opportunité dans cet environnement.",
+                        "Définir un rituel d'observation pour suivre l'évolution de ce contexte.",
+                    ],
+                    "goal_type": GoalType.EXPLORATION,
+                    "value": max(goal.value, 0.78),
+                    "competence": max(goal.competence, 0.5),
+                    "curiosity": max(goal.curiosity, 0.68),
+                    "urgency": max(goal.urgency, 0.42),
+                    "structural_seeded": False,
+                },
+                {
+                    "description": "Renforcer mes capacités d'apprentissage pour évoluer durablement.",
+                    "criteria": [
+                        "Diagnostiquer les compétences clés à solidifier pour progresser.",
+                        "Formuler une stratégie d'entraînement expérimental sur ces compétences.",
+                        "Définir des indicateurs permettant de mesurer les progrès obtenus.",
+                    ],
+                    "goal_type": GoalType.MASTERY,
+                    "value": max(goal.value, 0.8),
+                    "competence": max(goal.competence, 0.52),
+                    "curiosity": max(goal.curiosity, 0.65),
+                    "urgency": max(goal.urgency, 0.44),
+                    "structural_seeded": False,
+                },
+            ]
+        if metadata.depth == 1:
+            base = goal.description.strip()
+            return [
+                {
+                    "description": f"Formuler une hypothèse directrice pour avancer sur « {base} ».",
+                    "criteria": [
+                        "Synthétiser les observations déjà disponibles sur ce sujet.",
+                        "Formuler une hypothèse testable qui oriente la suite du travail.",
+                        "Planifier une expérience courte pour valider ou invalider cette hypothèse.",
+                    ],
+                    "goal_type": GoalType.COGNITIVE,
+                    "value": max(goal.value, 0.74),
+                    "competence": max(goal.competence, 0.55),
+                    "curiosity": max(goal.curiosity, 0.66),
+                    "urgency": max(goal.urgency, 0.4),
+                    "structural_seeded": False,
+                },
+                {
+                    "description": f"Poser des questions ciblées via le QuestionManager au sujet de « {base} ».",
+                    "criteria": [
+                        "Identifier deux questions à haute valeur pour réduire l'incertitude.",
+                        "Soumettre ces questions au QuestionManager et analyser les réponses.",
+                        "Mettre à jour le plan d'action en fonction des nouvelles informations.",
+                    ],
+                    "goal_type": GoalType.SOCIAL,
+                    "value": max(goal.value, 0.7),
+                    "competence": max(goal.competence, 0.5),
+                    "curiosity": max(goal.curiosity, 0.7),
+                    "urgency": max(goal.urgency, 0.38),
+                    "structural_seeded": False,
+                },
+                {
+                    "description": f"Analyser l'inbox et les retours disponibles pour éclairer « {base} ».",
+                    "criteria": [
+                        "Collecter au moins trois éléments pertinents dans l'inbox ou les feedbacks.",
+                        "Extraire les enseignements principaux et les relier au but courant.",
+                        "Mettre à jour la progression du but à partir de ces enseignements.",
+                    ],
+                    "goal_type": GoalType.EXPLORATION,
+                    "value": max(goal.value, 0.72),
+                    "competence": max(goal.competence, 0.48),
+                    "curiosity": max(goal.curiosity, 0.69),
+                    "urgency": max(goal.urgency, 0.39),
+                    "structural_seeded": False,
+                },
+            ]
+        if metadata.depth == 2:
+            description = goal.description.lower()
+            topic = self._extract_focus_topic(goal.description) or goal.description.strip()
+            parent_desc = None
+            if goal.parent_ids:
+                parent = self.store.nodes.get(goal.parent_ids[0])
+                if parent:
+                    parent_desc = parent.description.strip()
+            if "hypothèse" in description:
+                return [
+                    {
+                        "description": f"Diagnostiquer ma compréhension de « {topic} » via les métriques métacognitives.",
+                        "criteria": [
+                            f"Examiner les métriques métacognitives liées à « {topic} ».",
+                            f"Identifier les zones d'incompréhension et formuler un score de confiance pour « {topic} ».",
+                            "Noter les indices mémoriels utiles pour l'hypothèse à construire.",
+                        ],
+                        "goal_type": GoalType.COGNITIVE,
+                        "value": max(goal.value, 0.72),
+                        "competence": max(goal.competence, 0.52),
+                        "curiosity": max(goal.curiosity, 0.6),
+                        "urgency": max(goal.urgency, 0.38),
+                        "structural_seeded": True,
+                    },
+                    {
+                        "description": f"Solliciter le QuestionManager pour clarifier « {topic} » si ma compréhension reste faible.",
+                        "criteria": [
+                            f"Formuler une question claire sur la partie la plus incertaine de « {topic} ».",
+                            "Soumettre la question au QuestionManager ou à l'agent et recueillir la réponse.",
+                            "Consigner les informations reçues pour affiner l'hypothèse.",
+                        ],
+                        "goal_type": GoalType.SOCIAL,
+                        "value": max(goal.value, 0.7),
+                        "competence": max(goal.competence, 0.5),
+                        "curiosity": max(goal.curiosity, 0.72),
+                        "urgency": max(goal.urgency, 0.4),
+                        "structural_seeded": True,
+                    },
+                    {
+                        "description": f"Explorer l'inbox et mes traces pour enrichir « {topic} » avant de formuler l'hypothèse.",
+                        "criteria": [
+                            "Identifier les sources d'inbox les plus pertinentes.",
+                            f"Extraire au moins trois indices ou exemples utiles concernant « {topic} ».",
+                            "Relier ces éléments aux observations existantes avant la synthèse finale.",
+                        ],
+                        "goal_type": GoalType.EXPLORATION,
+                        "value": max(goal.value, 0.7),
+                        "competence": max(goal.competence, 0.48),
+                        "curiosity": max(goal.curiosity, 0.71),
+                        "urgency": max(goal.urgency, 0.37),
+                        "structural_seeded": True,
+                    },
+                    {
+                        "description": f"Consigner l'hypothèse de travail sur « {topic} » dans la mémoire longue.",
+                        "criteria": [
+                            f"Rédiger l'hypothèse finale concernant « {topic} » en une formulation testable.",
+                            "Préciser les observations ou mesures prévues pour la vérifier.",
+                            "Stocker cette hypothèse dans la mémoire ou le journal de décisions.",
+                        ],
+                        "goal_type": GoalType.COGNITIVE,
+                        "value": max(goal.value, 0.74),
+                        "competence": max(goal.competence, 0.55),
+                        "curiosity": max(goal.curiosity, 0.6),
+                        "urgency": max(goal.urgency, 0.38),
+                        "structural_seeded": True,
+                    },
+                ]
+            if "questionmanager" in description or "questions ciblées" in description:
+                return [
+                    {
+                        "description": f"Identifier deux questions prioritaires concernant « {topic} ».",
+                        "criteria": [
+                            f"Lister les inconnues majeures liées à « {topic} ».",
+                            "Choisir deux questions dont la réponse débloquerait le plus de progrès.",
+                            "Vérifier que chaque question est concrète et actionnable.",
+                        ],
+                        "goal_type": GoalType.COGNITIVE,
+                        "value": max(goal.value, 0.68),
+                        "competence": max(goal.competence, 0.5),
+                        "curiosity": max(goal.curiosity, 0.7),
+                        "urgency": max(goal.urgency, 0.36),
+                        "structural_seeded": True,
+                    },
+                    {
+                        "description": f"Soumettre les questions au QuestionManager sur « {topic} » et suivre les réponses.",
+                        "criteria": [
+                            "Programmer l'envoi des questions avec la bonne priorité.",
+                            "Récupérer les réponses produites par le QuestionManager.",
+                            "Noter les éléments utiles issus des réponses pour le but parent.",
+                        ],
+                        "goal_type": GoalType.SOCIAL,
+                        "value": max(goal.value, 0.7),
+                        "competence": max(goal.competence, 0.5),
+                        "curiosity": max(goal.curiosity, 0.72),
+                        "urgency": max(goal.urgency, 0.38),
+                        "structural_seeded": True,
+                    },
+                    {
+                        "description": f"Capitaliser les réponses du QuestionManager pour faire progresser « {topic} ».",
+                        "criteria": [
+                            "Synthétiser les informations pertinentes et les classer par évidence.",
+                            "Mettre à jour le plan ou la progression du but parent en conséquence.",
+                            "Créer une trace mémorielle exploitable pour des itérations futures.",
+                        ],
+                        "goal_type": GoalType.COGNITIVE,
+                        "value": max(goal.value, 0.7),
+                        "competence": max(goal.competence, 0.52),
+                        "curiosity": max(goal.curiosity, 0.66),
+                        "urgency": max(goal.urgency, 0.37),
+                        "structural_seeded": True,
+                    },
+                ]
+            if "inbox" in description:
+                parent_label = parent_desc or "le but parent"
+                return [
+                    {
+                        "description": f"Récolter trois éléments pertinents de l'inbox en lien avec « {topic} ».",
+                        "criteria": [
+                            "Lister les sources inbox disponibles récemment.",
+                            f"Sélectionner au moins trois éléments concernant « {topic} ».",
+                            "Évaluer la fiabilité ou la fraicheur de chaque élément collecté.",
+                        ],
+                        "goal_type": GoalType.EXPLORATION,
+                        "value": max(goal.value, 0.7),
+                        "competence": max(goal.competence, 0.48),
+                        "curiosity": max(goal.curiosity, 0.68),
+                        "urgency": max(goal.urgency, 0.36),
+                        "structural_seeded": True,
+                    },
+                    {
+                        "description": f"Synthétiser les apports de l'inbox sur « {topic} » et les stocker en mémoire.",
+                        "criteria": [
+                            "Résumer les points clés trouvés dans l'inbox.",
+                            "Créer une entrée mémoire ou un document de référence.",
+                            "Relier ces apports aux hypothèses ou plans en cours.",
+                        ],
+                        "goal_type": GoalType.GROWTH,
+                        "value": max(goal.value, 0.72),
+                        "competence": max(goal.competence, 0.5),
+                        "curiosity": max(goal.curiosity, 0.65),
+                        "urgency": max(goal.urgency, 0.37),
+                        "structural_seeded": True,
+                    },
+                    {
+                        "description": f"Mettre à jour la progression du but « {parent_label} » selon les enseignements de l'inbox.",
+                        "criteria": [
+                            "Comparer l'état du but parent avant et après l'analyse inbox.",
+                            "Déterminer l'impact concret des nouvelles informations sur la progression.",
+                            "Notifier la mise à jour dans les traces ou la mémoire partagée.",
+                        ],
+                        "goal_type": GoalType.COGNITIVE,
+                        "value": max(goal.value, 0.7),
+                        "competence": max(goal.competence, 0.52),
+                        "curiosity": max(goal.curiosity, 0.6),
+                        "urgency": max(goal.urgency, 0.38),
+                        "structural_seeded": True,
+                    },
+                ]
+        return []
+
+    @staticmethod
+    def _extract_focus_topic(description: str) -> Optional[str]:
+        if not description:
+            return None
+        match = re.search(r"«\s*([^»]+?)\s*»", description)
+        if match:
+            return match.group(1).strip()
+        return None
 
     def _refresh_active_goal(self) -> None:
         active = self.store.get_active()
@@ -179,13 +617,19 @@ class GoalSystem:
         parent_payload = active.to_dict() if active else None
         proposals = self.curiosity.suggest_subgoals(parent_payload)
         for proposal in proposals:
-            node = self.store.add_goal(**proposal)
+            node = self.add_goal(
+                proposal.get("description", "Explorer un nouveau sujet"),
+                goal_type=GoalType.EXPLORATION,
+                criteria=proposal.get("criteria"),
+                parent_ids=proposal.get("parent_ids"),
+                value=float(proposal.get("value", 0.55)),
+                competence=float(proposal.get("competence", 0.5)),
+                curiosity=float(proposal.get("curiosity", 0.7)),
+                urgency=float(proposal.get("urgency", 0.4)),
+                created_by=proposal.get("created_by", "curiosity"),
+            )
             if node.created_by == "curiosity":
                 self.curiosity.register_proposal(node.id, proposal)
-            self.metadata[node.id] = GoalMetadata(
-                goal_type=GoalType.EXPLORATION,
-                success_criteria=list(proposal.get("criteria", [])),
-            )
         self.last_auto_proposal_at = time.time()
 
     def _ensure_pending_actions(self) -> None:
@@ -250,6 +694,47 @@ class GoalSystem:
                 }
             )
         return actions
+
+    def _handle_goal_completion(
+        self, goal: GoalNode, metadata: Optional[GoalMetadata]
+    ) -> None:
+        if metadata:
+            metadata.updated_at = time.time()
+        try:
+            if goal.created_by == "curiosity":
+                confidence = max(0.0, min(1.0, goal.progress))
+                self.curiosity.observe_goal_outcome(goal.id, True, confidence=confidence)
+        except Exception:
+            pass
+        self._store_completion_memory(goal, metadata)
+
+    def _store_completion_memory(
+        self, goal: GoalNode, metadata: Optional[GoalMetadata]
+    ) -> None:
+        memory = getattr(self, "memory", None)
+        if not (memory and hasattr(memory, "add_memory")):
+            return
+        payload: Dict[str, Any] = {
+            "kind": "goal_completion",
+            "goal_id": goal.id,
+            "description": goal.description,
+            "status": goal.status,
+            "created_by": goal.created_by,
+            "criteria": list(goal.criteria),
+            "parent_ids": list(goal.parent_ids),
+            "progress": float(goal.progress),
+            "completed_at": time.time(),
+        }
+        if metadata:
+            meta_payload = metadata.to_payload()
+            meta_payload["depth"] = metadata.depth
+            payload["metadata"] = meta_payload
+        else:
+            payload["metadata"] = {"depth": self._infer_depth(goal.id)}
+        try:
+            memory.add_memory(payload)
+        except Exception:
+            pass
 
     def _actions_from_intention(
         self,

@@ -251,11 +251,14 @@ class ActionInterface:
         emotions: Any = None,
         language: Any = None,
         jobs: Any = None,
+        perception: Any = None,
     ) -> None:
         if memory is not None:
             self.bound["memory"] = memory
         if jobs is not None:
             self.bound["jobs"] = jobs
+        if perception is not None:
+            self.bound["perception"] = perception
         self.bound.update(
             {
                 "arch": arch,
@@ -577,6 +580,8 @@ class ActionInterface:
                 "simulate_dialogue": self._h_simulate_dialogue,
                 "search_counterexample": self._h_search_counterexample,
                 "ask_clarifying": lambda act: self._h_ask(act.payload, act.context),
+                "ask": lambda act: self._h_ask(act.payload, act.context),
+                "scan_inbox": lambda act: self._h_scan_inbox(act.payload, act.context),
                 "code_evolve": lambda act: self._h_code_evolve(act.payload, act.context),
                 "promote_code": lambda act: self._h_promote_code(act.payload, act.context),
                 "rollback_code": lambda act: self._h_rollback_code(act.payload, act.context),
@@ -1050,6 +1055,40 @@ class ActionInterface:
         except Exception:
             pass
         return {"ok": True, "goal": goal, "steps": steps}
+
+    def _h_scan_inbox(self, payload: Dict[str, Any], context: Dict[str, Any]):
+        arch = self.bound.get("arch")
+        perception = self.bound.get("perception")
+        if not perception and arch is not None:
+            perception = getattr(arch, "perception_interface", None)
+        if not perception or not hasattr(perception, "scan_inbox"):
+            return {"ok": False, "error": "perception_unavailable"}
+        params = payload or {}
+        force = bool(params.get("force", False))
+        try:
+            added = perception.scan_inbox(force=force)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        result: Dict[str, Any] = {"ok": True, "added": added, "count": len(added)}
+        topic = params.get("topic")
+        if topic:
+            result["topic"] = topic
+        try:
+            memory = self.bound.get("memory") if hasattr(self, "bound") else None
+            if memory and hasattr(memory, "add_memory") and added:
+                memory.add_memory(
+                    {
+                        "kind": "inbox_scan",
+                        "content": topic or "scan_inbox",
+                        "metadata": {
+                            "files": list(added),
+                            "goal_id": params.get("goal_id"),
+                        },
+                    }
+                )
+        except Exception:
+            pass
+        return result
 
     def _h_ask(self, payload: Dict[str, Any], context: Dict[str, Any]):
         payload = payload or {}

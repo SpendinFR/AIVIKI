@@ -88,6 +88,65 @@ class CuriosityEngine:
         "urgent_learning": {"value": 0.6, "competence": 0.55, "curiosity": 0.65, "urgency": 0.55},
     }
 
+    _METRIC_NARRATIVES: Dict[str, Dict[str, Any]] = {
+        "memory_capacity": {
+            "description": "Cultiver ma mémoire active pour relier les expériences importantes.",
+            "criteria": [
+                "Cartographier les informations que je perds ou répète inutilement.",
+                "Tester une stratégie de consolidation et mesurer son effet sur mon rappel.",
+                "Documenter un protocole pour entretenir cette amélioration dans le temps.",
+            ],
+        },
+        "skill_development": {
+            "description": "Structurer ma progression de compétences pour gagner en autonomie.",
+            "criteria": [
+                "Identifier une compétence prioritaire à renforcer et préciser le niveau visé.",
+                "Concevoir un micro-plan d'entraînement expérimental et l'exécuter.",
+                "Mesurer l'impact de cet entraînement sur ma capacité à agir.",
+            ],
+        },
+        "knowledge_acquisition": {
+            "description": "Accélérer ma collecte de connaissances utiles et actionnables.",
+            "criteria": [
+                "Lister les zones de connaissance critiques encore floues.",
+                "Explorer au moins deux sources ciblées pour combler ces zones.",
+                "Synthétiser les apprentissages et décider des prochains approfondissements.",
+            ],
+        },
+        "reasoning_confidence": {
+            "description": "Stabiliser ma confiance de raisonnement pour limiter les hésitations inutiles.",
+            "criteria": [
+                "Diagnostiquer les situations où ma confiance chute brutalement.",
+                "Formuler une hypothèse expliquant ces variations de confiance.",
+                "Tester un levier concret pour fiabiliser cette confiance et mesurer le résultat.",
+            ],
+        },
+        "reasoning_speed": {
+            "description": "Fluidifier ma vitesse de raisonnement sans sacrifier la qualité.",
+            "criteria": [
+                "Mesurer mon temps de traitement actuel sur un cas représentatif.",
+                "Expérimenter un ajustement de méthode ou d'outillage.",
+                "Comparer les performances obtenues avant et après l'ajustement.",
+            ],
+        },
+        "self_understanding": {
+            "description": "Approfondir ma compréhension de moi-même pour guider mes décisions.",
+            "criteria": [
+                "Collecter des observations récentes sur mon fonctionnement interne.",
+                "Identifier une zone d'inconnu majeure et formuler une hypothèse explicative.",
+                "Mettre à l'épreuve cette hypothèse et consigner les apprentissages.",
+            ],
+        },
+        "metacognitive_awareness": {
+            "description": "Renforcer ma conscience métacognitive pour détecter mes propres évolutions.",
+            "criteria": [
+                "Évaluer honnêtement mon niveau d'attention à mes processus internes.",
+                "Définir un rituel de revue métacognitive sur un cas d'usage précis.",
+                "Mesurer le gain de clarté obtenu grâce à ce rituel.",
+            ],
+        },
+    }
+
     def __init__(self, architecture=None):
         self.architecture = architecture
         self._rng = random.Random()
@@ -308,11 +367,15 @@ class CuriosityEngine:
         parent_goal: Optional[Dict[str, Any]],
         weights: Dict[str, float],
     ) -> Dict[str, Any]:
+        domain = (gap.get("domain") or "").lower()
         description = self._describe_gap(gap)
         criteria = self._default_criteria(gap)
+        metric_template = self._metric_template(domain)
+        if metric_template:
+            description, criteria = metric_template
         parent_ids = [parent_goal["id"]] if parent_goal and "id" in parent_goal else []
 
-        if gap.get("domain") == "novel_concept" and gap.get("concept"):
+        if domain == "novel_concept" and gap.get("concept"):
             c = str(gap["concept"]).strip()
             description = f"Apprendre le concept « {c} » et produire une synthèse exploitable."
             criteria = [
@@ -320,7 +383,7 @@ class CuriosityEngine:
                 "Donner 2 exemples et 1 contre-exemple pertinents.",
                 "Énoncer 1 règle de décision utilisant ce concept.",
             ]
-        if gap.get("domain") == "belief_contradiction":
+        if domain == "belief_contradiction":
             subj = str(gap.get("subject", "?")).strip()
             rel = str(gap.get("relation", "?")).strip()
             description = f"Résoudre contradiction « {subj}, {rel} » dans le graphe de croyances."
@@ -342,7 +405,7 @@ class CuriosityEngine:
         }
 
     def _describe_gap(self, gap: Dict[str, Any]) -> str:
-        domain = gap.get("domain")
+        domain = (gap.get("domain") or "").lower()
         if domain == "reasoning_error":
             return f"Analyser et corriger une erreur de raisonnement: {gap.get('hint', 'non spécifié')}"
         if domain == "exploration":
@@ -353,17 +416,23 @@ class CuriosityEngine:
             subj = gap.get("subject", "?")
             rel = gap.get("relation", "?")
             return f"Résoudre contradiction « {subj}, {rel} » identifiée dans le graphe."
-        return f"Améliorer la métrique {domain} par une expérimentation ciblée."
+        label = self._humanize_metric(domain)
+        return f"Explorer comment renforcer « {label} » à travers une expérimentation guidée."
 
     def _default_criteria(self, gap: Dict[str, Any]) -> List[str]:
-        domain = gap.get("domain")
+        domain = (gap.get("domain") or "").lower()
         if domain == "reasoning_error":
             return ["Documenter 3 contre-exemples et une stratégie de prévention."]
         if domain == "exploration":
             return ["Produire une carte mentale du sujet exploré."]
         if domain == "belief_contradiction":
             return ["Comparer les justifications et collecter une preuve supplémentaire."]
-        return ["Mesurer une amélioration significative après 3 essais contrôlés."]
+        label = self._humanize_metric(domain)
+        return [
+            f"Formuler une hypothèse sur l'amélioration de « {label} ».",
+            f"Collecter des données de référence pour évaluer « {label} » avant expérimentation.",
+            f"Mesurer l'effet de l'expérimentation sur « {label} » après 3 essais.",
+        ]
 
     # ------------------------------------------------------------------
     def _context_statistics(self, context: Dict[str, Any]) -> Dict[str, float]:
@@ -392,7 +461,9 @@ class CuriosityEngine:
             "severity": severity,
             "severity_sq": severity * severity,
             "score": score,
-            "is_performance": 1.0 if domain not in {"reasoning_error", "novel_concept", "belief_contradiction", "exploration"} else 0.0,
+            "is_performance": 1.0
+            if domain not in {"reasoning_error", "novel_concept", "belief_contradiction", "exploration"}
+            else 0.0,
             "is_reasoning_error": 1.0 if domain == "reasoning_error" else 0.0,
             "is_novel_concept": 1.0 if domain == "novel_concept" else 0.0,
             "is_contradiction": 1.0 if domain == "belief_contradiction" else 0.0,
@@ -403,6 +474,32 @@ class CuriosityEngine:
 
     def _vectorize(self, features: Dict[str, float]) -> List[float]:
         return [float(features.get(name, 0.0)) for name in self._feature_order]
+
+    def _metric_template(self, domain: str) -> Optional[Tuple[str, List[str]]]:
+        if not domain:
+            return None
+        template = self._METRIC_NARRATIVES.get(domain)
+        if template:
+            return template["description"], list(template.get("criteria", []))
+        if domain.startswith("ability_"):
+            ability = self._humanize_metric(domain[len("ability_") :])
+            description = f"Renforcer ma capacité « {ability} » grâce à une expérimentation ciblée."
+            criteria = [
+                f"Évaluer mon niveau actuel concernant « {ability} » avec des éléments concrets.",
+                f"Tester une stratégie d'entraînement pour progresser sur « {ability} ».",
+                f"Documenter les résultats et ajuster mon plan d'apprentissage pour « {ability} ».",
+            ]
+            return description, criteria
+        return None
+
+    def _humanize_metric(self, name: str) -> str:
+        if not name:
+            return "cette dimension"
+        parts = [p for p in re.split(r"[_\s]+", name) if p]
+        if not parts:
+            return name
+        humanized = [parts[0].capitalize()] + [p.lower() for p in parts[1:]]
+        return " ".join(humanized)
 
     def _derive_weights(
         self,
