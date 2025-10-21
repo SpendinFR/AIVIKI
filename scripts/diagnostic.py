@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from statistics import mean
-from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -181,6 +181,73 @@ def average_interval(timestamps: Sequence[float], window: int = 6) -> Optional[f
 # ---------------------------------------------------------------------------
 # Core diagnostics
 
+
+def discover_layout(root: Path) -> Tuple[Path, Path, Path]:
+    """Infer locations of data/logs/runtime directories relative to ``root``.
+
+    Many developers run the agent either from the repository root or from the
+    ``AGI_Evolutive`` package directory.  The runtime artefacts (``data/``,
+    ``logs/``, ``runtime/``) therefore may live either directly under the root
+    or inside ``AGI_Evolutive/``.  To make the diagnostic resilient we scan the
+    common candidates and fall back to the user-provided root when nothing is
+    found.
+    """
+
+    root = root.resolve()
+    candidates: List[Path] = [root]
+    agi_subdir = root / "AGI_Evolutive"
+    if agi_subdir.is_dir():
+        candidates.append(agi_subdir)
+
+    # Preserve order while removing duplicates
+    unique_candidates: List[Path] = []
+    for candidate in candidates:
+        if candidate not in unique_candidates:
+            unique_candidates.append(candidate)
+
+    sentinels: Dict[str, Sequence[str]] = {
+        "data": (
+            "episodes.jsonl",
+            "memory_store.json",
+            "actions_log.jsonl",
+            "concept_index.json",
+            "concept_graph.json",
+            "goals.json",
+        ),
+        "logs": (
+            "reasoning.jsonl",
+            "experiments.jsonl",
+            "metacog.log",
+        ),
+        "runtime": (
+            "agent_events.jsonl",
+            "goal_dag.json",
+            "snapshots",
+        ),
+    }
+
+    def find(subdir: str) -> Path:
+        sentinel = sentinels.get(subdir, ())
+        # Prefer directories that already contain known artefacts.
+        for base in unique_candidates:
+            candidate = base / subdir
+            if not candidate.exists():
+                continue
+            for marker in sentinel:
+                if (candidate / marker).exists():
+                    return candidate
+        # Otherwise return the first existing directory.
+        for base in unique_candidates:
+            candidate = base / subdir
+            if candidate.exists():
+                return candidate
+        return unique_candidates[0] / subdir
+
+    data_root = find("data")
+    logs_root = find("logs")
+    runtime_root = find("runtime")
+    return data_root, logs_root, runtime_root
+
 SIGNAL_KEYS = [
     "self_talk",
     "goal_created",
@@ -224,12 +291,21 @@ class DiagnosticState:
     dashboards: Dict[str, FileSummary] = field(default_factory=dict)
     verdicts: List[str] = field(default_factory=list)
     aggregates: Dict[str, Any] = field(default_factory=dict)
+    data_root: Path = field(init=False)
+    logs_root: Path = field(init=False)
+    runtime_root: Path = field(init=False)
 
     def rel(self, path: Path) -> str:
-        try:
-            return str(path.relative_to(self.root))
-        except ValueError:
-            return str(path)
+        candidates = [self.root]
+        for extra in (getattr(self, "data_root", None), getattr(self, "logs_root", None), getattr(self, "runtime_root", None)):
+            if extra is not None and extra not in candidates:
+                candidates.append(extra)
+        for base in candidates:
+            try:
+                return str(path.relative_to(base))
+            except ValueError:
+                continue
+        return str(path)
 
     def record_file(self, path: Path, *, count: Optional[int] = None, last_ts: Optional[float] = None,
                     extra: Optional[Dict[str, Any]] = None) -> None:
@@ -272,7 +348,7 @@ class DiagnosticState:
 
 
 def collect_agent_events(state: DiagnosticState) -> None:
-    path = state.root / "runtime" / "agent_events.jsonl"
+    path = state.runtime_root / "agent_events.jsonl"
     count = 0
     last_ts: Optional[float] = None
     types: Counter[str] = Counter()
@@ -304,7 +380,7 @@ def collect_agent_events(state: DiagnosticState) -> None:
 
 
 def collect_episodes(state: DiagnosticState) -> None:
-    path = state.root / "data" / "episodes.jsonl"
+    path = state.data_root / "episodes.jsonl"
     count = 0
     last_ts: Optional[float] = None
     avg_size: Optional[float] = None
@@ -324,7 +400,7 @@ def collect_episodes(state: DiagnosticState) -> None:
 
 
 def collect_memory_store(state: DiagnosticState) -> None:
-    path = state.root / "data" / "memory_store.json"
+    path = state.data_root / "memory_store.json"
     data = read_json(path)
     memories: Sequence[Mapping[str, Any]] = []
     if isinstance(data, Mapping):
@@ -371,7 +447,7 @@ def collect_memory_store(state: DiagnosticState) -> None:
 
 
 def collect_metacog_log(state: DiagnosticState) -> None:
-    path = state.root / "logs" / "metacog.log"
+    path = state.logs_root / "metacog.log"
     count = 0
     last_ts: Optional[float] = None
     for record in iter_jsonl(path):
@@ -390,7 +466,7 @@ def collect_metacog_log(state: DiagnosticState) -> None:
 
 
 def collect_reasoning_log(state: DiagnosticState) -> None:
-    path = state.root / "logs" / "reasoning.jsonl"
+    path = state.logs_root / "reasoning.jsonl"
     count = 0
     last_ts: Optional[float] = None
     confidences: List[float] = []
@@ -416,7 +492,7 @@ def collect_reasoning_log(state: DiagnosticState) -> None:
 
 
 def collect_experiments_log(state: DiagnosticState) -> None:
-    path = state.root / "logs" / "experiments.jsonl"
+    path = state.logs_root / "experiments.jsonl"
     count = 0
     last_ts: Optional[float] = None
     metrics: Counter[str] = Counter()
@@ -433,7 +509,7 @@ def collect_experiments_log(state: DiagnosticState) -> None:
 
 
 def collect_actions_log(state: DiagnosticState) -> None:
-    path = state.root / "data" / "actions_log.jsonl"
+    path = state.data_root / "actions_log.jsonl"
     count = 0
     last_ts: Optional[float] = None
     action_types: Counter[str] = Counter()
@@ -450,7 +526,7 @@ def collect_actions_log(state: DiagnosticState) -> None:
 
 
 def collect_concept_signals(state: DiagnosticState) -> None:
-    events_path = state.root / "data" / "concept_events.jsonl"
+    events_path = state.data_root / "concept_events.jsonl"
     count = 0
     last_ts: Optional[float] = None
     for record in iter_jsonl(events_path):
@@ -461,7 +537,7 @@ def collect_concept_signals(state: DiagnosticState) -> None:
         state.record_signal("concepts", ts, state.rel(events_path))
     state.record_file(events_path, count=count or None, last_ts=last_ts)
 
-    index_path = state.root / "data" / "concept_index.json"
+    index_path = state.data_root / "concept_index.json"
     index_data = read_json(index_path)
     latest_index_ts: Optional[float] = None
     if isinstance(index_data, Mapping):
@@ -476,7 +552,7 @@ def collect_concept_signals(state: DiagnosticState) -> None:
     else:
         state.record_file(index_path, count=None, last_ts=None)
 
-    graph_path = state.root / "data" / "concept_graph.json"
+    graph_path = state.data_root / "concept_graph.json"
     graph_data = read_json(graph_path)
     if isinstance(graph_data, Mapping):
         nodes = graph_data.get("nodes", {})
@@ -493,7 +569,7 @@ def collect_concept_signals(state: DiagnosticState) -> None:
 
 
 def collect_mood_logs(state: DiagnosticState) -> None:
-    episodes_path = state.root / "data" / "mood_episodes.jsonl"
+    episodes_path = state.data_root / "mood_episodes.jsonl"
     count = 0
     last_ts: Optional[float] = None
     for record in iter_jsonl(episodes_path):
@@ -506,7 +582,7 @@ def collect_mood_logs(state: DiagnosticState) -> None:
 
 
 def collect_goals(state: DiagnosticState) -> None:
-    goals_path = state.root / "data" / "goals.json"
+    goals_path = state.data_root / "goals.json"
     data = read_json(goals_path)
     if isinstance(data, Mapping):
         nodes = data.get("nodes", {}) or {}
@@ -546,12 +622,12 @@ def collect_goals(state: DiagnosticState) -> None:
 
 def collect_dashboards(state: DiagnosticState) -> None:
     dash_candidates = {
-        "goals": state.root / "data" / "goals_dashboard.json",
-        "concepts": state.root / "data" / "concepts_dashboard.json",
-        "mood": state.root / "data" / "mood_dashboard.json",
-        "evolution": state.root / "data" / "evolution" / "dashboard.json",
-        "global": state.root / "logs" / "dashboard.html",
-        "gw_snapshot": state.root / "runtime" / "goal_dag.json",
+        "goals": state.data_root / "goals_dashboard.json",
+        "concepts": state.data_root / "concepts_dashboard.json",
+        "mood": state.data_root / "mood_dashboard.json",
+        "evolution": state.data_root / "evolution" / "dashboard.json",
+        "global": state.logs_root / "dashboard.html",
+        "gw_snapshot": state.runtime_root / "goal_dag.json",
     }
     for name, path in dash_candidates.items():
         payload = read_json(path) if path.suffix == ".json" else None
@@ -624,6 +700,11 @@ def print_report(state: DiagnosticState, *, json_mode: bool = False) -> None:
         payload = {
             "generated_at": state.now.isoformat(),
             "root": str(state.root),
+            "layout": {
+                "data_root": str(state.data_root),
+                "logs_root": str(state.logs_root),
+                "runtime_root": str(state.runtime_root),
+            },
             "signals": {
                 name: {
                     "count": info["total"],
@@ -666,23 +747,52 @@ def print_report(state: DiagnosticState, *, json_mode: bool = False) -> None:
     print(f"Fenêtre récente : {format_duration(state.recent_window.total_seconds())}")
     print()
 
+    print("-- Emplacements analysés --")
+    print(f"• data : {state.rel(state.data_root)}")
+    print(f"• logs : {state.rel(state.logs_root)}")
+    print(f"• runtime : {state.rel(state.runtime_root)}")
+    print()
+
     print("-- Fichiers & journaux --")
-    for key in [
-        "runtime/agent_events.jsonl",
-        "data/episodes.jsonl",
-        "logs/reasoning.jsonl",
-        "logs/experiments.jsonl",
-        "data/memory_store.json",
-        "logs/metacog.log",
-        "data/actions_log.jsonl",
-        "data/concept_events.jsonl",
-        "data/concept_index.json",
-        "data/concept_graph.json",
-        "data/mood_episodes.jsonl",
-        "data/goals.json",
-    ]:
-        summary = state.files.get(key)
+    ordered_targets = [
+        state.runtime_root / "agent_events.jsonl",
+        state.data_root / "episodes.jsonl",
+        state.logs_root / "reasoning.jsonl",
+        state.logs_root / "experiments.jsonl",
+        state.data_root / "memory_store.json",
+        state.logs_root / "metacog.log",
+        state.data_root / "actions_log.jsonl",
+        state.data_root / "concept_events.jsonl",
+        state.data_root / "concept_index.json",
+        state.data_root / "concept_graph.json",
+        state.data_root / "mood_episodes.jsonl",
+        state.data_root / "goals.json",
+    ]
+    printed: Set[str] = set()
+    for target in ordered_targets:
+        rel_path = state.rel(target)
+        summary = state.files.get(rel_path)
         if not summary:
+            continue
+        printed.add(rel_path)
+        status = "présent" if summary.exists else "absent"
+        details = []
+        if summary.count is not None:
+            details.append(f"{summary.count} entrées")
+        if summary.last_ts is not None:
+            details.append(f"dernier: {format_timestamp(summary.last_ts, state.now)}")
+        elif summary.last_mtime is not None:
+            details.append(f"mtime: {format_timestamp(summary.last_mtime, state.now)}")
+        if summary.extra:
+            snippet = ", ".join(f"{k}={v}" for k, v in summary.extra.items() if v)
+            if snippet:
+                details.append(snippet)
+        joined = " — ".join(details) if details else ""
+        print(f"• {summary.path}: {status}{(' — ' + joined) if joined else ''}")
+    # Also surface any extra files that were discovered but not part of the
+    # canonical list so users are aware of unexpected artefacts.
+    for rel_path, summary in sorted(state.files.items()):
+        if rel_path in printed:
             continue
         status = "présent" if summary.exists else "absent"
         details = []
@@ -749,6 +859,10 @@ def print_report(state: DiagnosticState, *, json_mode: bool = False) -> None:
 def run(root: Path, *, recent_hours: float, json_mode: bool) -> None:
     now = datetime.now(timezone.utc)
     state = DiagnosticState(root=root, now=now, recent_window=timedelta(hours=recent_hours))
+    data_root, logs_root, runtime_root = discover_layout(root)
+    state.data_root = data_root
+    state.logs_root = logs_root
+    state.runtime_root = runtime_root
 
     collect_agent_events(state)
     collect_episodes(state)
