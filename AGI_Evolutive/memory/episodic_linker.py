@@ -615,8 +615,19 @@ class EpisodicLinker:
             except Exception:
                 pass
         # fallback minimal : 1ère et dernière phrases tronquées
-        first = (mems[0].get("content") or "")[:180]
-        last = (mems[-1].get("content") or "")[:180]
+        def _preview(memory: Dict[str, Any]) -> str:
+            value = memory.get("content")
+            if isinstance(value, str):
+                return value[:180]
+            if value is None:
+                return ""
+            try:
+                return json.dumps(value, ensure_ascii=False)[:180]
+            except Exception:
+                return str(value)[:180]
+
+        first = _preview(mems[0])
+        last = _preview(mems[-1])
         return f"Épisode ({len(mems)} mémoires) - début: {first} · fin: {last}"
 
     # ---------- apply backlinks + emit episode mem ----------
