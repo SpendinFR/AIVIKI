@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import re
 import time
+import unicodedata
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Deque, Dict, Iterable, List, Optional, Set
+from typing import Any, Deque, Dict, Iterable, List, Optional, Set, Tuple
 
 from .curiosity import CuriosityEngine
 from .dag_store import DagStore, GoalNode
@@ -178,6 +179,153 @@ class GoalSystem:
                 self._handle_goal_completion(node, metadata)
         self._refresh_active_goal()
         return node
+
+    # ------------------------------------------------------------------
+    # Understanding & goal matching helpers
+
+    @staticmethod
+    def _clip(value: float) -> float:
+        try:
+            return max(0.0, min(1.0, float(value)))
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _normalize_text(value: Optional[str]) -> str:
+        if not value:
+            return ""
+        normalized = unicodedata.normalize("NFKD", str(value))
+        stripped = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+        return stripped.lower().strip()
+
+    def _goal_tokens(self, text: Optional[str]) -> Tuple[str, List[str]]:
+        normalized = self._normalize_text(text)
+        tokens = [tok for tok in normalized.split() if tok]
+        return normalized, tokens
+
+    def _goal_matches_topic(self, goal: GoalNode, topic_norm: str, tokens: List[str]) -> bool:
+        if not topic_norm and not tokens:
+            return False
+        description_norm, _ = self._goal_tokens(goal.description)
+        if topic_norm and topic_norm in description_norm:
+            return True
+        if tokens and all(tok in description_norm for tok in tokens):
+            return True
+        for crit in goal.criteria:
+            crit_norm, _ = self._goal_tokens(str(crit))
+            if topic_norm and topic_norm in crit_norm:
+                return True
+            if tokens and all(tok in crit_norm for tok in tokens):
+                return True
+        meta = self.metadata.get(goal.id)
+        if meta:
+            for crit in meta.success_criteria:
+                crit_norm, _ = self._goal_tokens(str(crit))
+                if topic_norm and topic_norm in crit_norm:
+                    return True
+                if tokens and all(tok in crit_norm for tok in tokens):
+                    return True
+        return False
+
+    def _select_goal_for_topic(
+        self, topic: Optional[str], *, goal_id: Optional[str] = None
+    ) -> Optional[GoalNode]:
+        if goal_id:
+            node = self.store.get_goal(goal_id)
+            if node:
+                return node
+        topic_norm, tokens = self._goal_tokens(topic)
+        if not topic_norm and not tokens:
+            return None
+        active = self.store.get_active()
+        if active and self._goal_matches_topic(active, topic_norm, tokens):
+            return active
+        for node in self.store.nodes.values():
+            if self._goal_matches_topic(node, topic_norm, tokens):
+                return node
+        return None
+
+    def integrate_understanding(
+        self,
+        *,
+        topic: Optional[str],
+        score: float,
+        prediction_error: float,
+        gaps: Optional[Iterable[str]] = None,
+        goal_id: Optional[str] = None,
+        clarification_penalty: float = 0.0,
+        source: str = "understanding",
+        evidence: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Update goal progress from an understanding assessment.
+
+        Returns a payload describing the update when progress improved,
+        otherwise ``None``.
+        """
+
+        goal = self._select_goal_for_topic(topic, goal_id=goal_id)
+        if goal is None:
+            return None
+
+        score = self._clip(score)
+        prediction_error = self._clip(prediction_error)
+        clarification_penalty = self._clip(clarification_penalty)
+        gap_list = [str(g).strip() for g in (gaps or []) if str(g).strip()]
+
+        penalty = min(0.4, 0.12 * len(gap_list) + 0.08 * clarification_penalty)
+        base_progress = 0.55 * score + 0.45 * (1.0 - prediction_error)
+        target_progress = max(0.0, min(1.0, base_progress - penalty))
+
+        if not gap_list and score >= 0.9 and prediction_error <= 0.12 and clarification_penalty <= 0.1:
+            target_progress = 1.0
+
+        previous = float(goal.progress)
+        if target_progress <= previous + 1e-3:
+            return None
+
+        ts = time.time()
+        goal.evidence.append(
+            {
+                "t": ts,
+                "event": "understanding_update",
+                "topic": topic,
+                "score": score,
+                "prediction_error": prediction_error,
+                "clarification_penalty": clarification_penalty,
+                "gaps_remaining": len(gap_list),
+                "source": source,
+                "details": dict(evidence or {}),
+            }
+        )
+
+        if self.memory and hasattr(self.memory, "add_memory"):
+            try:
+                self.memory.add_memory(
+                    {
+                        "kind": "goal_evidence",
+                        "goal_id": goal.id,
+                        "topic": topic or "",
+                        "score": score,
+                        "prediction_error": prediction_error,
+                        "gaps_remaining": len(gap_list),
+                        "clarification_penalty": clarification_penalty,
+                        "source": source,
+                        "ts": ts,
+                    }
+                )
+            except Exception:
+                pass
+
+        updated = self.update_goal(goal.id, {"progress": target_progress})
+        completed = bool(updated and updated.status == "done")
+        payload = {
+            "goal_id": goal.id,
+            "progress": target_progress,
+            "previous_progress": previous,
+            "completed": completed,
+            "topic": topic,
+        }
+        return payload
 
     # ------------------------------------------------------------------
     # Internal helpers

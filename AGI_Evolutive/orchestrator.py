@@ -2289,6 +2289,17 @@ class Orchestrator:
                     else:
                         U = SimpleNamespace(U_topic=0.5, U_global=0.5)
 
+                    scratch = ctx.setdefault("scratch", {})
+                    scratch["clarification_penalty"] = clarification_penalty
+                    scratch.setdefault("understanding", {})
+                    scratch["understanding"].update(
+                        {
+                            "topic": current_topic,
+                            "U_topic": float(getattr(U, "U_topic", 0.5)),
+                            "U_global": float(getattr(U, "U_global", 0.5)),
+                        }
+                    )
+
                     snap = (
                         monitor.snapshot()
                         if monitor
@@ -2348,6 +2359,45 @@ class Orchestrator:
                         milestone_info = self.record_knowledge_milestone(topic=topic, ctx=ctx)
                     except Exception:
                         milestone_info = None
+
+                    progress_update = None
+                    goals = getattr(self.arch, "goals", None)
+                    if goals and hasattr(goals, "integrate_understanding"):
+                        try:
+                            progress_update = goals.integrate_understanding(
+                                topic=current_topic if current_topic != "__generic__" else topic,
+                                score=float(getattr(U, "U_topic", 0.5)),
+                                prediction_error=float(prediction_error),
+                                gaps=ctx.get("gaps"),
+                                goal_id=(ctx.get("payload") or {}).get("goal_id"),
+                                clarification_penalty=float(clarification_penalty),
+                                source=(ctx.get("meta") or {}).get("source", "pipeline"),
+                                evidence={
+                                    "pipeline": pipe,
+                                    "trigger": trigger.type.name,
+                                    "reason": selection.reason,
+                                },
+                            )
+                        except Exception:
+                            progress_update = None
+
+                    if progress_update and progress_update.get("completed"):
+                        recorder = getattr(self.arch, "_record_skill", None)
+                        topic_label = progress_update.get("topic") or current_topic
+                        if callable(recorder) and topic_label and len(topic_label.strip()) >= 3:
+                            try:
+                                recorder(
+                                    topic_label.strip(),
+                                    source="goal_completion",
+                                    confidence=progress_update.get("progress"),
+                                    metadata={
+                                        "goal_id": progress_update.get("goal_id"),
+                                        "pipeline": pipe,
+                                        "trigger": trigger.type.name,
+                                    },
+                                )
+                            except Exception:
+                                pass
 
                     if not isinstance(ctx.get("gaps"), list):
                         ctx["gaps"] = []
