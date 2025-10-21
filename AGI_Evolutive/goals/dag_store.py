@@ -7,7 +7,7 @@ import os
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import math
 
@@ -198,6 +198,7 @@ class DagStore:
                 parent.child_ids.append(gid)
                 parent.updated_at = _now()
         self._recompute_priority(node)
+        self._propagate_progress_from(node)
         self._persist()
         return node
 
@@ -219,27 +220,48 @@ class DagStore:
         if not node:
             return None
         progress_before = node.progress
+        status_before = node.status
+        progress_changed = False
+        completion_event = False
         for key, value in updates.items():
             if not hasattr(node, key):
                 continue
-            setattr(node, key, value)
             if key == "progress":
                 try:
                     progress_value = float(value)
                 except (TypeError, ValueError):
                     progress_value = node.progress
+                progress_value = max(0.0, min(1.0, progress_value))
+                node.progress = progress_value
                 node.evidence.append(
                     {
                         "t": _now(),
                         "event": "progress_update",
-                        "progress": max(0.0, min(1.0, progress_value)),
+                        "progress": progress_value,
                     }
                 )
+                progress_changed = True
+            else:
+                setattr(node, key, value)
+        if progress_changed and node.progress >= 0.999 and node.status not in {"done", "abandoned"}:
+            node.status = "done"
+            completion_event = True
+            node.evidence.append(
+                {
+                    "t": _now(),
+                    "event": "status_auto_complete",
+                    "source": "progress_threshold",
+                }
+            )
         node.updated_at = _now()
         self._recompute_priority(node)
-        if "progress" in updates and progress_before < 1.0 <= node.progress:
+        if progress_changed:
+            self._propagate_progress_from(node)
+        if progress_changed and progress_before < 1.0 <= node.progress:
             # If progress reached completion through update, treat it as success feedback.
             self._record_feedback(node, success=True, note="progress_completion")
+        elif completion_event and status_before != "done":
+            self._record_feedback(node, success=True, note="status_completion")
         self._persist()
         return node
 
@@ -295,6 +317,7 @@ class DagStore:
         if self.active_goal_id == goal_id:
             self.active_goal_id = None
         self._recompute_priority(node)
+        self._propagate_progress_from(node)
         self._persist()
 
     # ------------------------------------------------------------------
@@ -431,6 +454,40 @@ class DagStore:
                 json.dump(json_sanitize(snapshot), fh, ensure_ascii=False, indent=2)
         except Exception:
             pass
+
+    def _propagate_progress_from(self, node: GoalNode) -> None:
+        queue: List[str] = list(node.parent_ids)
+        visited: Set[str] = set()
+        while queue:
+            pid = queue.pop()
+            if pid in visited:
+                continue
+            visited.add(pid)
+            parent = self.nodes.get(pid)
+            if not parent:
+                continue
+            child_progress: List[float] = []
+            for cid in parent.child_ids:
+                child = self.nodes.get(cid)
+                if child:
+                    child_progress.append(max(0.0, min(1.0, child.progress)))
+            if not child_progress:
+                continue
+            new_progress = max(0.0, min(1.0, sum(child_progress) / len(child_progress)))
+            if abs(parent.progress - new_progress) <= 1e-3:
+                continue
+            parent.progress = new_progress
+            parent.updated_at = _now()
+            parent.evidence.append(
+                {
+                    "t": _now(),
+                    "event": "progress_propagation",
+                    "source_child": node.id,
+                    "progress": new_progress,
+                }
+            )
+            self._recompute_priority(parent)
+            queue.extend(parent.parent_ids)
 
 
 class GoalDAG:
