@@ -175,10 +175,8 @@ class MemorySystem:
                 self.prefs_bridge = PrefsBridge()
             except Exception:
                 self.prefs_bridge = None
-        if getattr(_mem_flags, "ENABLE_SALIENCE_SCORER", False):
+        if getattr(_mem_flags, "ENABLE_SALIENCE_SCORER", False) and SalienceScorer:
             try:
-                from .salience_scorer import SalienceScorer
-
                 reward_module = None
                 if self.cognitive_architecture is not None:
                     reward_module = getattr(self.cognitive_architecture, "reward_engine", None)
