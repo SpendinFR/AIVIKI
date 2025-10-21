@@ -23,6 +23,11 @@ except Exception:
 
 try:  # pragma: no cover - optional integration
     from memory.salience_scorer import SalienceScorer  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - fallback when package path differs
+    try:
+        from .salience_scorer import SalienceScorer  # type: ignore
+    except Exception:  # pragma: no cover
+        SalienceScorer = None
 except Exception:  # pragma: no cover
     SalienceScorer = None
 
