@@ -666,6 +666,8 @@ def run_cli():
         else:
             assistant_text_brut = None
 
+        semantic_source = assistant_text_override if assistant_text_override is not None else assistant_text_brut
+
         reply = None
         final_pack: Optional[Dict[str, Any]] = final_pack_override
         selected_macro = selected_macro_override
@@ -685,24 +687,36 @@ def run_cli():
                     selected_macro = None
 
             generated_points: List[str] = []
-            if isinstance(assistant_text_brut, dict):
-                bullets = assistant_text_brut.get("bullets") if isinstance(assistant_text_brut, dict) else None
+            if isinstance(semantic_source, dict):
+                bullets = semantic_source.get("bullets") if isinstance(semantic_source, dict) else None
                 if isinstance(bullets, list):
                     generated_points = [str(b).strip() for b in bullets if str(b).strip()]
                 else:
-                    text = assistant_text_brut.get("text") or assistant_text_brut.get("raw")
+                    text = semantic_source.get("text") or semantic_source.get("raw")
                     if text:
                         generated_points = [s.strip() for s in str(text).split("\n") if s.strip()]
-            elif isinstance(assistant_text_brut, list):
-                generated_points = [str(item).strip() for item in assistant_text_brut if str(item).strip()]
-            elif assistant_text_brut is not None:
+            elif isinstance(semantic_source, list):
+                generated_points = [str(item).strip() for item in semantic_source if str(item).strip()]
+            elif semantic_source is not None:
                 generated_points = [
                     line.strip()
-                    for line in str(assistant_text_brut or "").split("\n")
+                    for line in str(semantic_source or "").split("\n")
                     if line.strip()
-                ] or [str(assistant_text_brut or "").strip()]
+                ] or [str(semantic_source or "").strip()]
 
-            plan = {"title": "", "bullets": generated_points}
+            plan_text = ""
+            if isinstance(semantic_source, str):
+                plan_text = semantic_source
+            elif isinstance(semantic_source, dict):
+                primary = semantic_source.get("text") or semantic_source.get("raw")
+                if isinstance(primary, str):
+                    plan_text = primary
+            if not plan_text and generated_points:
+                plan_text = "\n".join(generated_points)
+            elif not plan_text and semantic_source is not None:
+                plan_text = str(semantic_source)
+
+            plan = {"title": "", "bullets": generated_points, "text": plan_text}
 
             renderer = getattr(arch, "renderer", None)
             if assistant_text_override is None and renderer and hasattr(renderer, "render_final"):
@@ -715,7 +729,7 @@ def run_cli():
             if reply is None and renderer is not None and (
                 assistant_text_override is None or assistant_text_brut is not None
             ):
-                sem = {"text": assistant_text_brut}
+                sem = {"text": plan_text, "raw": semantic_source}
                 reply = arch.renderer.render_reply(sem, ctx)
                 if reply is not None and final_pack is None:
                     final_pack = {
