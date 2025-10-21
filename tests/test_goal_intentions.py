@@ -1,6 +1,13 @@
 from collections import deque
 
+import sys
+from pathlib import Path
+
 import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from AGI_Evolutive.goals import GoalSystem
 
@@ -137,3 +144,60 @@ def test_inbox_structural_action(goal_system):
     actions = goal_system._goal_to_actions(goal)
     types = _deque_types(actions)
     assert "scan_inbox" in types
+
+
+def test_integrate_understanding_updates_progress(goal_system_with_memory):
+    system, memory = goal_system_with_memory
+    goal = system.add_goal("Comprendre l'empathie en profondeur.")
+    system.store.set_active(goal.id)
+
+    partial = system.integrate_understanding(
+        topic="empathie",
+        score=0.72,
+        prediction_error=0.24,
+        gaps=["manque d'exemples"],
+        goal_id=goal.id,
+        source="test",
+    )
+
+    assert partial is not None
+    assert not partial["completed"]
+    updated = system.store.get_goal(goal.id)
+    assert updated.progress > 0.0
+    assert any(entry.get("kind") == "goal_evidence" for entry in memory.entries)
+
+    final = system.integrate_understanding(
+        topic="empathie",
+        score=0.93,
+        prediction_error=0.05,
+        gaps=[],
+        goal_id=goal.id,
+        source="test",
+    )
+
+    assert final is not None
+    assert final["completed"]
+    completed_goal = system.store.get_goal(goal.id)
+    assert completed_goal.status == "done"
+    assert completed_goal.progress == pytest.approx(1.0, rel=0.0, abs=1e-6)
+    assert any(
+        entry.get("kind") == "goal_completion" and entry.get("goal_id") == goal.id
+        for entry in memory.entries
+    )
+
+
+def test_integrate_understanding_matches_goal_without_id(goal_system_with_memory):
+    system, _ = goal_system_with_memory
+    goal = system.add_goal("Explorer l'empathie dans la communication quotidienne")
+    system.store.set_active(goal.id)
+
+    update = system.integrate_understanding(
+        topic="empathie",
+        score=0.8,
+        prediction_error=0.2,
+        gaps=["clarifier"],
+        source="test",
+    )
+
+    assert update is not None
+    assert update["goal_id"] == goal.id
