@@ -1,7 +1,9 @@
 import json
+import datetime as dt
 import logging
 import re
 import time
+import unicodedata
 from collections import deque
 from copy import deepcopy
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -15,7 +17,7 @@ from AGI_Evolutive.core.telemetry import Telemetry
 from AGI_Evolutive.core.question_manager import QuestionManager
 from AGI_Evolutive.creativity import CreativitySystem
 from AGI_Evolutive.emotions import EmotionalSystem
-from AGI_Evolutive.goals import GoalSystem
+from AGI_Evolutive.goals import GoalSystem, GoalType
 from AGI_Evolutive.goals.dag_store import GoalDAG
 from AGI_Evolutive.io.action_interface import ActionInterface
 from AGI_Evolutive.io.perception_interface import PerceptionInterface
@@ -79,6 +81,7 @@ class CognitiveArchitecture:
         self.reflective_mode = True
         self.last_output_text = "OK"
         self.last_user_id = "default"
+        self._memory_request_goal_id: Optional[str] = None
         self.rag_adaptive: Optional[RAGAdaptiveController] = None
         self._rag_last_context: Optional[Dict[str, Any]] = None
         self._rag_feedback_queue = deque(maxlen=24)
@@ -804,6 +807,11 @@ class CognitiveArchitecture:
         except Exception:
             pass
 
+        special_reply = self._handle_recent_memory_request(trimmed)
+        if special_reply:
+            self.last_output_text = special_reply
+            return special_reply
+
         def _looks_like_abduction(s: str) -> bool:
             s = (s or "").lower()
             return any(
@@ -1336,6 +1344,330 @@ class CognitiveArchitecture:
                 )
         except Exception:
             pass
+
+    def _normalize_memory_request_text(self, text: str) -> str:
+        base = unicodedata.normalize("NFKD", text or "")
+        stripped = "".join(ch for ch in base if not unicodedata.combining(ch))
+        lowered = stripped.lower()
+        lowered = re.sub(r"[^a-z0-9]+", " ", lowered)
+        return re.sub(r"\s+", " ", lowered).strip()
+
+    def _is_recent_memory_request(self, normalized: str) -> bool:
+        if not normalized:
+            return False
+        memory_cues = ("memoire", "memoires", "souvenir", "souvenirs")
+        if not any(cue in normalized for cue in memory_cues):
+            return False
+        recency_cues = ("recent", "recents", "dern", "aujourd", "derni", "dernier", "derniers")
+        if not any(cue in normalized for cue in recency_cues):
+            return False
+        action_cues = (
+            "dis",
+            "donne",
+            "montre",
+            "partage",
+            "affiche",
+            "liste",
+            "raconte",
+            "envoie",
+        )
+        return any(cue in normalized for cue in action_cues)
+
+    def _resolve_memory_requester_identity(self, normalized_text: str) -> Dict[str, Any]:
+        configuration = cfg()
+        configured_names = configuration.get("MEMORY_SHARING_TRUSTED_NAMES") or []
+        if not isinstance(configured_names, list):
+            configured_names = [str(configured_names)]
+        normalized_map: Dict[str, str] = {}
+        for raw_name in configured_names:
+            if not raw_name:
+                continue
+            normalized_map[self._normalize_memory_request_text(str(raw_name))] = str(raw_name)
+
+        default_name = str(configuration.get("PRIMARY_USER_NAME", configured_names[0] if configured_names else "utilisateur"))
+        expected_role = str(configuration.get("PRIMARY_USER_ROLE", "creator"))
+        roles_map = configuration.get("MEMORY_SHARING_ROLES_BY_NAME") or {}
+        if not isinstance(roles_map, dict):
+            roles_map = {}
+
+        matched_norm = None
+        for alias_norm in normalized_map:
+            if alias_norm and alias_norm in normalized_text:
+                matched_norm = alias_norm
+                break
+
+        match_source = "unknown"
+        resolved_name: Optional[str] = None
+        if matched_norm:
+            resolved_name = normalized_map.get(matched_norm)
+            match_source = "alias"
+        elif self.last_user_id == "default" and default_name:
+            resolved_name = default_name
+            match_source = "default_user_id"
+        elif self.last_user_id:
+            resolved_name = str(self.last_user_id)
+            match_source = "user_id"
+
+        if resolved_name in roles_map:
+            resolved_role = str(roles_map[resolved_name])
+        elif resolved_name == default_name:
+            resolved_role = expected_role
+        elif resolved_name and self._normalize_memory_request_text(resolved_name) in normalized_map:
+            resolved_role = expected_role
+        else:
+            resolved_role = "unknown"
+
+        confidence = 0.55
+        if match_source == "alias":
+            confidence = 0.9
+        elif match_source == "default_user_id":
+            confidence = 0.8
+        elif match_source == "user_id":
+            confidence = 0.65
+
+        trusted_roles = configuration.get("MEMORY_SHARING_TRUSTED_ROLES") or []
+        if not isinstance(trusted_roles, list):
+            trusted_roles = [trusted_roles]
+        trusted_roles_norm = [str(role).lower() for role in trusted_roles]
+        name_norm = self._normalize_memory_request_text(resolved_name) if resolved_name else ""
+        trusted_name_norms = set(normalized_map.keys())
+        role_norm = resolved_role.lower() if isinstance(resolved_role, str) else ""
+        trusted = bool(resolved_name and name_norm in trusted_name_norms and (not trusted_roles_norm or role_norm in trusted_roles_norm))
+
+        return {
+            "user_id": self.last_user_id or "default",
+            "name": resolved_name,
+            "role": resolved_role,
+            "confidence": float(confidence),
+            "matched_via": match_source,
+            "trusted": trusted,
+        }
+
+    def _summarize_memory_entry(self, entry: Dict[str, Any]) -> Optional[str]:
+        if not isinstance(entry, dict):
+            return None
+        kind = entry.get("kind") or entry.get("type") or entry.get("label") or "mémoire"
+        kind_label = str(kind).replace("_", " ").replace(":", " ").strip().capitalize() or "Mémoire"
+        text = entry.get("text") or entry.get("content") or ""
+        if not isinstance(text, str):
+            text = str(text)
+        text = text.strip()
+        metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+        if not text and metadata:
+            for key in ("summary", "description", "note"):
+                value = metadata.get(key)
+                if isinstance(value, str) and value.strip():
+                    text = value.strip()
+                    break
+        if not text and metadata:
+            for value in metadata.values():
+                if isinstance(value, str) and value.strip():
+                    text = value.strip()
+                    break
+        text = text.replace("\n", " ").strip()
+        if len(text) > 140:
+            text = text[:137].rstrip() + "…"
+        timestamp = entry.get("ts")
+        if not isinstance(timestamp, (int, float)) and isinstance(metadata, dict):
+            timestamp = metadata.get("timestamp")
+        date_hint = ""
+        if isinstance(timestamp, (int, float)):
+            try:
+                dt_obj = dt.datetime.fromtimestamp(timestamp)
+                date_hint = dt_obj.strftime("%d/%m %H:%M")
+            except Exception:
+                date_hint = ""
+        summary = f"{kind_label}: {text}" if text else kind_label
+        if date_hint:
+            summary = f"{date_hint} · {summary}"
+        source = metadata.get("source") if isinstance(metadata, dict) else None
+        if isinstance(source, str) and source.strip():
+            summary = f"{summary} (source: {source.strip()})"
+        return summary
+
+    def _collect_recent_memory_summaries(self, limit: int) -> List[str]:
+        memory = getattr(self, "memory", None)
+        if not memory or not hasattr(memory, "get_recent_memories"):
+            return []
+        try:
+            raw = memory.get_recent_memories(n=max(limit * 6, limit))
+        except Exception:
+            return []
+        summaries: List[str] = []
+        seen_ids: set[str] = set()
+        seen_texts: set[str] = set()
+        for entry in reversed(raw):
+            if not isinstance(entry, dict):
+                continue
+            entry_id = entry.get("id")
+            if entry_id and entry_id in seen_ids:
+                continue
+            if entry_id:
+                seen_ids.add(entry_id)
+            if str(entry.get("kind", "")) == "memory_share_event":
+                continue
+            summary = self._summarize_memory_entry(entry)
+            if not summary or summary in seen_texts:
+                continue
+            seen_texts.add(summary)
+            summaries.append(summary)
+            if len(summaries) >= limit:
+                break
+        return summaries
+
+    def _infer_memory_request_hypotheses(self, normalized: str, identity: Dict[str, Any]) -> List[str]:
+        hypotheses: List[str] = []
+        if "comprend" in normalized or "analyse" in normalized:
+            hypotheses.append("Tu vérifies ma compréhension actuelle du monde via mes traces récentes.")
+        if "objectif" in normalized or "but" in normalized:
+            hypotheses.append("Tu veux relier ces souvenirs à un objectif explicite.")
+        if identity.get("role") == "creator":
+            hypotheses.append("En tant que créateur, tu testes ma transparence et ma fiabilité.")
+        if "contexte" in normalized or "monde" in normalized:
+            hypotheses.append("Tu souhaites synchroniser nos contextes cognitifs.")
+        if not hypotheses:
+            hypotheses.append("Tu veux simplement savoir ce que j'ai vécu dernièrement pour mieux me guider.")
+        return hypotheses
+
+    def _ensure_memory_request_goal(self) -> Optional[str]:
+        goals = getattr(self, "goals", None)
+        if goals is None:
+            return None
+        store = getattr(goals, "store", None)
+        if store is None:
+            return None
+        try:
+            if self._memory_request_goal_id:
+                existing = store.get_goal(self._memory_request_goal_id)
+                if existing is not None:
+                    return f"Objectif déjà suivi ({self._memory_request_goal_id})."
+                self._memory_request_goal_id = None
+            node = goals.add_goal(
+                "Comprendre la motivation derrière les demandes de mémoires récentes",
+                goal_type=GoalType.SOCIAL,
+                criteria=[
+                    "Formuler une hypothèse sur la motivation de William",
+                    "Valider l'hypothèse via un échange ou une observation.",
+                ],
+                value=0.62,
+                curiosity=0.58,
+                urgency=0.32,
+                created_by="memory_share_handler",
+            )
+            self._memory_request_goal_id = node.id
+            return f"Nouvel objectif créé ({node.id}) pour approfondir ta motivation."
+        except Exception:
+            return None
+
+    def _handle_recent_memory_request(self, user_msg: str) -> Optional[str]:
+        normalized = self._normalize_memory_request_text(user_msg)
+        if not self._is_recent_memory_request(normalized):
+            return None
+
+        identity = self._resolve_memory_requester_identity(normalized)
+        share_allowed = bool(identity.get("trusted"))
+        config = cfg()
+        max_items = int(config.get("MEMORY_SHARING_MAX_ITEMS", 5))
+        shared_memories = self._collect_recent_memory_summaries(max_items) if share_allowed else []
+
+        request_analysis = "Je comprends que tu me demandes explicitement de partager mes mémoires récentes."
+        if identity.get("name"):
+            user_analysis = (
+                f"Je t'identifie comme {identity['name']} (rôle : {identity.get('role', 'inconnu')})"
+                f" avec une confiance d'environ {int(identity.get('confidence', 0.0) * 100)} %."
+            )
+        else:
+            user_analysis = (
+                "Je n'ai pas de nom explicite pour toi, mais je relie la demande à l'utilisateur courant"
+                f" (id : {identity.get('user_id')}) avec une confiance d'environ"
+                f" {int(identity.get('confidence', 0.0) * 100)} %."
+            )
+
+        if share_allowed and shared_memories:
+            decision = (
+                f"Je décide de partager {len(shared_memories)} souvenir(s) car tu es reconnu comme {identity.get('role', 'partenaire')}"
+                " et je peux te faire confiance."
+            )
+        elif share_allowed:
+            decision = (
+                "Je suis prêt à partager, mais aucune mémoire exploitable n'est disponible dans ma fenêtre récente."
+            )
+        else:
+            decision = (
+                "Je préfère ne rien divulguer tant que je n'ai pas confirmé ton identité comme autorisée."
+            )
+
+        hypotheses = self._infer_memory_request_hypotheses(normalized, identity)
+        goal_note = self._ensure_memory_request_goal()
+
+        try:
+            metadata = {
+                "requested_by": identity.get("name") or identity.get("user_id"),
+                "trusted": share_allowed,
+                "matched_via": identity.get("matched_via"),
+                "shared_count": len(shared_memories),
+            }
+            if hasattr(self.memory, "add_memory"):
+                self.memory.add_memory(
+                    {
+                        "kind": "memory_share_event",
+                        "content": "Partage de mémoires récentes",
+                        "metadata": metadata,
+                    }
+                )
+        except Exception:
+            pass
+
+        try:
+            self.telemetry.log(
+                "memory",
+                "share_recent_memories",
+                {
+                    "trusted": share_allowed,
+                    "shared_count": len(shared_memories),
+                    "requester": identity.get("name") or identity.get("user_id"),
+                    "matched_via": identity.get("matched_via"),
+                },
+            )
+        except Exception:
+            pass
+
+        response_lines = [
+            "Voici comment j'ai traité ta demande :",
+            "",
+            "**1. Compréhension de ta requête**",
+            f"- {request_analysis}",
+            "",
+            "**2. Analyse de ton identité**",
+            f"- {user_analysis}",
+            "",
+            "**3. Décision**",
+            f"- {decision}",
+        ]
+
+        response_lines.append("")
+        if share_allowed and shared_memories:
+            response_lines.append("**4. Mémoires récentes partagées**")
+            for item in shared_memories:
+                response_lines.append(f"- {item}")
+        elif share_allowed:
+            response_lines.append("**4. Mémoires récentes partagées**")
+            response_lines.append("- Aucune mémoire pertinente n'a été retrouvée dans l'instant.")
+        else:
+            response_lines.append("**4. Mémoires récentes**")
+            response_lines.append("- Accès suspendu en attendant une identification confirmée.")
+
+        response_lines.append("")
+        response_lines.append("**5. Hypothèses sur ta motivation**")
+        for hyp in hypotheses:
+            response_lines.append(f"- {hyp}")
+
+        if goal_note:
+            response_lines.append("")
+            response_lines.append("**6. Prochaine étape interne**")
+            response_lines.append(f"- {goal_note}")
+
+        return "\n".join(response_lines)
 
     def _looks_like_causal(self, text: str) -> bool:
         if not text:

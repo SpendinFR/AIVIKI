@@ -15,6 +15,12 @@ _DEFAULTS: Dict[str, Any] = {
     "VECTOR_DIR": "data/vector_store",
     "LOGS_DIR": "logs",
     "GOALS_DAG_PATH": "logs/goals_dag.json",
+    "PRIMARY_USER_NAME": "William",
+    "PRIMARY_USER_ROLE": "creator",
+    "MEMORY_SHARING_TRUSTED_NAMES": ["William"],
+    "MEMORY_SHARING_ROLES_BY_NAME": {},
+    "MEMORY_SHARING_TRUSTED_ROLES": ["creator", "owner"],
+    "MEMORY_SHARING_MAX_ITEMS": 5,
 }
 
 _DIR_KEYS = ("DATA_DIR", "MEM_DIR", "SELF_VERSIONS_DIR", "VECTOR_DIR", "LOGS_DIR")
