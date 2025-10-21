@@ -48,6 +48,7 @@ from AGI_Evolutive.self_improver.code_evolver import CodeEvolver
 from AGI_Evolutive.self_improver.promote import PromotionManager
 from AGI_Evolutive.planning.htn import HTNPlanner
 from AGI_Evolutive.core.persistence import PersistenceManager
+from AGI_Evolutive.core.self_model import SelfModel
 from AGI_Evolutive.core.config import cfg
 
 
@@ -233,6 +234,11 @@ class CognitiveArchitecture:
         self.simulator = CounterfactualSimulator(self.scm)
         self.planner = HTNPlanner(self.beliefs, self.ontology)
         self.user_model = UserModel()
+        self.self_model = SelfModel()
+        try:
+            setattr(self.self_model, "arch", self)
+        except Exception:
+            pass
         try:
             persona_tone = (self.user_model.describe().get("persona", {}) or {}).get("tone")
             if persona_tone:
