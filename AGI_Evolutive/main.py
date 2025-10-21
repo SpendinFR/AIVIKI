@@ -66,7 +66,8 @@ def _print_pending(
 
 
 
-from AGI_Evolutive.core.autopilot import Autopilot
+
+from AGI_Evolutive.core.autopilot import Autopilot, StageExecutionError
 from AGI_Evolutive.core.cognitive_architecture import CognitiveArchitecture
 from AGI_Evolutive.cognition.prioritizer import GoalPrioritizer
 from AGI_Evolutive.orchestrator import Orchestrator
@@ -656,15 +657,26 @@ def run_cli():
                     "alts": [],
                 }
 
+        fallback_reply = (
+            "Je n'ai pas compris cette demande. Peux-tu la reformuler ou donner un exemple ?"
+        )
+
         if assistant_text_override is None:
             try:
                 assistant_text_brut = auto.step(user_msg=msg)
+            except StageExecutionError as e:
+                print("⚠️ Erreur durant le cycle :", e)
+                assistant_text_brut = {"text": fallback_reply}
             except Exception as e:
                 print("⚠️ Erreur durant le cycle :", e)
                 traceback.print_exc()
-                continue
+                assistant_text_brut = {"text": fallback_reply}
         else:
             assistant_text_brut = None
+
+        semantic_source = (
+            assistant_text_override if assistant_text_override is not None else assistant_text_brut
+        )
 
         reply = None
         final_pack: Optional[Dict[str, Any]] = final_pack_override
@@ -676,6 +688,10 @@ def run_cli():
                 ctx = {"last_message": msg}
 
             ctx.setdefault("last_user_msg", msg)
+            if isinstance(semantic_source, dict):
+                trace = semantic_source.get("reasoning_trace")
+                if trace and "reasoning_trace" not in ctx:
+                    ctx["reasoning_trace"] = trace
 
             macro_selector = getattr(arch, "tactic_selector", None)
             if selected_macro is None and macro_selector and hasattr(macro_selector, "pick"):
@@ -685,24 +701,36 @@ def run_cli():
                     selected_macro = None
 
             generated_points: List[str] = []
-            if isinstance(assistant_text_brut, dict):
-                bullets = assistant_text_brut.get("bullets") if isinstance(assistant_text_brut, dict) else None
+            if isinstance(semantic_source, dict):
+                bullets = semantic_source.get("bullets") if isinstance(semantic_source, dict) else None
                 if isinstance(bullets, list):
                     generated_points = [str(b).strip() for b in bullets if str(b).strip()]
                 else:
-                    text = assistant_text_brut.get("text") or assistant_text_brut.get("raw")
+                    text = semantic_source.get("text") or semantic_source.get("raw")
                     if text:
                         generated_points = [s.strip() for s in str(text).split("\n") if s.strip()]
-            elif isinstance(assistant_text_brut, list):
-                generated_points = [str(item).strip() for item in assistant_text_brut if str(item).strip()]
-            elif assistant_text_brut is not None:
+            elif isinstance(semantic_source, list):
+                generated_points = [str(item).strip() for item in semantic_source if str(item).strip()]
+            elif semantic_source is not None:
                 generated_points = [
                     line.strip()
-                    for line in str(assistant_text_brut or "").split("\n")
+                    for line in str(semantic_source or "").split("\n")
                     if line.strip()
-                ] or [str(assistant_text_brut or "").strip()]
+                ] or [str(semantic_source or "").strip()]
 
-            plan = {"title": "", "bullets": generated_points}
+            plan_text = ""
+            if isinstance(semantic_source, str):
+                plan_text = semantic_source
+            elif isinstance(semantic_source, dict):
+                primary = semantic_source.get("text") or semantic_source.get("raw")
+                if isinstance(primary, str):
+                    plan_text = primary
+            if not plan_text and generated_points:
+                plan_text = "\n".join(generated_points)
+            elif not plan_text and semantic_source is not None:
+                plan_text = str(semantic_source)
+
+            plan = {"title": "", "bullets": generated_points, "text": plan_text, "raw": semantic_source}
 
             renderer = getattr(arch, "renderer", None)
             if assistant_text_override is None and renderer and hasattr(renderer, "render_final"):
@@ -715,7 +743,7 @@ def run_cli():
             if reply is None and renderer is not None and (
                 assistant_text_override is None or assistant_text_brut is not None
             ):
-                sem = {"text": assistant_text_brut}
+                sem = {"text": plan_text, "raw": semantic_source}
                 reply = arch.renderer.render_reply(sem, ctx)
                 if reply is not None and final_pack is None:
                     final_pack = {
@@ -734,13 +762,29 @@ def run_cli():
                     }
 
             if reply is None and assistant_text_brut is not None:
-                reply = str(assistant_text_brut)
-                if final_pack is None:
+                if isinstance(assistant_text_brut, dict):
+                    candidate = assistant_text_brut.get("text") or assistant_text_brut.get("raw")
+                    if isinstance(candidate, str) and candidate.strip():
+                        reply = candidate.strip()
+                    else:
+                        reply = str(assistant_text_brut)
+                else:
+                    reply = str(assistant_text_brut)
+                if final_pack is None and isinstance(reply, str):
                     final_pack = {
                         "text": reply,
                         "chosen": {"text": reply},
                         "alts": [],
                     }
+
+            if isinstance(reply, str):
+                stripped = reply.strip()
+                if not stripped:
+                    reply = fallback_reply
+                else:
+                    reply = stripped
+            elif reply is None:
+                reply = fallback_reply
 
             if reply is not None:
                 print(reply)

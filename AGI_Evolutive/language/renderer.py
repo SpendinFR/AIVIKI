@@ -14,6 +14,7 @@ from AGI_Evolutive.core.structures.mai import MAI
 
 from .nlg import NLGContext, apply_mai_bids_to_nlg, paraphrase_light, join_tokens
 from .style_critic import StyleCritic
+from AGI_Evolutive.runtime.response import humanize_reasoning_block
 
 
 TOKEN_PATTERN = re.compile(r"[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’\-]{1,}")
@@ -309,6 +310,49 @@ class LanguageRenderer:
             text = "🙂 " + text
         return text
 
+    def _normalize_semantic_value(self, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, (list, tuple, set)):
+            parts: List[str] = []
+            for item in value:
+                normalised = self._normalize_semantic_value(item)
+                if normalised:
+                    parts.append(normalised)
+            return "\n".join(parts).strip()
+        if isinstance(value, dict):
+            for key in ("text", "raw", "summary"):
+                candidate = self._normalize_semantic_value(value.get(key))
+                if candidate:
+                    return candidate
+            return ""
+        return str(value).strip()
+
+    def _semantics_text(self, semantics: Any) -> str:
+        if isinstance(semantics, str):
+            return semantics.strip()
+        if semantics is None:
+            return ""
+        if not isinstance(semantics, dict):
+            return self._normalize_semantic_value(semantics)
+
+        for key in ("text", "raw", "summary"):
+            candidate = self._normalize_semantic_value(semantics.get(key))
+            if candidate:
+                return candidate
+
+        bullets_text = self._normalize_semantic_value(semantics.get("bullets"))
+        if bullets_text:
+            return bullets_text
+
+        title_text = self._normalize_semantic_value(semantics.get("title"))
+        if title_text:
+            return title_text
+
+        return ""
+
     def render_reply(self, semantics: Dict[str, Any], ctx: Dict[str, Any], *, dry_run: bool = False) -> str:
         """
         Règle : on n’ajoute un lien au passé / une collocation QUE si :
@@ -326,7 +370,17 @@ class LanguageRenderer:
         last_used = dict(self._last_used)
 
         self._decrease_cooldowns(cooldown)
-        base = (semantics.get("text") or "").strip() or "Je te réponds en tenant compte de notre historique."
+        base_text = self._semantics_text(semantics)
+        normalized_text, diagnostics = humanize_reasoning_block(base_text)
+        effective_text = normalized_text or base_text
+        base = effective_text.strip() or "Je te réponds en tenant compte de notre historique."
+        if (
+            not dry_run
+            and diagnostics
+            and normalized_text
+            and normalized_text.strip() != base_text.strip()
+        ):
+            ctx.setdefault("reasoning_trace", diagnostics)
         arch = getattr(getattr(self.voice, "self_model", None), "arch", None)
         policy = getattr(arch, "policy", None) if arch else None
         state_snapshot: Dict[str, Any] = {}

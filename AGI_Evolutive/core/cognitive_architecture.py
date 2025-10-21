@@ -41,7 +41,11 @@ from AGI_Evolutive.reasoning.abduction import AbductiveReasoner, Hypothesis
 from AGI_Evolutive.reasoning.causal import CounterfactualSimulator, SCMStore
 from AGI_Evolutive.reasoning.question_engine import QuestionEngine
 from AGI_Evolutive.runtime.logger import JSONLLogger
-from AGI_Evolutive.runtime.response import ensure_contract, format_agent_reply
+from AGI_Evolutive.runtime.response import (
+    ensure_contract,
+    format_agent_reply,
+    humanize_reasoning_block,
+)
 from AGI_Evolutive.runtime.scheduler import Scheduler
 from AGI_Evolutive.runtime.job_manager import JobManager
 from AGI_Evolutive.world_model import PhysicsEngine
@@ -1088,6 +1092,10 @@ class CognitiveArchitecture:
             except Exception:
                 pass
 
+        friendly_fallback: Optional[str] = None
+        if not abduction_result and (abstain or adjusted_confidence < 0.45):
+            friendly_fallback = self._build_clarification_reply(ask_prompts)
+
         apprentissages = [
             "associer récompense sociale ↔ style",
             "tenir un journal d'épisodes de raisonnement",
@@ -1126,30 +1134,48 @@ class CognitiveArchitecture:
         applied_hints = nlg_context.applied_hints()
         if applied_hints:
             reason_out["applied_hints"] = applied_hints
-        response = format_agent_reply(nlg_context.text, **contract)
+        base_reply = nlg_context.text.strip() or ""
+        if not base_reply:
+            base_reply = reason_out.get("summary") or surface.strip()
+        if not base_reply:
+            base_reply = "Je n'ai pas encore de réponse claire, peux-tu préciser ta demande ?"
+
+        normalized_text, reasoning_diag = humanize_reasoning_block(base_reply)
+        user_reply = normalized_text or base_reply
+
+        if friendly_fallback:
+            user_reply = friendly_fallback
+
+        diagnostics_text = None
+        try:
+            diagnostics_text = format_agent_reply(user_reply, **contract)
+        except Exception:
+            diagnostics_text = None
 
         if abduction_result:
-            response = abduction_result.get("response", response)
+            user_reply = abduction_result.get("response", user_reply)
 
         try:
-            response = self.style_profiler.rewrite_to_match(response, self.last_user_id)
+            user_reply = self.style_profiler.rewrite_to_match(user_reply, self.last_user_id)
         except Exception:
             pass
 
-        self.last_output_text = response
+        self.last_output_text = user_reply
 
         try:
             if hasattr(self.memory, "store_interaction"):
-                self.memory.store_interaction(
-                    {
-                        "ts": time.time(),
-                        "user": user_msg,
-                        "agent": response,
-                        "lang_state": getattr(
-                            getattr(self.language, "state", None), "to_dict", lambda: {}
-                        )(),
-                    }
-                )
+                payload = {
+                    "ts": time.time(),
+                    "user": user_msg,
+                    "agent": user_reply,
+                    "agent_raw": diagnostics_text or user_reply,
+                    "lang_state": getattr(
+                        getattr(self.language, "state", None), "to_dict", lambda: {}
+                    )(),
+                }
+                if reasoning_diag:
+                    payload["reasoning_trace"] = reasoning_diag
+                self.memory.store_interaction(payload)
         except Exception:
             pass
 
@@ -1171,8 +1197,26 @@ class CognitiveArchitecture:
         except Exception:
             pass
 
+        output_payload: Dict[str, Any] = {
+            "text": user_reply,
+            "raw": base_reply,
+            "contract": contract,
+            "reasoning": reason_out,
+        }
+        if friendly_fallback:
+            output_payload.setdefault("metadata", {})["clarification_reply"] = True
+        if reasoning_diag:
+            output_payload["reasoning_trace"] = reasoning_diag
+        if applied_hints:
+            output_payload.setdefault("metadata", {})["applied_hints"] = list(applied_hints)
+        needs_list = [str(item).strip() for item in contract.get("besoin", []) if str(item).strip()]
+        if needs_list:
+            output_payload["bullets"] = needs_list
+        if diagnostics_text and diagnostics_text.strip() and diagnostics_text.strip() != user_reply.strip():
+            output_payload["diagnostics_text"] = diagnostics_text
+
         self._tick_background_systems()
-        return response
+        return output_payload
 
     def _handle_abduction_request(self, user_msg: str) -> Dict[str, Any]:
         reason_out: Dict[str, Any] = {
@@ -1300,6 +1344,42 @@ class CognitiveArchitecture:
                     )
         except Exception:
             pass
+
+    def _build_clarification_reply(self, prompts: List[str]) -> str:
+        questions: List[str] = []
+        for prompt in prompts[:2]:
+            cleaned = self._normalize_clarification_prompt(prompt)
+            if cleaned:
+                questions.append(cleaned)
+        if not questions:
+            fallback = self._normalize_clarification_prompt(None)
+            if fallback:
+                questions.append(fallback)
+        question_text = " ".join(questions) if questions else "Peux-tu préciser ta demande ?"
+        base = "Je ne suis pas certain d'avoir bien compris."
+        return f"{base} {question_text}".strip()
+
+    def _normalize_clarification_prompt(self, prompt: Optional[str]) -> Optional[str]:
+        text = (prompt or "").strip()
+        if "→" in text:
+            text = text.split("→", 1)[1].strip()
+        elif ":" in text:
+            head, tail = text.split(":", 1)
+            tail = tail.strip()
+            text = tail or head.strip()
+        text = re.sub(r"^[•\-\s]+", "", text)
+        text = text.strip()
+        if not text:
+            text = "Peux-tu préciser ta demande ?"
+        if not text:
+            return None
+        if text.endswith("?"):
+            return text
+        text = text.rstrip(".")
+        candidate = text.rstrip()
+        if not candidate:
+            return None
+        return f"{candidate} ?"
 
     def _emit_structured_memories(self, text: str) -> None:
         if not text or not hasattr(self.memory, "add_memory"):
