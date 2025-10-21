@@ -3,7 +3,7 @@ import json
 import math
 import os
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from AGI_Evolutive.core.config import cfg
 from AGI_Evolutive.utils import now_iso, safe_write_json
@@ -156,6 +156,26 @@ class SelfModel:
         lst.append(item)
         if len(lst) > max_len:
             del lst[:-max_len]
+
+    @staticmethod
+    def _append_unique_on_keys(
+        lst: List[Any], item: Any, keys: Iterable[str], max_len: int
+    ) -> None:
+        """Append en supprimant les doublons sur une liste de clés."""
+
+        if not isinstance(item, dict):
+            SelfModel._bounded_append(lst, item, max_len)
+            return
+
+        keys = tuple(k for k in keys if k and k in item and item[k] is not None)
+        if keys:
+            for idx in range(len(lst) - 1, -1, -1):
+                existing = lst[idx]
+                if not isinstance(existing, dict):
+                    continue
+                if any(existing.get(k) == item.get(k) for k in keys):
+                    del lst[idx]
+        SelfModel._bounded_append(lst, item, max_len)
 
     @staticmethod
     def _sigmoid(x: float) -> float:
@@ -389,6 +409,10 @@ class SelfModel:
             dst = wk.setdefault("recent", [])
             for item in recent:
                 if isinstance(item, dict):
+                    SelfModel._append_unique_on_keys(
+                        dst, item, ("job_id", "id"), self._MAX_RECENT_JOBS
+                    )
+                else:
                     SelfModel._bounded_append(dst, item, self._MAX_RECENT_JOBS)
         if isinstance(tomorrow, dict):
             SelfModel._deep_merge(wk.setdefault("tomorrow", {}), tomorrow)
@@ -408,7 +432,9 @@ class SelfModel:
             dr = dict(decision_ref)
             if "ts" not in dr:
                 dr["ts"] = self._now_ts()
-            SelfModel._bounded_append(rec, dr, self._MAX_RECENT_DECISIONS)
+            SelfModel._append_unique_on_keys(
+                rec, dr, ("decision_id", "trace_id"), self._MAX_RECENT_DECISIONS
+            )
             self._update_policy_learning_from_decision(dr)
         self.identity["last_update_ts"] = self._now_ts()
         self._sync_identity()
