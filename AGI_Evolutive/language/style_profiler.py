@@ -1,11 +1,12 @@
 from dataclasses import dataclass, asdict
-from typing import Dict, Any, Iterable
+from typing import Dict, Any, Iterable, List
 from collections import Counter, defaultdict
 import math
 import os
 import json
 import re
 import unicodedata
+from datetime import datetime
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
 
@@ -23,6 +24,8 @@ class UserStyleProfile:
     uses_caps: float = 0.05
     language: str = "fr"
     samples_seen: int = 0
+    personal_names: Dict[str, int] = None
+    associative_memory: List[Dict[str, str]] = None
 
 
 class OnlineTextClassifier:
@@ -118,6 +121,53 @@ class StyleProfiler:
             "👍👌👏💯✨🔥😄😁😊🤝❤️💪🤩🙌🌟✅🆗🙂🤗👎😡😠😞😔💢❌🛑🤬😤🙄😒😂🤣😭😅😉😎🤔🤨😍😘😉🥲🥳😇🤖"
         )
     )
+    PERSONAL_NAME_PATTERNS = [
+        re.compile(
+            r"\b(?:je m'appelle|je me nomme|mon prénom est|mon prenom est|appelle[- ]moi|moi c'est)\s+([A-Za-zÀ-ÖØ-öø-ÿ'\-]{2,60})",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\bje suis\s+([A-Za-zÀ-ÖØ-öø-ÿ'\-]{2,60})",
+            re.IGNORECASE,
+        ),
+    ]
+    NAME_STOPWORDS = {
+        "toi",
+        "ton",
+        "ta",
+        "tes",
+        "mon",
+        "ma",
+        "mes",
+        "son",
+        "sa",
+        "ses",
+        "notre",
+        "votre",
+        "leur",
+        "le",
+        "la",
+        "les",
+        "un",
+        "une",
+        "des",
+        "ce",
+        "cette",
+        "cet",
+        "nul",
+        "créateur",
+        "createur",
+    }
+    MEMORY_PATTERNS_FR = [
+        re.compile(r"\bj(?:'aime|e préfère|e prefere|e déteste|e deteste|[' ]?adore)\b", re.IGNORECASE),
+        re.compile(r"\bmon\s+[^.?!]*préféré", re.IGNORECASE),
+        re.compile(r"\bma\s+[^.?!]*préférée", re.IGNORECASE),
+        re.compile(r"\bmes\s+[^.?!]*préférés", re.IGNORECASE),
+        re.compile(r"\bje me souviens\b", re.IGNORECASE),
+        re.compile(r"\bje me rappelle\b", re.IGNORECASE),
+        re.compile(r"\btu m'avais dit\b", re.IGNORECASE),
+        re.compile(r"\bil y a\s+\d+\s+(?:jours?|semaines?|mois|ans)\b", re.IGNORECASE),
+    ]
     FAMILIAR_MARKERS_FR = {
         "wesh",
         "frerot",
@@ -165,7 +215,9 @@ class StyleProfiler:
 
     def __init__(self, persist_path: str = "data/style_profiles.json"):
         self.persist_path = persist_path
-        os.makedirs(os.path.dirname(self.persist_path), exist_ok=True)
+        directory = os.path.dirname(self.persist_path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
         self.profiles: Dict[str, UserStyleProfile] = {}
         self.global_doc_freq: Counter = Counter()
         self.total_samples = 0
@@ -174,6 +226,7 @@ class StyleProfiler:
 
     def observe(self, user_id: str, text: str):
         p = self.profiles.get(user_id) or UserStyleProfile(user_id=user_id, fav_lexicon={})
+        p = self._ensure_profile_defaults(p)
         tokens = self._simple_tokens(text)
         token_counts = Counter(tok.lower() for tok in tokens if len(tok) > 1)
         sentences = re.split(r"[.!?]+", text)
@@ -235,6 +288,8 @@ class StyleProfiler:
 
         p.prefers_bullets = p.prefers_bullets or bool(self.BULLET_PATTERN.search(text))
 
+        self._update_personal_context(p, text)
+
         self.profiles[user_id] = p
 
         if confident_label:
@@ -243,7 +298,8 @@ class StyleProfiler:
         self._save()
 
     def style_of(self, user_id: str) -> UserStyleProfile:
-        return self.profiles.get(user_id) or UserStyleProfile(user_id=user_id, fav_lexicon={})
+        profile = self.profiles.get(user_id) or UserStyleProfile(user_id=user_id, fav_lexicon={})
+        return self._ensure_profile_defaults(profile)
 
     def rewrite_to_match(self, base_text: str, user_id: str) -> str:
         p = self.style_of(user_id)
@@ -251,17 +307,41 @@ class StyleProfiler:
         if p.language == "fr":
             base_text = self._adjust_formality_fr(base_text, p.formality)
 
+        base_text = self._apply_personal_address(base_text, p)
         base_text = self._shape_punctuation(base_text, p)
 
         if p.emoji_rate > 0.01:
             base_text = self._sprinkle_emojis(base_text, p)
 
+        base_text = self._append_associative_memory(base_text, p)
         base_text = self._shape_sentence_length(base_text, p)
 
         if p.uses_caps > 0.12:
             base_text = self._emphasize_some_words(base_text)
 
         return base_text
+
+    def _ensure_profile_defaults(self, profile: UserStyleProfile) -> UserStyleProfile:
+        if profile.fav_lexicon is None:
+            profile.fav_lexicon = {}
+        if profile.personal_names is None:
+            profile.personal_names = {}
+        if profile.associative_memory is None:
+            profile.associative_memory = []
+        else:
+            cleaned: List[Dict[str, str]] = []
+            for entry in profile.associative_memory:
+                if isinstance(entry, dict) and "text" in entry:
+                    cleaned.append({
+                        "text": entry.get("text", ""),
+                        "timestamp": entry.get("timestamp", ""),
+                    })
+                elif isinstance(entry, str):
+                    cleaned.append({"text": entry, "timestamp": ""})
+            profile.associative_memory = [
+                item for item in cleaned if item.get("text")
+            ]
+        return profile
 
     def _save(self):
         try:
@@ -303,8 +383,123 @@ class StyleProfiler:
             self.formality_classifier = OnlineTextClassifier(labels=("formal", "familiar"))
 
     def _simple_tokens(self, text: str):
-        normalized = unicodedata.normalize("NFKD", text)
+        normalized = unicodedata.normalize("NFKC", text)
         return re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ']+", normalized)
+
+    def _update_personal_context(self, profile: UserStyleProfile, text: str):
+        names = self._extract_personal_names(text)
+        if names:
+            for name in names:
+                profile.personal_names[name] = profile.personal_names.get(name, 0) + 1
+        statements = self._extract_associative_statements(text)
+        if statements:
+            timestamp = datetime.utcnow().isoformat()
+            existing = {
+                entry.get("text")
+                for entry in profile.associative_memory
+                if isinstance(entry, dict)
+            }
+            for sentence in statements:
+                if sentence not in existing:
+                    profile.associative_memory.append({
+                        "text": sentence,
+                        "timestamp": timestamp,
+                    })
+            if len(profile.associative_memory) > 30:
+                profile.associative_memory = profile.associative_memory[-30:]
+
+    def _extract_personal_names(self, text: str) -> List[str]:
+        candidates: List[str] = []
+        for pattern in self.PERSONAL_NAME_PATTERNS:
+            for match in pattern.finditer(text):
+                raw = match.group(1).strip()
+                if not raw:
+                    continue
+                token = re.split(r"[\s,.;:!?]", raw)[0].strip("'\" ")
+                if not token:
+                    continue
+                if not re.match(r"^[A-Za-zÀ-ÖØ-öø-ÿ'\-]+$", token):
+                    continue
+                lowered = token.lower()
+                if lowered in self.NAME_STOPWORDS:
+                    continue
+                normalized = token.title()
+                candidates.append(normalized)
+        unique: Dict[str, None] = {}
+        for name in candidates:
+            unique[name] = None
+        return list(unique.keys())
+
+    def _extract_associative_statements(self, text: str) -> List[str]:
+        sentences = [s.strip() for s in re.split(r"[.!?]+", text) if s.strip()]
+        selected: List[str] = []
+        for sentence in sentences:
+            for pattern in self.MEMORY_PATTERNS_FR:
+                if pattern.search(sentence):
+                    selected.append(sentence)
+                    break
+        return selected
+
+    def _apply_personal_address(self, text: str, profile: UserStyleProfile) -> str:
+        if not profile.personal_names:
+            return text
+        name = max(profile.personal_names.items(), key=lambda item: item[1])[0]
+        if not name:
+            return text
+        if name.lower() in text.lower():
+            return text
+        stripped = text.lstrip()
+        leading = text[: len(text) - len(stripped)]
+        lowered = stripped.lower()
+        greetings = ("salut", "bonjour", "coucou", "hey")
+        if lowered.startswith(greetings):
+            parts = stripped.split(" ", 1)
+            if len(parts) == 2:
+                greeting, rest = parts
+                rest = rest.lstrip(", ")
+                if not rest.lower().startswith(name.lower()):
+                    return f"{leading}{greeting} {name}, {rest}"
+            return text
+        if profile.language == "fr":
+            greeting = "Salut" if profile.formality < 0.6 else "Bonjour"
+        else:
+            greeting = "Hey" if profile.formality < 0.6 else "Hello"
+        if stripped:
+            return f"{leading}{greeting} {name}, {stripped}"
+        return f"{leading}{greeting} {name}"
+
+    def _append_associative_memory(self, text: str, profile: UserStyleProfile) -> str:
+        memories = [
+            entry
+            for entry in profile.associative_memory
+            if isinstance(entry, dict) and entry.get("text")
+        ]
+        if not memories:
+            return text
+        def memory_score(entry: Dict[str, str]) -> tuple:
+            text_lower = entry.get("text", "").lower()
+            score = 0
+            if any(keyword in text_lower for keyword in ("adore", "aime", "préf", "prefe")):
+                score += 5
+            if "tu m'avais dit" in text_lower:
+                score += 3
+            if "il y a" in text_lower:
+                score += 1
+            return (score, entry.get("timestamp", ""))
+
+        memory = max(memories, key=memory_score)
+        memory_text = memory.get("text", "").strip()
+        if not memory_text:
+            return text
+        if memory_text.lower() in text.lower():
+            return text
+        if len(text) > 220:
+            return text
+        if profile.language == "fr":
+            addition = f" Je me souviens que tu m'avais dit : \"{memory_text}\"."
+        else:
+            addition = f" I remember you told me: \"{memory_text}\"."
+        return text.rstrip() + addition
 
     def _caps_ratio(self, text: str) -> float:
         letters = [c for c in text if c.isalpha()]
