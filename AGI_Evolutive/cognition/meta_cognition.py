@@ -1,3 +1,4 @@
+import hashlib
 import math
 import os
 import json
@@ -13,7 +14,20 @@ STOPWORDS = {
     "et", "le", "la", "de", "des", "les", "un", "une", "du", "en", "à",
     "au", "aux", "ou", "dans", "pour", "par", "sur", "avec", "ce", "cet",
     "cette", "ces", "que", "qui", "quoi", "où", "ne", "pas", "plus", "moins",
-    "très", "bien", "mal", "est", "sont", "été", "être", "avoir"
+    "très", "bien", "mal", "est", "sont", "été", "être", "avoir", "je", "tu",
+    "il", "elle", "nous", "vous", "ils", "elles", "moi", "toi", "suis"
+}
+
+TRIVIAL_GOAL_TOKENS = {
+    "bonjour",
+    "salut",
+    "bonsoir",
+    "hello",
+    "hi",
+    "hey",
+    "coucou",
+    "yo",
+    "allo",
 }
 
 POSITIVE_WORDS = {"succès", "réussi", "brillant", "clair", "fiable", "robuste", "juste"}
@@ -170,6 +184,8 @@ class MetaCognition:
             "feature_stats": {}
         }
         self._load()
+        self.state.setdefault("recent_goals", {})
+        self.state.setdefault("last_logged_goal_digest", "")
         self._init_models()
 
     def _load(self):
@@ -523,6 +539,11 @@ class MetaCognition:
             self.goal_model.update(goal_features, target_priority)
             ttl = d.get("revision_ttl", TTL_OPTIONS[1])
             for g in d.get("gaps", []):
+                normalized = (g or "").strip().lower()
+                if not normalized or len(normalized) < 3:
+                    continue
+                if normalized in STOPWORDS or normalized in TRIVIAL_GOAL_TOKENS:
+                    continue
                 prio = max(priority_base, 0.5 * uncertainty + 0.5 * (1.0 - d["confidence"]))
                 candidate_goals.append(
                     {
@@ -534,7 +555,33 @@ class MetaCognition:
                     }
                 )
         candidate_goals.sort(key=lambda x: x["priority"], reverse=True)
-        goals = candidate_goals[:max_goals]
+        now = time.time()
+        recent = self.state.setdefault("recent_goals", {})
+        goals: List[Dict[str, Any]] = []
+        for candidate in candidate_goals:
+            if len(goals) >= max_goals:
+                break
+            gid = candidate.get("id")
+            if not gid:
+                continue
+            last_ts = float(recent.get(gid, 0.0) or 0.0)
+            revision_ttl = candidate.get("revision_ttl")
+            cooldown = 1800.0
+            if isinstance(revision_ttl, (int, float)) and revision_ttl > 0:
+                cooldown = max(cooldown, float(revision_ttl) * 3600.0)
+            if now - last_ts < cooldown:
+                continue
+            goals.append(candidate)
+
+        digest = ""
+        if goals:
+            for goal in goals:
+                gid = goal.get("id")
+                if gid:
+                    recent[gid] = now
+            goal_ids = sorted(goal.get("id", "") for goal in goals)
+            digest = hashlib.sha1("|".join(goal_ids).encode("utf-8")).hexdigest()
+            self.state["recent_goals"] = recent
 
         # Planifier des micro-actions pour chaque goal
         for goal in goals:
@@ -547,13 +594,20 @@ class MetaCognition:
                 if goal.get("revision_ttl"):
                     self.planner.add_step(goal["id"], f"Réviser après {goal['revision_ttl']} jours")
         # journaliser en mémoire
-        if goals and self.memory:
-            self.memory.add_memory({
-                "kind": "reflection",
-                "text": f"Génération de {len(goals)} learning-goals basés sur incertitude",
-                "goals": goals,
-                "ts": time.time()
-            })
+        should_log_reflection = bool(goals)
+        if digest and digest == self.state.get("last_logged_goal_digest"):
+            should_log_reflection = False
+        if should_log_reflection and digest:
+            self.state["last_logged_goal_digest"] = digest
+            if self.memory:
+                self.memory.add_memory({
+                    "kind": "reflection",
+                    "text": f"Génération de {len(goals)} learning-goals basés sur incertitude",
+                    "goals": goals,
+                    "ts": time.time()
+                })
+        if goals:
+            self._save()
         return goals
 
     # --------- Journal réflexif ---------

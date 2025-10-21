@@ -944,11 +944,42 @@ class Orchestrator:
         self._emotion_engine = EmotionEngine()
         self._reflection_loop = ReflectionLoop(self._meta, interval_sec=300)
         self._reflection_loop.start()
-        self._action_interface = ActionInterface(self._memory_store)
+        existing_interface = getattr(self.arch, "action_interface", None)
+        if isinstance(existing_interface, ActionInterface):
+            self._action_interface = existing_interface
+            bound = getattr(self._action_interface, "bound", {}) or {}
+            bind_kwargs = {}
+            if bound.get("arch") is None:
+                bind_kwargs["arch"] = self.arch
+            if bound.get("goals") is None:
+                bind_kwargs["goals"] = getattr(self.arch, "goals", None)
+            if bound.get("policy") is None:
+                bind_kwargs["policy"] = getattr(self.arch, "policy", None)
+            if bound.get("metacog") is None:
+                bind_kwargs["metacog"] = getattr(self.arch, "metacognition", None)
+            if bound.get("emotions") is None:
+                bind_kwargs["emotions"] = getattr(self.arch, "emotions", None)
+            if bound.get("language") is None:
+                bind_kwargs["language"] = getattr(self.arch, "language", None)
+            if bound.get("memory") is None and self._memory_store is not None:
+                bind_kwargs["memory"] = self._memory_store
+            if bind_kwargs:
+                self._action_interface.bind(**bind_kwargs)
+        else:
+            self._action_interface = ActionInterface(self._memory_store)
+            self._action_interface.bind(
+                arch=self.arch,
+                goals=getattr(self.arch, "goals", None),
+                policy=getattr(self.arch, "policy", None),
+                metacog=getattr(self.arch, "metacognition", None),
+                emotions=getattr(self.arch, "emotions", None),
+                language=getattr(self.arch, "language", None),
+            )
         self._perception_interface = PerceptionInterface(self._memory_store)
         self.curiosity = CuriosityEngine(architecture=self.arch)
 
         self.job_manager = JobManager(self)
+        self._action_interface.bind(jobs=self.job_manager)
         self.scheduler = LightScheduler()
         self._register_jobs()
 
