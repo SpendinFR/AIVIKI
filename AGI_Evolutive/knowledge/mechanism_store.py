@@ -38,8 +38,10 @@ from AGI_Evolutive.core.structures.mai import (
 SCHEMA_VERSION = 1
 
 # Default + legacy locations
-_DEFAULT_PATH = Path(os.environ.get("MAI_STORE_PATH", ""))
-if not _DEFAULT_PATH:
+_ENV_PATH = os.environ.get("MAI_STORE_PATH")
+if _ENV_PATH:
+    _DEFAULT_PATH = Path(_ENV_PATH).expanduser()
+else:
     _DEFAULT_PATH = Path("data/runtime/mai_store.jsonl")
 
 _LEGACY_PATH = Path("data/mai_store.jsonl")
