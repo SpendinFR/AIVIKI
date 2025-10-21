@@ -496,35 +496,102 @@ class Planner:
             if not plan:
                 return None
             for step in plan["steps"]:
-                if step["status"] == "todo":
-                    step["status"] = "doing"
-                    step["last_emitted_at"] = time.time()
-                    action = self._step_to_action(goal_id, step)
-                    signal_snapshot = self._capture_signal_snapshot()
-                    if signal_snapshot:
-                        step.setdefault("metrics", {})["signals"] = signal_snapshot
-                    self._save()
-                    return action
+                status = step.get("status")
+                if status not in {"todo", "blocked"}:
+                    continue
+                retry_at = step.get("retry_at")
+                now = time.time()
+                if isinstance(retry_at, (int, float)) and retry_at > now:
+                    continue
+                step["status"] = "doing"
+                step.pop("retry_at", None)
+                step["last_emitted_at"] = now
+                action = self._step_to_action(goal_id, step)
+                signal_snapshot = self._capture_signal_snapshot()
+                if signal_snapshot:
+                    step.setdefault("metrics", {})["signals"] = signal_snapshot
+                self._save()
+                return action
             return None
 
-    def mark_action_done(self, goal_id: str, step_id: str, success: bool = True):
+    def _result_indicates_success(self, result: Optional[Dict[str, Any]]) -> Optional[bool]:
+        if not result:
+            return None
+        if not isinstance(result, dict):
+            return None
+        if result.get("success") is not None:
+            return bool(result.get("success"))
+        if result.get("ok") is False:
+            return False
+        if result.get("simulated") is False:
+            # treat explicit simulator fallbacks as unsuccessful completions
+            if result.get("reason") in {"simulator_unavailable", "simulator_error"}:
+                return False
+        if result.get("supported") is False:
+            return False
+        return True
+
+    def _summarize_result(self, result: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        if not isinstance(result, dict):
+            return {}
+        summary: Dict[str, Any] = {}
+        for key in ("ok", "reason", "simulated", "supported"):
+            if key in result:
+                summary[key] = result[key]
+        if "success" in result:
+            summary["reported_success"] = result["success"]
+        return summary
+
+    def mark_action_done(
+        self,
+        goal_id: str,
+        step_id: str,
+        success: Optional[bool] = None,
+        *,
+        result: Optional[Dict[str, Any]] = None,
+    ):
         with self._lock:
             plan = self.state.get("plans", {}).get(goal_id)
             if not plan:
                 return
             for step in plan.get("steps", []):
                 if step.get("id") == step_id:
-                    step["status"] = "done" if success else "blocked"
+                    attempts = int(step.get("attempts", 0))
+                    derived = self._result_indicates_success(result)
+                    success_flag: bool
+                    if success is None:
+                        success_flag = bool(derived if derived is not None else True)
+                    else:
+                        success_flag = bool(success)
+                        if derived is not None:
+                            success_flag = success_flag and bool(derived)
+                    if success_flag:
+                        step["status"] = "done"
+                        step.pop("retry_at", None)
+                    else:
+                        attempts += 1
+                        step["status"] = "todo"
+                        cooldown = min(3600.0, 5.0 * (2 ** min(6, attempts - 1)))
+                        step["retry_at"] = time.time() + cooldown
+                    step["attempts"] = attempts
                     step["last_update"] = time.time()
-                    step.setdefault("history", []).append(
-                        {"ts": time.time(), "event": "completed", "success": success}
-                    )
+                    history_entry = {
+                        "ts": time.time(),
+                        "event": "completed",
+                        "success": success_flag,
+                    }
+                    summary = self._summarize_result(result)
+                    if summary:
+                        history_entry.update(summary)
+                    if not success_flag and summary.get("reason"):
+                        step["last_failure_reason"] = summary.get("reason")
+                    step.setdefault("history", []).append(history_entry)
                     emitted_at = step.get("last_emitted_at")
                     if emitted_at:
                         elapsed = max(0.0, time.time() - emitted_at)
-                        self._register_outcome(success, elapsed)
+                        self._register_outcome(success_flag, elapsed)
                     if step.get("metrics"):
-                        self._update_signal_feedback(step["metrics"], bool(success))
+                        self._update_signal_feedback(step["metrics"], bool(success_flag))
                     break
             self._save()
 
