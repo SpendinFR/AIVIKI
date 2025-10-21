@@ -69,6 +69,23 @@ class StageResult:
         )
 
 
+class StageExecutionError(RuntimeError):
+    """Raised when an autopilot stage fails despite error handling."""
+
+    def __init__(self, stage: str, result: StageResult) -> None:
+        self.stage = stage
+        self.result = result
+        error = result.error or "unknown error"
+        if result.failures:
+            message = f"Stage '{stage}' failed after {result.failures} failure(s): {error}"
+        else:
+            message = f"Stage '{stage}' failed: {error}"
+        details = result.details or {}
+        if details:
+            message = f"{message} (details: {details})"
+        super().__init__(message)
+
+
 class Autopilot:
     """Coordinates ingestion, cognition cycles and persistence."""
 
@@ -178,6 +195,19 @@ class Autopilot:
         metrics["stages"]["cycle"] = cycle_result.to_metrics()
         out = cycle_result.payload if cycle_result.ok else None
 
+        if cycle_result.ok and not self._cycle_payload_has_text(out):
+            details = self._describe_cycle_payload(out)
+            error_result = StageResult(
+                name="cycle",
+                ok=False,
+                duration=cycle_result.duration,
+                failures=cycle_result.failures,
+                error="cycle stage returned no usable reply text",
+                details=details,
+                payload=out,
+            )
+            raise StageExecutionError("cycle", error_result)
+
         # 3) Allow the optional orchestrator to do additional coordination.
         if self.orchestrator is not None:
             orchestrator_result = self._run_stage(
@@ -216,7 +246,51 @@ class Autopilot:
         self._last_cycle_metrics = metrics
         self._step_counter += 1
 
+        if not cycle_result.ok:
+            raise StageExecutionError("cycle", cycle_result)
+
         return out
+
+    def _cycle_payload_has_text(self, payload: Any) -> bool:
+        if payload is None:
+            return False
+        if isinstance(payload, str):
+            return bool(payload.strip())
+        if isinstance(payload, dict):
+            text = payload.get("text") or payload.get("raw")
+            if isinstance(text, str):
+                return bool(text.strip())
+            return False
+        text_attr = getattr(payload, "text", None)
+        if isinstance(text_attr, str):
+            return bool(text_attr.strip())
+        return False
+
+    def _describe_cycle_payload(self, payload: Any) -> Dict[str, Any]:
+        details: Dict[str, Any] = {"payload_type": type(payload).__name__}
+        if isinstance(payload, dict):
+            keys = list(payload.keys())
+            if len(keys) > 8:
+                details["payload_keys"] = keys[:8] + ["…"]
+            else:
+                details["payload_keys"] = keys
+            text = payload.get("text") or payload.get("raw")
+            if isinstance(text, str):
+                preview = text.strip()
+                if preview:
+                    details["text_preview"] = preview[:120]
+        elif isinstance(payload, str):
+            details["text_length"] = len(payload)
+            preview = payload.strip()
+            if preview:
+                details["text_preview"] = preview[:120]
+        else:
+            text_attr = getattr(payload, "text", None)
+            if isinstance(text_attr, str):
+                preview = text_attr.strip()
+                if preview:
+                    details["text_preview"] = preview[:120]
+        return details
 
     def pending_questions(self):
         """Retourne les questions auto-générées, + celles de validation d'apprentissage."""
