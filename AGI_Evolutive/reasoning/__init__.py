@@ -604,7 +604,11 @@ class ReasoningSystem:
                 target = entry.get("target") or entry.get("action")
                 polarity = entry.get("polarity") or entry.get("valence")
                 message = entry.get("message") or entry.get("text")
-                confidence = float(entry.get("confidence", 1.0))
+                confidence_raw = entry.get("confidence", 1.0)
+                try:
+                    confidence = float(confidence_raw)
+                except (TypeError, ValueError):
+                    confidence = 1.0
                 intensity = entry.get("intensity") or entry.get("weight")
                 if polarity is None and message:
                     text_signal = self._analyze_feedback_text(str(message), preferences)
