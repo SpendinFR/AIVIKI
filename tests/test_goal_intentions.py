@@ -21,6 +21,15 @@ class MemoryStub:
         return payload
 
 
+class ArchRecorderStub:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    def _record_skill(self, concept: str, **kwargs):  # noqa: D401 - simple stub
+        self.calls.append((concept, kwargs))
+        return {"ok": True, "concept": concept, "payload": kwargs}
+
+
 @pytest.fixture()
 def goal_system(tmp_path):
     data_path = tmp_path / "goal_intentions.json"
@@ -126,6 +135,20 @@ def test_goal_completion_updates_status_and_memory(goal_system_with_memory):
         assert refreshed_parent.progress > 0.0
 
 
+def test_manual_completion_records_skill(goal_system_with_memory):
+    system, _ = goal_system_with_memory
+    recorder = ArchRecorderStub()
+    system.architecture = recorder
+
+    goal = system.add_goal("Assimiler la patience profonde")
+    system.update_goal(goal.id, {"progress": 1.0})
+
+    assert recorder.calls, "La compétence devrait être enregistrée lors de la complétion manuelle"
+    concept, payload = recorder.calls[-1]
+    assert "patience" in concept.lower()
+    assert payload["metadata"]["goal_id"] == goal.id
+
+
 def test_question_manager_structural_action(goal_system):
     goal = goal_system.add_goal(
         "Solliciter le QuestionManager pour clarifier « introspection » si ma compréhension reste faible.",
@@ -184,6 +207,40 @@ def test_integrate_understanding_updates_progress(goal_system_with_memory):
         entry.get("kind") == "goal_completion" and entry.get("goal_id") == goal.id
         for entry in memory.entries
     )
+
+
+def test_integrate_understanding_records_skill_once(goal_system_with_memory):
+    system, _ = goal_system_with_memory
+    recorder = ArchRecorderStub()
+    system.architecture = recorder
+
+    goal = system.add_goal("Comprendre l'empathie en profondeur.")
+    system.store.set_active(goal.id)
+
+    system.integrate_understanding(
+        topic="empathie",
+        score=0.72,
+        prediction_error=0.24,
+        gaps=["manque d'exemples"],
+        goal_id=goal.id,
+        source="test",
+    )
+
+    assert not recorder.calls
+
+    system.integrate_understanding(
+        topic="empathie",
+        score=0.95,
+        prediction_error=0.03,
+        gaps=[],
+        goal_id=goal.id,
+        source="test",
+    )
+
+    assert len(recorder.calls) == 1
+    concept, payload = recorder.calls[0]
+    assert "empathie" in concept.lower()
+    assert payload["metadata"]["goal_id"] == goal.id
 
 
 def test_integrate_understanding_matches_goal_without_id(goal_system_with_memory):
