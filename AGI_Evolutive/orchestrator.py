@@ -2542,11 +2542,10 @@ class Orchestrator:
                     except Exception:
                         milestone_info = None
 
-                    progress_update = None
                     goals = getattr(self.arch, "goals", None)
                     if goals and hasattr(goals, "integrate_understanding"):
                         try:
-                            progress_update = goals.integrate_understanding(
+                            goals.integrate_understanding(
                                 topic=current_topic if current_topic != "__generic__" else topic,
                                 score=float(getattr(U, "U_topic", 0.5)),
                                 prediction_error=float(prediction_error),
@@ -2561,25 +2560,7 @@ class Orchestrator:
                                 },
                             )
                         except Exception:
-                            progress_update = None
-
-                    if progress_update and progress_update.get("completed"):
-                        recorder = getattr(self.arch, "_record_skill", None)
-                        topic_label = progress_update.get("topic") or current_topic
-                        if callable(recorder) and topic_label and len(topic_label.strip()) >= 3:
-                            try:
-                                recorder(
-                                    topic_label.strip(),
-                                    source="goal_completion",
-                                    confidence=progress_update.get("progress"),
-                                    metadata={
-                                        "goal_id": progress_update.get("goal_id"),
-                                        "pipeline": pipe,
-                                        "trigger": trigger.type.name,
-                                    },
-                                )
-                            except Exception:
-                                pass
+                            pass
 
                     if not isinstance(ctx.get("gaps"), list):
                         ctx["gaps"] = []

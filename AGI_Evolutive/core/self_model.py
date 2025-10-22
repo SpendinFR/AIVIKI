@@ -3,7 +3,7 @@ import json
 import math
 import os
 import time
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Mapping
 
 from AGI_Evolutive.core.config import cfg
 from AGI_Evolutive.utils import now_iso, safe_write_json
@@ -225,12 +225,58 @@ class SelfModel:
         else:
             style.setdefault("tone", "helpful")
             prefs.setdefault("values", ["curiosity", "care", "precision"])
+        prefs.setdefault("likes", [])
+        prefs.setdefault("dislikes", [])
 
         ident.setdefault("who", {}).setdefault("claims", {})  # {key:{text,confidence,evidences[]}}
         ident.setdefault("where", {}).setdefault("runtime", {})  # env/host/workspace/context
-        ident.setdefault("purpose", {})  # mission, near_term_goals[], current_goal, kpis{}
+        purpose = ident.setdefault("purpose", {})  # mission, near_term_goals[], current_goal, kpis{}
+        purpose.setdefault("mission", purpose.get("mission", ""))
+        purpose.setdefault("ultimate", purpose.get("ultimate", purpose.get("mission")))
+        purpose.setdefault("near_term_goals", list(purpose.get("near_term_goals", [])))
+        purpose.setdefault("daily_focus", list(purpose.get("daily_focus", [])))
+        purpose.setdefault("current_goal", purpose.get("current_goal"))
         ident.setdefault("principles", [])  # [{key,desc,evidence_refs[]}]
         ident.setdefault("beliefs", {}).setdefault("index", {})  # topic→{conf,last_seen,refs[],stance}
+        ident.setdefault("ideals", [])
+
+        ident.setdefault(
+            "narrative",
+            {
+                "recent_memories": [],
+                "summaries": [],
+                "notable_events": [],
+            },
+        )
+        ident.setdefault(
+            "agenda",
+            {
+                "today": [],
+                "tomorrow": [],
+                "horizon": [],
+            },
+        )
+        ident.setdefault(
+            "achievements",
+            {
+                "recent": [],
+                "milestones": [],
+            },
+        )
+        ident.setdefault(
+            "reflections",
+            {
+                "past": [],
+                "present": {"summary": "", "confidence": 0.5},
+            },
+        )
+        ident.setdefault(
+            "memory",
+            {
+                "all_time_index": [],
+                "compressed": [],
+            },
+        )
 
         work = ident.setdefault("work", {})
         work.setdefault("current", {"focus_topic": None, "jobs_running": [], "loads": {"interactive": 0, "background": 0}})
@@ -775,5 +821,133 @@ class SelfModel:
         }
 
         self.update_policy_feedback(target, context=context, expected=expected, obtained=obtained)
+
+    # ------------------------------------------------------------------
+    def build_synthesis(self, *, max_items: int = 6) -> Dict[str, Any]:
+        """Return a condensed snapshot of the long-term self model."""
+
+        self.ensure_identity_paths()
+        ident = self.identity
+
+        def _take(seq: Any) -> List[Any]:
+            if not isinstance(seq, Iterable) or isinstance(seq, (str, bytes, dict)):
+                return []
+            items = list(seq)
+            if max_items <= 0:
+                return items
+            return items[:max_items]
+
+        core = ident.get("core", {})
+        preferences = ident.get("preferences", {})
+        principles = ident.get("principles", [])
+        ideals = ident.get("ideals", [])
+        purpose = ident.get("purpose", {})
+        agenda = ident.get("agenda", {})
+        achievements = ident.get("achievements", {})
+        narrative = ident.get("narrative", {})
+        social = ident.get("social", {})
+        reflections = ident.get("reflections", {})
+        state = ident.get("state", {})
+        self_judgment = ident.get("self_judgment", {})
+
+        likes = _take(preferences.get("likes", []))
+        dislikes = _take(preferences.get("dislikes", []))
+        values = _take(preferences.get("values", []))
+
+        beliefs_index = ident.get("beliefs", {}).get("index", {})
+        belief_rows: List[Dict[str, Any]] = []
+        if isinstance(beliefs_index, Mapping):
+            for topic, payload in beliefs_index.items():
+                if not isinstance(payload, Mapping):
+                    continue
+                belief_rows.append(
+                    {
+                        "topic": topic,
+                        "stance": payload.get("stance"),
+                        "confidence": SelfModel._safe_float(
+                            payload.get("confidence", payload.get("conf", 0.0)), 0.0
+                        ),
+                        "last_seen": payload.get("last_seen"),
+                    }
+                )
+        belief_rows.sort(key=lambda row: row.get("confidence", 0.0), reverse=True)
+        if max_items > 0:
+            belief_rows = belief_rows[:max_items]
+
+        principles_rows = []
+        for entry in principles:
+            if isinstance(entry, Mapping):
+                principles_rows.append(
+                    {
+                        "key": entry.get("key"),
+                        "description": entry.get("desc") or entry.get("description"),
+                        "evidence_refs": list(entry.get("evidence_refs", [])),
+                    }
+                )
+        if max_items > 0:
+            principles_rows = principles_rows[:max_items]
+
+        narrative_recent = _take(narrative.get("recent_memories", []))
+        narrative_summaries = _take(narrative.get("summaries", []))
+
+        agenda_today = _take(agenda.get("today", []))
+        agenda_tomorrow = _take(agenda.get("tomorrow", []))
+        agenda_horizon = _take(agenda.get("horizon", []))
+
+        achievements_recent = _take(achievements.get("recent", []))
+        achievements_milestones = _take(achievements.get("milestones", []))
+
+        social_interactions = _take(social.get("interactions", []))
+
+        reflections_past = _take(reflections.get("past", []))
+        present_reflection = reflections.get("present", {})
+
+        summary = {
+            "identity": {
+                "name": core.get("name", ident.get("name")),
+                "version": core.get("version", ident.get("version")),
+                "created_at": core.get("created_at", ident.get("created_at")),
+            },
+            "values": values,
+            "likes": likes,
+            "dislikes": dislikes,
+            "principles": principles_rows,
+            "ideals": _take(ideals),
+            "beliefs": belief_rows,
+            "ultimate_goal": purpose.get("ultimate") or purpose.get("mission"),
+            "current_goal": purpose.get("current_goal"),
+            "near_term_goals": _take(purpose.get("near_term_goals", [])),
+            "daily_focus": _take(purpose.get("daily_focus", [])),
+            "agenda": {
+                "today": agenda_today,
+                "tomorrow": agenda_tomorrow,
+                "horizon": agenda_horizon,
+            },
+            "achievements": {
+                "recent": achievements_recent,
+                "milestones": achievements_milestones,
+            },
+            "memories": {
+                "recent": narrative_recent,
+                "summaries": narrative_summaries,
+            },
+            "social": {
+                "interactions": social_interactions,
+                "appraisal": social.get("appraisal", {}),
+            },
+            "state": {
+                "emotions": dict(state.get("emotions", {})),
+                "cognition": dict(state.get("cognition", {})),
+                "doubts": _take(state.get("doubts", [])),
+            },
+            "self_judgment": {
+                "traits": dict(self_judgment.get("traits", {})),
+                "phase": self_judgment.get("phase"),
+                "history": reflections_past,
+                "present": dict(present_reflection) if isinstance(present_reflection, Mapping) else {},
+            },
+        }
+
+        return summary
 
     # ===================== Fin du patch SelfIdentity v2 =====================

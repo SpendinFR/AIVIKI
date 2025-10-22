@@ -10,7 +10,37 @@ import random
 from collections.abc import MutableMapping
 from typing import Dict, Iterable, Mapping, Optional
 
-import numpy as np
+try:  # pragma: no cover - optional numpy dependency
+    import numpy as np  # type: ignore
+except Exception:  # pragma: no cover - lightweight fallback for tests
+    class _FallbackNumpy:
+        inf = float("inf")
+
+        @staticmethod
+        def zeros(length: int, dtype=float):
+            return [dtype() for _ in range(length)]
+
+        @staticmethod
+        def append(array, value):
+            return list(array) + [value]
+
+        @staticmethod
+        def dot(a, b):
+            return sum(float(x) * float(y) for x, y in zip(a, b))
+
+        @staticmethod
+        def clip(value, low, high):
+            try:
+                numeric = float(value)
+            except Exception:
+                numeric = 0.0
+            return max(low, min(high, numeric))
+
+        @staticmethod
+        def copy(array):
+            return list(array)
+
+    np = _FallbackNumpy()  # type: ignore
 
 
 def _sigmoid(x: float) -> float:

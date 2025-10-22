@@ -4,11 +4,62 @@ Système de Mémoire Complet de l'AGI Évolutive
 Intègre mémoire de travail, épisodique, sémantique, procédurale et consolidation
 """
 
-import numpy as np
+import math
+import random
+from typing import Any, Iterable
+try:
+    import numpy as np  # type: ignore
+except Exception:  # pragma: no cover - lightweight fallback when numpy is absent
+    class _FallbackNumpy:
+        floating = float
+
+        @staticmethod
+        def isfinite(value: Any) -> bool:
+            try:
+                return math.isfinite(float(value))
+            except Exception:
+                return False
+
+        @staticmethod
+        def tanh(value: Any) -> float:
+            try:
+                return math.tanh(float(value))
+            except Exception:
+                return 0.0
+
+        @staticmethod
+        def clip(value: Any, low: float, high: float) -> float:
+            try:
+                numeric = float(value)
+            except Exception:
+                numeric = 0.0
+            return float(max(low, min(high, numeric)))
+
+        @staticmethod
+        def exp(value: Any) -> float:
+            try:
+                return math.exp(float(value))
+            except Exception:
+                return 0.0
+
+        @staticmethod
+        def var(values: Iterable[Any]) -> float:
+            filtered = [float(v) for v in values if isinstance(v, (int, float))]
+            if not filtered:
+                return 0.0
+            mean = sum(filtered) / len(filtered)
+            return sum((v - mean) ** 2 for v in filtered) / len(filtered)
+
+        class random:  # type: ignore
+            @staticmethod
+            def random() -> float:
+                return random.random()
+
+    np = _FallbackNumpy()  # type: ignore
 import time
 from collections import deque
 from datetime import datetime, timedelta
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass, field
 from enum import Enum
 import heapq
@@ -40,15 +91,24 @@ except Exception:  # pragma: no cover
 
 from .adaptive import AdaptiveMemoryParameters, ThompsonBetaScheduler
 from .retrieval import MemoryRetrieval
-from .semantic_memory_manager import SemanticMemoryManager
-from .summarizer import ProgressiveSummarizer, SummarizerConfig
+from .semantic_memory_manager import (
+    SemanticMemoryManager as _SummarizationCoordinator,
+    ProgressiveSummarizer,
+    SummarizerConfig,
+)
+from .semantic_manager import SemanticMemoryManager as _ConceptMemoryManager
+from .alltime import LongTermMemoryHub
 
 __all__ = [
     "MemorySystem",
     "SemanticMemoryManager",
     "ProgressiveSummarizer",
     "SummarizerConfig",
+    "LongTermMemoryHub",
 ]
+
+# Conserve the historical export name
+SemanticMemoryManager = _ConceptMemoryManager
 
 try:  # configuration optionnelle
     from config import memory_flags as _mem_flags
@@ -120,17 +180,20 @@ class MemorySystem:
 
         # --- MÉMOIRE SÉMANTIQUE EXTERNE ---
         self.store = memory_store
-        self.manager: Optional[SemanticMemoryManager] = None
+        self.persistence: Optional[_SummarizationCoordinator] = None
         if self.store is not None:
-            self.manager = SemanticMemoryManager(
-                memory_store=self.store,
-                concept_store=concept_store,
-                episodic_linker=episodic_linker,
-                consolidator=consolidator,
-                summarize_period_s=summarize_period_s,
-                summarizer_config=summarizer_config,
-                llm_summarize_fn=llm_summarize_fn,
-            )
+            try:
+                self.persistence = _SummarizationCoordinator(
+                    memory_store=self.store,
+                    concept_store=concept_store,
+                    episodic_linker=episodic_linker,
+                    consolidator=consolidator,
+                    summarize_period_s=summarize_period_s,
+                    summarizer_config=summarizer_config,
+                    llm_summarize_fn=llm_summarize_fn,
+                )
+            except Exception:
+                self.persistence = None
 
         # Buffer circulaire des interactions les plus récentes pour les modules
         # comme le SemanticConceptExtractor ou l'EmotionEngine qui ont besoin
@@ -157,9 +220,9 @@ class MemorySystem:
                 self._salience_scorer = None
 
         self.manager = None
-        if ENABLE_SUMMARIZER and SemanticMemoryManager:
+        if ENABLE_SUMMARIZER and _ConceptMemoryManager:
             try:
-                self.manager = SemanticMemoryManager(self, architecture=architecture)
+                self.manager = _ConceptMemoryManager(self, architecture=architecture)
             except Exception:
                 self.manager = None
 
@@ -211,6 +274,18 @@ class MemorySystem:
             self.salience_scorer.goals = getattr(self, "goals", None)
             if self.prefs_bridge and not self.salience_scorer.prefs:
                 self.salience_scorer.prefs = self.prefs_bridge
+
+        summarizer = getattr(self.persistence, "summarizer", None)
+        belief_graph = getattr(self.cognitive_architecture, "beliefs", None) if self.cognitive_architecture else None
+        self_model_ref = getattr(self.cognitive_architecture, "self_model", None) if self.cognitive_architecture else None
+        self.long_horizon = LongTermMemoryHub(
+            self.store,
+            summarizer=summarizer,
+            belief_graph=belief_graph,
+            self_model=self_model_ref,
+            goals=getattr(self, "goals", None),
+        )
+        self._refresh_long_horizon_bindings()
 
         
         # === MÉMOIRE SENSORIELLE ===
@@ -567,6 +642,153 @@ class MemorySystem:
                 except Exception:
                     pass
                 break
+
+    def _refresh_long_horizon_bindings(self) -> None:
+        hub = getattr(self, "long_horizon", None)
+        if hub is None:
+            hub = LongTermMemoryHub(self.store)
+            self.long_horizon = hub
+        summarizer = getattr(self.persistence, "summarizer", None) if self.persistence else None
+        belief_graph = (
+            getattr(self.cognitive_architecture, "beliefs", None) if self.cognitive_architecture else None
+        )
+        self_model_ref = (
+            getattr(self.cognitive_architecture, "self_model", None) if self.cognitive_architecture else None
+        )
+        hub.rebind(
+            memory_store=self.store,
+            summarizer=summarizer,
+            belief_graph=belief_graph,
+            self_model=self_model_ref,
+            goals=getattr(self, "goals", None),
+        )
+
+    def rebind_long_horizon(self, **overrides: Any) -> None:
+        """Update the long-term hub with explicit overrides."""
+
+        if "memory_store" in overrides and overrides["memory_store"] is not None:
+            self.store = overrides["memory_store"]
+        hub = getattr(self, "long_horizon", None)
+        if hub is None:
+            hub = LongTermMemoryHub(self.store)
+            self.long_horizon = hub
+        defaults = {
+            "memory_store": self.store,
+            "summarizer": getattr(self.persistence, "summarizer", None) if self.persistence else None,
+            "belief_graph": getattr(self.cognitive_architecture, "beliefs", None)
+            if self.cognitive_architecture
+            else None,
+            "self_model": getattr(self.cognitive_architecture, "self_model", None)
+            if self.cognitive_architecture
+            else None,
+            "goals": getattr(self, "goals", None),
+        }
+        for key, value in overrides.items():
+            if value is not None:
+                defaults[key] = value
+        hub.rebind(**defaults)
+
+    def get_all_time_snapshot(self) -> Dict[str, Any]:
+        hub = getattr(self, "long_horizon", None)
+        if not hub:
+            return {}
+        self._refresh_long_horizon_bindings()
+        return hub.build_snapshot()
+
+    def get_all_time_timeline(self, **params: Any) -> Dict[str, Any]:
+        hub = getattr(self, "long_horizon", None)
+        if not hub:
+            return {"combined": [], "recent": [], "digests": {"daily": [], "weekly": [], "monthly": []}}
+        self._refresh_long_horizon_bindings()
+        return hub.timeline(**params)
+
+    def describe_long_term_period(self, days_ago: int, level: str = "daily") -> Dict[str, Any]:
+        hub = getattr(self, "long_horizon", None)
+        if not hub:
+            return {}
+        self._refresh_long_horizon_bindings()
+        details = hub.describe_period(days_ago=days_ago, level=level)
+        return details.to_payload() if details else {}
+
+    def get_all_time_history(
+        self,
+        *,
+        include_raw: bool = True,
+        include_digests: bool = True,
+        include_expanded: bool = True,
+        include_knowledge: bool = True,
+        include_self_model: bool = True,
+        limit_recent: int = 512,
+        limit_digests: int = 180,
+        since_ts: Optional[float] = None,
+        top_beliefs: int = 20,
+        top_completed_goals: int = 12,
+        top_lessons: int = 12,
+        self_model_max_items: int = 6,
+    ) -> Dict[str, Any]:
+        hub = getattr(self, "long_horizon", None)
+        if not hub:
+            empty_timeline = {
+                "combined": [],
+                "recent": [],
+                "digests": {"daily": [], "weekly": [], "monthly": []},
+            }
+            stats = {
+                "total_entries": 0,
+                "raw_count": 0,
+                "digest_count": 0,
+                "coverage_entries": 0,
+                "oldest_ts": None,
+                "newest_ts": None,
+            }
+            result: Dict[str, Any] = {"timeline": empty_timeline, "stats": stats}
+            if include_expanded:
+                result["expanded"] = {}
+            if include_knowledge:
+                result["knowledge"] = {"beliefs": [], "completed_goals": [], "lessons": []}
+            if include_self_model:
+                result["self_model"] = {}
+            return result
+
+        self._refresh_long_horizon_bindings()
+        return hub.full_history(
+            include_raw=include_raw,
+            include_digests=include_digests,
+            include_expanded=include_expanded,
+            include_knowledge=include_knowledge,
+            include_self_model=include_self_model,
+            limit_recent=limit_recent,
+            limit_digests=limit_digests,
+            since_ts=since_ts,
+            top_beliefs=top_beliefs,
+            top_completed_goals=top_completed_goals,
+            top_lessons=top_lessons,
+            self_model_max_items=self_model_max_items,
+        )
+
+    def self_model_overview(self, *, max_items: int = 6) -> Dict[str, Any]:
+        hub = getattr(self, "long_horizon", None)
+        if not hub:
+            return {}
+        self._refresh_long_horizon_bindings()
+        return hub.self_model_snapshot(max_items=max_items)
+
+    def knowledge_overview(
+        self,
+        *,
+        top_beliefs: int = 20,
+        top_completed_goals: int = 12,
+        top_lessons: int = 12,
+    ) -> Dict[str, Any]:
+        hub = getattr(self, "long_horizon", None)
+        if not hub:
+            return {"beliefs": [], "completed_goals": [], "lessons": []}
+        self._refresh_long_horizon_bindings()
+        return hub.knowledge_snapshot(
+            top_beliefs=top_beliefs,
+            top_completed_goals=top_completed_goals,
+            top_lessons=top_lessons,
+        )
 
     def store_interaction(self, record: Dict[str, Any]):
         """

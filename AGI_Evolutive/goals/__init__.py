@@ -88,6 +88,10 @@ class GoalSystem:
         self.last_auto_proposal_at = 0.0
         self.auto_proposal_interval = 180.0
 
+        # Conserve les buts déjà consolidés pour éviter les doublons lors de
+        # l'enregistrement automatique des compétences.
+        self._recorded_goal_skills: Set[str] = set()
+
         self._ensure_root_goal()
         self._hydrate_metadata()
         self._ensure_structural_hierarchy()
@@ -879,6 +883,53 @@ class GoalSystem:
         except Exception:
             pass
         self._store_completion_memory(goal, metadata)
+        self._record_completion_skill(goal, metadata)
+
+    def _record_completion_skill(
+        self, goal: GoalNode, metadata: Optional[GoalMetadata]
+    ) -> None:
+        """Enregistre la compétence correspondante lorsqu'un but est complété."""
+
+        if goal.id in self._recorded_goal_skills:
+            return
+
+        architecture = getattr(self, "architecture", None)
+        recorder = getattr(architecture, "_record_skill", None) if architecture else None
+        if not callable(recorder):
+            return
+
+        label = self._completion_concept_label(goal, metadata)
+        if not label or len(label.strip()) < 3:
+            return
+
+        try:
+            recorder(
+                label.strip(),
+                source="goal_completion",
+                confidence=float(goal.progress),
+                metadata={
+                    "goal_id": goal.id,
+                    "description": goal.description,
+                    "criteria": list(goal.criteria),
+                    "created_by": goal.created_by,
+                },
+            )
+            self._recorded_goal_skills.add(goal.id)
+        except Exception:
+            return
+
+    def _completion_concept_label(
+        self, goal: GoalNode, metadata: Optional[GoalMetadata]
+    ) -> str:
+        focus = self._extract_focus_topic(goal.description)
+        if focus:
+            return focus
+        if metadata and metadata.success_criteria:
+            for criterion in metadata.success_criteria:
+                focus = self._extract_focus_topic(str(criterion))
+                if focus:
+                    return focus
+        return goal.description.strip()
 
     def _store_completion_memory(
         self, goal: GoalNode, metadata: Optional[GoalMetadata]
