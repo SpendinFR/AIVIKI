@@ -3,6 +3,7 @@
 import math
 import random
 import time
+import unicodedata
 from collections import deque
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -135,6 +136,16 @@ class ReasoningSystem:
         complexity = self._estimate_complexity(prompt, strategy, hypos)
         final_conf = float(min(0.9, 0.45 + 0.4 * scores[chosen_idx] + 0.10 * (1.0 - complexity)))
 
+        deliberation = self._deliberate_actions(
+            prompt,
+            strategy,
+            hypos,
+            scores,
+            context or {},
+            complexity=complexity,
+        )
+
+        metadata = {"deliberation": deliberation} if deliberation else None
         ep = episode_record(
             user_msg=prompt,
             hypotheses=hypos,
@@ -143,6 +154,7 @@ class ReasoningSystem:
             evidence=evidence,
             result_text=evidence.notes,
             final_confidence=final_conf,
+            metadata=metadata,
         )
         ep["reasoning_time"] = reasoning_time
         ep["complexity"] = complexity
@@ -150,11 +162,20 @@ class ReasoningSystem:
         ep["hypothesis_features"] = features_by_idx
         ep["smoothing_value"] = smoothing_value
         ep["test_keys"] = chosen_test_keys
+        if deliberation:
+            ep["deliberation"] = deliberation
 
         self._push_episode(ep)
 
         summary = self._make_readable_summary(strategy, hypos, chosen_idx, tests, evidence, final_conf)
+        if deliberation and deliberation.get("chosen"):
+            best = deliberation["chosen"]
+            summary += (
+                f" Choix opératoire privilégié: {best.get('label')} (utilité≈{best.get('utility', 0.0):.2f})."
+            )
         self._learn(final_conf, strategy, features_by_idx.get(chosen_idx, {}), smoothing_value, chosen_test_keys)
+        if deliberation:
+            self._record_deliberation(prompt, deliberation, final_conf, complexity)
 
         try:
             if hasattr(self.arch, "logger") and self.arch.logger:
@@ -162,7 +183,7 @@ class ReasoningSystem:
         except Exception:
             pass
 
-        return {
+        result = {
             "summary": summary,
             "chosen_hypothesis": hypos[chosen_idx].content if hypos else "",
             "tests": [t.description for t in tests],
@@ -174,6 +195,14 @@ class ReasoningSystem:
             "prochain_test": tests[0].description if tests else "-",
             "episode": ep,
         }
+        if deliberation:
+            result["deliberation"] = deliberation
+            cooldown = deliberation.get("rules", {}).get("ask_user_cooldown", 0)
+            if cooldown:
+                result.setdefault("appris", []).append(
+                    f"Respecter un délai d'au moins {cooldown} interactions avant de redemander à l'utilisateur."
+                )
+        return result
 
     def get_reasoning_stats(self) -> Dict[str, Any]:
         """Résumé statistique utilisé par la métacognition."""
@@ -339,6 +368,967 @@ class ReasoningSystem:
         if bandit:
             for key in test_keys:
                 bandit.update(key, reward_conf)
+
+    def _self_preferences(self) -> Dict[str, Any]:
+        self_model = getattr(self.arch, "self_model", None)
+        preferences = {
+            "values": [],
+            "autonomy_bias": 0.5,
+            "caution_bias": 0.5,
+            "verification_bias": 0.5,
+            "cognitive_load": 0.0,
+            "uncertainty": 0.0,
+            "recent_decisions": {},
+            "rules": {},
+            "feedback_lexicon": {},
+            "storage_path": None,
+            "last_refreshed_ts": time.time(),
+        }
+        if not self_model:
+            return preferences
+        ensure_paths = getattr(self_model, "ensure_identity_paths", None)
+        if callable(ensure_paths):
+            try:
+                ensure_paths()
+            except Exception:
+                pass
+        identity = getattr(self_model, "identity", {}) or {}
+        values = identity.get("preferences", {}).get("values", [])
+        normalized_values = [str(v).lower() for v in values if isinstance(v, str)]
+        preferences["values"] = normalized_values
+
+        rules = identity.get("choices", {}).get("rules", {})
+        if isinstance(rules, dict):
+            preferences["rules"] = rules
+
+        feedback_info = identity.get("feedback", {})
+        lexicon = feedback_info.get("lexicon") if isinstance(feedback_info, dict) else None
+        if isinstance(lexicon, dict):
+            parsed_lexicon: Dict[str, float] = {}
+            for token, value in lexicon.items():
+                if not token:
+                    continue
+                try:
+                    weight = float(value)
+                except (TypeError, ValueError):
+                    continue
+                normalized_token = str(token).lower().strip()
+                if not normalized_token:
+                    continue
+                parsed_lexicon[normalized_token] = float(max(-1.0, min(1.0, weight)))
+            preferences["feedback_lexicon"] = parsed_lexicon
+
+        storage_path = getattr(self_model, "path", None)
+        if isinstance(storage_path, str):
+            preferences["storage_path"] = storage_path
+
+        stats = (
+            identity.get("choices", {})
+            .get("policies", {})
+            .get("stats", {})
+        )
+        success = float(stats.get("success", 0))
+        fail = float(stats.get("fail", 0))
+        total = success + fail
+        success_rate = success / total if total else 0.5
+        preferences["autonomy_bias"] = 0.4 + 0.4 * success_rate
+        preferences["caution_bias"] = 0.4 + 0.4 * (1.0 - success_rate)
+        preferences["verification_bias"] = 0.5
+
+        if "curiosity" in normalized_values:
+            preferences["autonomy_bias"] += 0.1
+        if "care" in normalized_values:
+            preferences["caution_bias"] += 0.1
+        if "precision" in normalized_values:
+            preferences["verification_bias"] += 0.1
+
+        state = identity.get("state", {})
+        cognition = state.get("cognition", {})
+        load = cognition.get("load", 0.0)
+        uncertainty = cognition.get("uncertainty", 0.0)
+        try:
+            preferences["cognitive_load"] = float(max(0.0, min(1.0, load)))
+        except Exception:
+            preferences["cognitive_load"] = 0.0
+        try:
+            preferences["uncertainty"] = float(max(0.0, min(1.0, uncertainty)))
+        except Exception:
+            preferences["uncertainty"] = 0.0
+
+        preferences["recent_decisions"] = self._recent_decision_counts(identity)
+
+        for key in ("autonomy_bias", "caution_bias", "verification_bias"):
+            try:
+                preferences[key] = float(min(0.95, max(0.05, preferences[key])))
+            except Exception:
+                preferences[key] = 0.5
+
+        return preferences
+
+    def _recent_decision_counts(self, identity: Dict[str, Any], window: float = 3600.0) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        try:
+            recent = identity.get("choices", {}).get("recent", [])
+        except Exception:
+            recent = []
+        now = time.time()
+        for entry in recent or []:
+            if not isinstance(entry, dict):
+                continue
+            action = entry.get("action")
+            if not action:
+                continue
+            ts = entry.get("ts", now)
+            try:
+                ts_f = float(ts)
+            except (TypeError, ValueError):
+                ts_f = now
+            if now - ts_f > window:
+                continue
+            counts[action] = counts.get(action, 0) + 1
+        return counts
+
+    def _user_preference(self, label: str) -> float:
+        user_model = getattr(self.arch, "user_model", None)
+        if not user_model:
+            return 0.5
+        prior_fn = getattr(user_model, "prior", None)
+        if not callable(prior_fn):
+            return 0.5
+        try:
+            return float(max(0.0, min(1.0, prior_fn(label))))
+        except Exception:
+            return 0.5
+
+    def _analyze_feedback_text(self, text: str, preferences: Dict[str, Any]) -> Optional[Dict[str, float]]:
+        if not text:
+            return None
+        normalized = unicodedata.normalize("NFKD", str(text))
+        lowered = normalized.lower()
+        tokens = self._tokenize_feedback_text(lowered)
+        if not tokens:
+            return None
+
+        seed_lexicon = self._seed_feedback_lexicon()
+        learned_lexicon = preferences.get("feedback_lexicon", {}) or {}
+        combined_lexicon: Dict[str, float] = {**seed_lexicon, **learned_lexicon}
+
+        weighted_sum = 0.0
+        magnitude = 0.0
+        unknown_tokens = 0
+        for token in tokens:
+            weight = combined_lexicon.get(token)
+            if weight is None:
+                unknown_tokens += 1
+                continue
+            weighted_sum += weight
+            magnitude += abs(weight)
+
+        if magnitude == 0.0 and weighted_sum == 0.0:
+            heuristic_score = self._heuristic_feedback_score(tokens)
+            if heuristic_score == 0.0:
+                return None
+            weighted_sum = heuristic_score
+            magnitude = abs(heuristic_score)
+
+        magnitude = max(1.0, magnitude + 0.15 * unknown_tokens)
+        polarity = max(-1.0, min(1.0, weighted_sum / magnitude))
+
+        exclamations = lowered.count("!")
+        questions = lowered.count("?")
+        emphasis = min(1.0, 0.1 * min(4, exclamations) + 0.05 * min(4, questions))
+        intensity_base = min(1.0, abs(weighted_sum) / max(1.0, len(tokens)))
+        intensity = max(0.05, min(1.0, intensity_base + emphasis))
+
+        if "care" in preferences.get("values", []):
+            intensity = min(1.0, intensity * 1.1)
+        if "curiosity" in preferences.get("values", []):
+            polarity *= 0.95
+
+        return {
+            "polarity": float(polarity),
+            "intensity": float(intensity),
+        }
+
+    def _collect_feedback_signals(
+        self,
+        prompt: str,
+        context: Dict[str, Any],
+        preferences: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        signals: List[Dict[str, Any]] = []
+
+        def _add_signal(
+            target: Optional[str],
+            polarity: float,
+            intensity: float,
+            source: str,
+            payload: Optional[Dict[str, Any]] = None,
+            confidence: float = 1.0,
+        ) -> None:
+            if intensity <= 0.0 or polarity == 0.0:
+                return
+            signals.append(
+                {
+                    "target": target or "general",
+                    "polarity": float(max(-1.0, min(1.0, polarity))),
+                    "intensity": float(max(0.0, min(1.0, intensity))),
+                    "confidence": float(max(0.0, min(1.0, confidence))),
+                    "source": source,
+                    "payload": payload or {},
+                }
+            )
+
+        text_feedback = self._analyze_feedback_text(prompt, preferences)
+        if text_feedback:
+            _add_signal(
+                target="ask_user",
+                polarity=text_feedback["polarity"],
+                intensity=text_feedback["intensity"],
+                source="prompt",
+                payload={"text": prompt[:120]},
+            )
+
+        ctx_feedback_candidates: List[Any] = []
+        for key in ("feedback_events", "user_feedback", "feedback"):
+            value = context.get(key) if context else None
+            if not value:
+                continue
+            if isinstance(value, (list, tuple, set)):
+                ctx_feedback_candidates.extend(list(value))
+            else:
+                ctx_feedback_candidates.append(value)
+
+        for entry in ctx_feedback_candidates:
+            if isinstance(entry, dict):
+                target = entry.get("target") or entry.get("action")
+                polarity = entry.get("polarity") or entry.get("valence")
+                message = entry.get("message") or entry.get("text")
+                confidence = float(entry.get("confidence", 1.0))
+                intensity = entry.get("intensity") or entry.get("weight")
+                if polarity is None and message:
+                    text_signal = self._analyze_feedback_text(str(message), preferences)
+                    if text_signal:
+                        polarity = text_signal["polarity"]
+                        intensity = intensity or text_signal["intensity"]
+                try:
+                    polarity_f = float(polarity)
+                except (TypeError, ValueError):
+                    polarity_f = 0.0
+                try:
+                    intensity_f = float(intensity) if intensity is not None else 0.0
+                except (TypeError, ValueError):
+                    intensity_f = 0.0
+                if polarity_f != 0.0 and intensity_f <= 0.0:
+                    intensity_f = 0.4
+                if polarity_f:
+                    _add_signal(
+                        target=str(target or "general"),
+                        polarity=polarity_f,
+                        intensity=intensity_f or 0.4,
+                        source=entry.get("source") or "context",
+                        payload={
+                            k: v
+                            for k, v in entry.items()
+                            if k not in {"target", "action", "polarity", "valence"}
+                        },
+                        confidence=confidence,
+                    )
+            elif isinstance(entry, str):
+                feedback = self._analyze_feedback_text(entry, preferences)
+                if feedback:
+                    _add_signal(
+                        target="general",
+                        polarity=feedback["polarity"],
+                        intensity=feedback["intensity"],
+                        source="context:text",
+                        payload={"text": entry[:120]},
+                    )
+
+        rules = preferences.get("rules", {}) if isinstance(preferences, dict) else {}
+        if isinstance(rules, dict):
+            for action, rule in rules.items():
+                if not isinstance(rule, dict):
+                    continue
+                cooldown = rule.get("cooldown") or rule.get("ask_user_cooldown")
+                try:
+                    cooldown_val = float(cooldown)
+                except (TypeError, ValueError):
+                    cooldown_val = 0.0
+                if cooldown_val > 0:
+                    _add_signal(
+                        target=str(action),
+                        polarity=-1.0,
+                        intensity=min(1.0, cooldown_val / 5.0),
+                        source="memory:cooldown",
+                        payload={"cooldown": cooldown_val},
+                        confidence=0.8,
+                    )
+                feedback_info = rule.get("feedback")
+                if isinstance(feedback_info, dict):
+                    adjustment = feedback_info.get("adjustment")
+                    try:
+                        adj_val = float(adjustment)
+                    except (TypeError, ValueError):
+                        adj_val = 0.0
+                    if adj_val:
+                        polarity = 1.0 if adj_val > 0 else -1.0
+                        _add_signal(
+                            target=str(action),
+                            polarity=polarity,
+                            intensity=min(1.0, abs(adj_val)),
+                            source="memory:feedback",
+                            payload={"adjustment": adj_val},
+                            confidence=float(feedback_info.get("confidence", 0.7)),
+                        )
+                    stored_signals = feedback_info.get("signals")
+                    if isinstance(stored_signals, (list, tuple)):
+                        for sig in stored_signals:
+                            if not isinstance(sig, dict):
+                                continue
+                            try:
+                                pol = float(sig.get("polarity", 0.0))
+                            except (TypeError, ValueError):
+                                pol = 0.0
+                            try:
+                                inten = float(sig.get("intensity", 0.0))
+                            except (TypeError, ValueError):
+                                inten = 0.0
+                            conf = float(sig.get("confidence", feedback_info.get("confidence", 0.7)))
+                            if pol == 0.0 or inten <= 0.0:
+                                continue
+                            _add_signal(
+                                target=str(sig.get("target") or action),
+                                polarity=pol,
+                                intensity=inten,
+                                source=str(sig.get("source") or "memory:signal"),
+                                payload={
+                                    k: v
+                                    for k, v in sig.items()
+                                    if k not in {"target", "polarity", "intensity", "confidence", "source"}
+                                },
+                                confidence=conf,
+                            )
+
+        return signals
+
+    def _apply_feedback_signals(
+        self,
+        base_prior: float,
+        signals: Sequence[Dict[str, Any]],
+        *,
+        target: str,
+        preferences: Dict[str, Any],
+    ) -> Tuple[float, Dict[str, Any]]:
+        multiplier = 1.0
+        if "care" in preferences.get("values", []):
+            multiplier += 0.1
+        if "autonomy" in preferences.get("values", []):
+            multiplier += 0.05
+        delta = 0.0
+        applied: List[Dict[str, Any]] = []
+        for signal in signals:
+            tgt = signal.get("target") or "general"
+            if tgt not in {target, "general", "all"}:
+                continue
+            polarity = float(max(-1.0, min(1.0, signal.get("polarity", 0.0))))
+            intensity = float(max(0.0, min(1.0, signal.get("intensity", 0.0))))
+            confidence = float(max(0.0, min(1.0, signal.get("confidence", 1.0))))
+            weight = intensity * confidence * multiplier
+            if weight <= 0.0:
+                continue
+            adjustment = polarity * weight * 0.4
+            delta += adjustment
+            applied.append(
+                {
+                    "target": target,
+                    "source": signal.get("source"),
+                    "polarity": polarity,
+                    "intensity": intensity,
+                    "confidence": confidence,
+                    "delta": adjustment,
+                    "payload": signal.get("payload", {}),
+                }
+            )
+        new_prior = float(max(0.05, min(0.95, base_prior + delta)))
+        return new_prior, {"delta": delta, "signals": applied}
+
+    def _tokenize_feedback_text(self, text: str) -> List[str]:
+        normalized = unicodedata.normalize("NFKD", str(text).lower())
+        cleaned = "".join(
+            ch if ch.isalnum() or ch in {" ", "-", "'"} else " " for ch in normalized
+        )
+        tokens = []
+        for raw_token in cleaned.split():
+            token = raw_token.strip("-' ")
+            if len(token) < 3:
+                continue
+            tokens.append(token)
+        return tokens
+
+    def _seed_feedback_lexicon(self) -> Dict[str, float]:
+        return {
+            "merci": 0.4,
+            "merciii": 0.4,
+            "cool": 0.35,
+            "parfait": 0.45,
+            "bravo": 0.4,
+            "top": 0.35,
+            "nickel": 0.35,
+            "super": 0.35,
+            "utile": 0.3,
+            "ok": 0.2,
+            "compris": 0.25,
+            "chiant": -0.7,
+            "relou": -0.6,
+            "agace": -0.6,
+            "agacer": -0.6,
+            "ennuyeux": -0.55,
+            "fatigue": -0.5,
+            "fatigant": -0.5,
+            "lourd": -0.45,
+            "lassant": -0.45,
+            "trop": -0.3,
+            "stop": -0.5,
+            "arrete": -0.5,
+            "arretez": -0.5,
+            "jamais": -0.3,
+            "plus": -0.25,
+            "question": -0.1,
+            "questions": -0.1,
+            "autonome": 0.2,
+            "autonomie": 0.2,
+            "apprendre": -0.2,
+            "seul": -0.2,
+        }
+
+    def _heuristic_feedback_score(self, tokens: Sequence[str]) -> float:
+        negative_markers = {
+            "pas",
+            "jamais",
+            "trop",
+            "stop",
+            "fatigue",
+            "fatigant",
+            "lourd",
+            "lassant",
+            "marre",
+            "ralentit",
+            "ralentir",
+            "deborde",
+            "debordee",
+            "derange",
+        }
+        positive_markers = {
+            "merci",
+            "bravo",
+            "cool",
+            "parfait",
+            "genial",
+            "top",
+            "nickel",
+        }
+        score = 0.0
+        for token in tokens:
+            if token in positive_markers:
+                score += 0.25
+            if token in negative_markers:
+                score -= 0.25
+        return score
+
+    def _feedback_token_updates(
+        self,
+        prompt: str,
+        signals: Sequence[Dict[str, Any]],
+        adjustment: float,
+    ) -> Dict[str, float]:
+        updates: Dict[str, float] = {}
+
+        def _accumulate(text: Optional[str], weight: float) -> None:
+            if not text or not weight:
+                return
+            for token in self._tokenize_feedback_text(text):
+                updates[token] = updates.get(token, 0.0) + weight
+
+        for signal in signals or []:
+            if not isinstance(signal, dict):
+                continue
+            try:
+                polarity = float(signal.get("polarity", 0.0))
+                intensity = float(signal.get("intensity", 0.0))
+                confidence = float(signal.get("confidence", 1.0))
+            except (TypeError, ValueError):
+                continue
+            weight = polarity * max(0.1, intensity) * max(0.2, confidence)
+            if weight == 0.0:
+                continue
+            payload = signal.get("payload") if isinstance(signal.get("payload"), dict) else {}
+            extracted_texts: List[str] = []
+            for key in ("text", "message", "excerpt", "content"):
+                value = payload.get(key)
+                if isinstance(value, str):
+                    extracted_texts.append(value)
+            if not extracted_texts and signal.get("source") == "prompt":
+                extracted_texts.append(prompt)
+            for text_value in extracted_texts:
+                _accumulate(text_value, weight)
+
+        if adjustment and prompt:
+            _accumulate(prompt, adjustment * 0.4)
+
+        return updates
+
+    def _build_feedback_lexicon_patch(
+        self,
+        self_model,
+        updates: Dict[str, float],
+    ) -> Optional[Dict[str, float]]:
+        if not updates:
+            return None
+        identity = getattr(self_model, "identity", {}) or {}
+        feedback_info = identity.get("feedback", {}) if isinstance(identity, dict) else {}
+        current = feedback_info.get("lexicon") if isinstance(feedback_info, dict) else {}
+        lexicon: Dict[str, float] = {}
+        if isinstance(current, dict):
+            for token, value in current.items():
+                try:
+                    lexicon[str(token).lower()] = float(value)
+                except (TypeError, ValueError):
+                    continue
+        changed = False
+        for token, delta in updates.items():
+            if not token:
+                continue
+            prev = float(lexicon.get(token, 0.0))
+            new_val = 0.85 * prev + delta
+            if abs(new_val) < 0.05:
+                if token in lexicon:
+                    del lexicon[token]
+                    changed = True
+                continue
+            new_val = max(-1.0, min(1.0, new_val))
+            if lexicon.get(token) != new_val:
+                lexicon[token] = new_val
+                changed = True
+        if not changed:
+            return None
+        if len(lexicon) > 150:
+            top_items = sorted(lexicon.items(), key=lambda item: abs(item[1]), reverse=True)[:150]
+            lexicon = {token: value for token, value in top_items}
+        return lexicon
+
+    def _deliberate_actions(
+        self,
+        prompt: str,
+        strategy: str,
+        hypos: List[Hypothesis],
+        scores: List[float],
+        context: Dict[str, Any],
+        *,
+        complexity: float,
+    ) -> Dict[str, Any]:
+        preferences = self._self_preferences()
+        user_help_prior = self._user_preference("ask_user_help")
+        feedback_signals = self._collect_feedback_signals(prompt, context, preferences)
+        user_help_prior, feedback_effect = self._apply_feedback_signals(
+            user_help_prior,
+            feedback_signals,
+            target="ask_user",
+            preferences=preferences,
+        )
+        if not feedback_effect.get("signals"):
+            feedback_effect["signals"] = []
+        if "delta" not in feedback_effect:
+            feedback_effect["delta"] = 0.0
+        inbox_docs = context.get("inbox_docs", [])
+        inbox_count = 0
+        if isinstance(inbox_docs, (list, tuple, set)):
+            inbox_count = len(inbox_docs)
+        elif isinstance(inbox_docs, dict):
+            inbox_count = len(inbox_docs)
+        else:
+            try:
+                inbox_count = int(inbox_docs) if inbox_docs else 0
+            except Exception:
+                inbox_count = 0
+
+        top_score = max(scores) if scores else 0.5
+        top_score = float(max(0.05, min(0.95, top_score)))
+        memory_gain = min(0.9, top_score + 0.1 + 0.05 * min(math.log1p(max(inbox_count, 0)), 3.0))
+        memory_cost = min(0.9, 0.25 + 0.05 * min(inbox_count, 8) + 0.15 * preferences["cognitive_load"])
+
+        autonomous_cost = min(0.9, 0.3 + 0.2 * preferences["cognitive_load"])
+        autonomous_gain = min(0.9, top_score + 0.05 * (1.0 - preferences["uncertainty"]))
+
+        ask_user_recent = preferences["recent_decisions"].get("ask_user", 0)
+        self_solved_recent = preferences["recent_decisions"].get("reason_alone", 0)
+        ask_user_cost = 0.15 + 0.08 * ask_user_recent
+        if user_help_prior < 0.5:
+            ask_user_cost += 0.2 * (0.5 - user_help_prior)
+        if self_solved_recent >= 3:
+            user_help_prior = min(0.95, user_help_prior + 0.1)
+            ask_user_cost = max(0.1, ask_user_cost - 0.05)
+
+        question_manager_available = bool(getattr(self.arch, "question_manager", None))
+        manager_cost = 0.28 + 0.1 * preferences["cognitive_load"]
+        manager_gain = 0.65 if question_manager_available else 0.5
+
+        cooldown_hint = 0
+        rules = preferences.get("rules") if isinstance(preferences, dict) else {}
+        ask_user_rule = rules.get("ask_user") if isinstance(rules, dict) else None
+        rule_cooldown = 0.0
+        if isinstance(ask_user_rule, dict):
+            try:
+                rule_cooldown = float(ask_user_rule.get("cooldown", 0.0))
+            except (TypeError, ValueError):
+                rule_cooldown = 0.0
+        if rule_cooldown:
+            cooldown_hint = max(cooldown_hint, int(math.ceil(rule_cooldown)))
+        if user_help_prior < 0.4:
+            cooldown_hint = max(cooldown_hint, 3)
+        elif user_help_prior < 0.5:
+            cooldown_hint = max(cooldown_hint, 2)
+        cooldown_hint = max(cooldown_hint, ask_user_recent)
+        negative_pressure = sum(
+            -item.get("delta", 0.0)
+            for item in feedback_effect.get("signals", [])
+            if item.get("delta", 0.0) < 0
+        )
+        if negative_pressure > 0:
+            cooldown_hint = max(cooldown_hint, min(5, int(math.ceil(negative_pressure * 8))))
+
+        ask_user_cost_boost = sum(
+            max(0.0, -item.get("delta", 0.0))
+            for item in feedback_effect.get("signals", [])
+            if item.get("delta", 0.0) < 0
+        )
+        if ask_user_cost_boost:
+            ask_user_cost += min(0.25, ask_user_cost_boost)
+
+        def _pref_weight(kind: str) -> float:
+            base = 1.0
+            if kind == "autonomy":
+                base += preferences["autonomy_bias"] - 0.5
+            elif kind == "analysis":
+                base += preferences["verification_bias"] - 0.5
+            elif kind == "interaction":
+                base += preferences["caution_bias"] - 0.5
+            return float(min(1.5, max(0.5, base)))
+
+        reason_time = max(0.6, 2.0 + 4.0 * complexity + 2.0 * preferences["uncertainty"])
+        if self_solved_recent >= 3:
+            reason_time = max(0.5, reason_time - 0.6)
+        scan_time = max(
+            0.7,
+            1.4 + 0.35 * min(inbox_count, 12) + 1.5 * preferences["cognitive_load"],
+        )
+        ask_user_time = max(0.3, 0.6 + 0.4 * cooldown_hint + 0.2 * ask_user_recent)
+        ask_manager_time = max(0.5, 0.8 + 0.3 * preferences["cognitive_load"])
+
+        action_times = {
+            "reason_alone": reason_time,
+            "scan_memory": scan_time,
+            "ask_user": ask_user_time,
+            "ask_manager": ask_manager_time,
+        }
+
+        def _cause_effect(option_key: str, weight: float, success: float, cost: float) -> str:
+            if option_key == "reason_alone":
+                return (
+                    "Parce que l'autonomie est pondérée à "
+                    f"{weight:.2f} et que {self_solved_recent} succès récents soutiennent cette voie,"
+                    f" l'agent anticipe une utilité nette≈{max(0.0, weight * success - cost):.2f}."
+                )
+            if option_key == "scan_memory":
+                return (
+                    f"Comme {inbox_count} éléments restent à analyser et que la vérification pèse {weight:.2f},"
+                    f" extraire des preuves devrait augmenter le gain attendu≈{(weight * success):.2f}."
+                )
+            if option_key == "ask_user":
+                delta = feedback_effect.get("delta", 0.0)
+                if delta < 0:
+                    signal_phrase = "Les retours récents suggèrent de limiter les sollicitations"
+                elif delta > 0:
+                    signal_phrase = "Les retours positifs autorisent une sollicitation ciblée"
+                else:
+                    signal_phrase = "Les préférences actuelles autorisent une sollicitation mesurée"
+                return (
+                    f"{signal_phrase} (prior={user_help_prior:.2f}),"
+                    f" d'où un coût≈{cost:.2f} modulé par le feedback et un éventuel délai."
+                )
+            if option_key == "ask_manager":
+                availability = "disponible" if question_manager_available else "incertain"
+                return (
+                    f"Le gestionnaire de questions est {availability}, donc poids={weight:.2f} et gain≈{(weight * success):.2f}"
+                    f" compensent un coût≈{cost:.2f}."
+                )
+            return ""
+
+        options = [
+            {
+                "key": "reason_alone",
+                "label": "Continuer le raisonnement interne",
+                "success": autonomous_gain,
+                "cost": autonomous_cost,
+                "kind": "autonomy",
+                "notes": "Préserve l'autonomie et capitalise sur les hypothèses actuelles.",
+            },
+            {
+                "key": "scan_memory",
+                "label": "Scanner les notes et l'inbox",
+                "success": memory_gain,
+                "cost": memory_cost,
+                "kind": "analysis",
+                "notes": "Explore les documents disponibles pour trouver des confirmations.",
+            },
+            {
+                "key": "ask_user",
+                "label": "Demander explicitement à l'utilisateur",
+                "success": max(0.05, min(0.95, user_help_prior)),
+                "cost": min(0.95, ask_user_cost),
+                "kind": "interaction",
+                "notes": "Sollicite l'utilisateur tout en respectant les signaux de feedback cumulés.",
+            },
+            {
+                "key": "ask_manager",
+                "label": "Consulter le question manager",
+                "success": manager_gain,
+                "cost": min(0.95, manager_cost),
+                "kind": "interaction",
+                "notes": "Escalader pour obtenir une réponse rapide si disponible.",
+            },
+        ]
+
+        evaluated: List[Dict[str, Any]] = []
+        timeline: List[Dict[str, Any]] = []
+        for option in options:
+            weight = _pref_weight(option["kind"])
+            success = float(max(0.05, min(0.95, option["success"])))
+            cost = float(max(0.05, min(0.95, option["cost"])))
+            penalty = cost
+            if option["key"] == "ask_user" and user_help_prior < 0.4:
+                penalty += 0.15 * (0.4 - user_help_prior)
+            expected_gain = weight * success
+            utility = expected_gain - penalty
+            note = option.get("notes", "")
+            if option["key"] == "ask_user" and user_help_prior < 0.4:
+                note += " Préférence négative détectée → risque de rejet."
+            if option["key"] == "reason_alone" and self_solved_recent >= 3:
+                note += " Succès récents en autonomie : confiance renforcée."
+            if option["key"] == "scan_memory" and inbox_count:
+                note += f" {inbox_count} éléments à analyser."
+            time_est = round(action_times.get(option["key"], 1.0), 2)
+            cause_effect = _cause_effect(option["key"], weight, success, cost)
+            timeline.append(
+                {
+                    "action": option["key"],
+                    "label": option["label"],
+                    "estimated_minutes": time_est,
+                    "cause_effect": cause_effect,
+                }
+            )
+            evaluated.append(
+                {
+                    "key": option["key"],
+                    "label": option["label"],
+                    "success_probability": round(success, 3),
+                    "effort_cost": round(cost, 3),
+                    "preference_weight": round(weight, 3),
+                    "expected_gain": round(expected_gain, 3),
+                    "utility": round(utility, 3),
+                    "notes": note.strip(),
+                    "time_estimate_minutes": time_est,
+                    "cause_effect": cause_effect,
+                }
+            )
+
+        evaluated.sort(key=lambda item: item["utility"], reverse=True)
+        chosen = evaluated[0] if evaluated else None
+
+        cooldown = cooldown_hint
+
+        explanation_parts: List[str] = []
+        if chosen:
+            explanation_parts.append(
+                (
+                    f"Comparaison coût/bénéfice: {chosen['label']} maximise l'utilité"
+                    f" (gain≈{chosen['expected_gain']:.2f} - coût≈{chosen['effort_cost']:.2f})."
+                )
+            )
+            if chosen["key"] == "ask_user":
+                if feedback_effect.get("signals"):
+                    negative_sources = sorted(
+                        {
+                            str(sig.get("source") or "feedback")
+                            for sig in feedback_effect.get("signals", [])
+                            if sig.get("delta", 0.0) < 0
+                        }
+                    )
+                    positive_sources = sorted(
+                        {
+                            str(sig.get("source") or "feedback")
+                            for sig in feedback_effect.get("signals", [])
+                            if sig.get("delta", 0.0) > 0
+                        }
+                    )
+                    if negative_sources:
+                        explanation_parts.append(
+                            "Signaux négatifs considérés (" + ", ".join(negative_sources) + ") → sollicitation limitée."
+                        )
+                    if positive_sources:
+                        explanation_parts.append(
+                            "Signaux positifs (" + ", ".join(positive_sources) + ") soutiennent la demande directe."
+                        )
+                elif user_help_prior < 0.4:
+                    explanation_parts.append(
+                        "Prior utilisateur défavorable : la sollicitation reste exceptionnelle."
+                    )
+            if chosen["key"] == "reason_alone" and preferences["uncertainty"] > 0.6:
+                explanation_parts.append(
+                    "La prudence reste élevée car l'incertitude cognitive dépasse 0.6."
+                )
+            for item in timeline:
+                if item["action"] == chosen["key"] and item["cause_effect"]:
+                    explanation_parts.append(item["cause_effect"])
+                    explanation_parts.append(
+                        f"Temps estimé pour cette option: {item['estimated_minutes']:.2f} minutes."
+                    )
+                    break
+        if cooldown:
+            explanation_parts.append(
+                f"Imposer un délai de {cooldown} interactions avant une nouvelle sollicitation directe."
+            )
+
+        return {
+            "options": evaluated,
+            "chosen": chosen,
+            "self_preferences": preferences,
+            "user_feedback": {
+                "ask_user_help_prior": round(user_help_prior, 3),
+                "recent_user_requests": ask_user_recent,
+                "adjustment": round(feedback_effect.get("delta", 0.0), 3),
+                "signals": feedback_effect.get("signals", []),
+            },
+            "rules": {
+                "ask_user_cooldown": cooldown,
+            },
+            "complexity": float(complexity),
+            "explanation": " ".join(explanation_parts).strip(),
+            "timeline": timeline,
+        }
+
+    def _record_deliberation(
+        self,
+        prompt: str,
+        deliberation: Dict[str, Any],
+        final_conf: float,
+        complexity: float,
+    ) -> None:
+        self_model = getattr(self.arch, "self_model", None)
+        if not self_model or not deliberation or not deliberation.get("chosen"):
+            return
+        chosen = deliberation["chosen"]
+        expected_gain = float(chosen.get("expected_gain", 0.0))
+        expected_gain = max(0.0, min(1.0, expected_gain))
+        success_prob = float(chosen.get("success_probability", 0.5))
+        success_prob = max(0.0, min(1.0, success_prob))
+        expected_utility = float(chosen.get("utility", 0.0))
+        expected_utility = max(0.0, min(1.0, expected_utility))
+        context = {
+            "complexity": float(complexity),
+            "expected_gain": expected_gain,
+            "risk": float(max(0.0, 1.0 - success_prob)),
+            "ask_user_cooldown": float(deliberation.get("rules", {}).get("ask_user_cooldown", 0)),
+        }
+        try:
+            if hasattr(self_model, "policy_decision_score"):
+                self_model.policy_decision_score(context)
+        except Exception:
+            pass
+        decision_ref = {
+            "decision_id": f"reasoning::{int(time.time() * 1000)}",
+            "topic": prompt[:120],
+            "action": chosen.get("key"),
+            "expected": expected_utility,
+            "obtained": float(final_conf),
+            "complexity": context["complexity"],
+            "expected_gain": context["expected_gain"],
+            "risk": context["risk"],
+            "trace": deliberation,
+        }
+        if hasattr(self_model, "register_decision"):
+            try:
+                self_model.register_decision(decision_ref)
+            except Exception:
+                pass
+        user_feedback_meta = deliberation.get("user_feedback") or {}
+        feedback_payload: Optional[Dict[str, Any]] = None
+        lexicon_updates: Dict[str, float] = {}
+        if user_feedback_meta:
+            signals_meta = user_feedback_meta.get("signals") or []
+            try:
+                adjustment_val = float(user_feedback_meta.get("adjustment", 0.0))
+            except (TypeError, ValueError):
+                adjustment_val = 0.0
+            lexicon_updates = self._feedback_token_updates(
+                prompt,
+                signals_meta if isinstance(signals_meta, (list, tuple)) else [],
+                adjustment_val,
+            )
+            filtered_signals: List[Dict[str, Any]] = []
+            if isinstance(signals_meta, (list, tuple)):
+                for sig in signals_meta[:6]:
+                    if not isinstance(sig, dict):
+                        continue
+                    try:
+                        pol = float(sig.get("polarity", 0.0))
+                        inten = float(sig.get("intensity", 0.0))
+                        conf = float(sig.get("confidence", 1.0))
+                    except (TypeError, ValueError):
+                        continue
+                    payload = sig.get("payload") if isinstance(sig.get("payload"), dict) else None
+                    filtered_signals.append(
+                        {
+                            "target": sig.get("target"),
+                            "source": sig.get("source"),
+                            "polarity": pol,
+                            "intensity": inten,
+                            "confidence": conf,
+                            **({"payload": payload} if payload else {}),
+                        }
+                    )
+            if filtered_signals or adjustment_val != 0.0:
+                feedback_payload = {
+                    "adjustment": adjustment_val,
+                    "signals": filtered_signals,
+                    "prior": float(user_feedback_meta.get("ask_user_help_prior", 0.5)),
+                    "recent_requests": int(user_feedback_meta.get("recent_user_requests", 0)),
+                    "confidence": 0.7,
+                }
+        rules = deliberation.get("rules", {}) if deliberation else {}
+        lexicon_patch = self._build_feedback_lexicon_patch(self_model, lexicon_updates)
+        patch_payload: Dict[str, Any] = {}
+        if rules:
+            rule_patch = {
+                "cooldown": float(rules.get("ask_user_cooldown", 0)),
+                "updated_at_ts": time.time(),
+                "last_reasoning_topic": prompt[:80],
+                "preferred_action": chosen.get("key"),
+            }
+            if feedback_payload:
+                rule_patch["feedback"] = feedback_payload
+            patch_payload.setdefault("choices", {}).setdefault("rules", {})[
+                "ask_user"
+            ] = rule_patch
+        if lexicon_patch is not None:
+            patch_payload.setdefault("feedback", {})["lexicon"] = lexicon_patch
+        if patch_payload:
+            set_patch = getattr(self_model, "set_identity_patch", None)
+            if callable(set_patch):
+                try:
+                    set_patch(patch_payload)
+                except Exception:
+                    pass
 
     # ------------------- helpers adaptatifs -------------------
     def _select_smoothing_factor(self) -> float:
