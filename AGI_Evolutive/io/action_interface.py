@@ -582,6 +582,7 @@ class ActionInterface:
                 "write_memory": self._h_write_memory,
                 "save_file": self._h_save_file,
                 "reflect": self._h_reflect,
+                "habit_reflection": self._h_habit_reflection,
                 "learn_concept": self._h_learn_concept,
                 "search_memory": self._h_search_memory,
                 "communicate": self._h_communicate,
@@ -753,6 +754,221 @@ class ActionInterface:
             }
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    def _h_habit_reflection(self, act: Action) -> Dict[str, Any]:
+        payload = dict(act.payload or {})
+        habit = payload.get("habit") if isinstance(payload.get("habit"), dict) else {}
+        name = habit.get("name") or payload.get("name") or "habit_ritual"
+        description = habit.get("description") or payload.get("description") or ""
+        steps = habit.get("steps") if isinstance(habit.get("steps"), list) else []
+        tags = habit.get("tags") if isinstance(habit.get("tags"), list) else []
+        metadata = habit.get("metadata") if isinstance(habit.get("metadata"), dict) else {}
+        period = payload.get("period")
+        strength = payload.get("strength")
+        try:
+            due_ts = float(payload.get("due_ts", time.time()))
+        except Exception:
+            due_ts = time.time()
+        try:
+            triggered_at = float(payload.get("triggered_at", act.created_at))
+        except Exception:
+            triggered_at = act.created_at
+        try:
+            window_start = float(payload.get("window_start_ts", max(0.0, due_ts - 12 * 3600.0)))
+        except Exception:
+            window_start = max(0.0, due_ts - 12 * 3600.0)
+        try:
+            window_end = float(payload.get("window_end_ts", window_start + 24 * 3600.0))
+        except Exception:
+            window_end = window_start + 24 * 3600.0
+
+        memory = self.bound.get("memory") if hasattr(self, "bound") else None
+
+        def _normalize_event(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            summary = item.get("summary") or item.get("content") or item.get("text")
+            if not summary:
+                return None
+            try:
+                ts = float(item.get("ts", 0.0))
+            except Exception:
+                ts = 0.0
+            try:
+                score = float(item.get("score", 0.0))
+            except Exception:
+                score = 0.0
+            entry = {
+                "id": item.get("id"),
+                "kind": item.get("kind"),
+                "ts": ts,
+                "summary": str(summary)[:400],
+                "score": score,
+            }
+            tags_val = item.get("tags")
+            if isinstance(tags_val, list):
+                entry["tags"] = list(tags_val)
+            meta_val = item.get("metadata")
+            if isinstance(meta_val, dict):
+                entry["metadata"] = dict(meta_val)
+            return entry
+
+        window_events: List[Dict[str, Any]] = []
+        fallback_events: List[Dict[str, Any]] = []
+        if memory and hasattr(memory, "get_recent_memories"):
+            try:
+                recent = memory.get_recent_memories(200)
+            except Exception:
+                recent = []
+            for item in recent:
+                entry = _normalize_event(item)
+                if not entry:
+                    continue
+                fallback_events.append(entry)
+                if window_start <= entry["ts"] <= window_end:
+                    window_events.append(entry)
+
+        review_pool = window_events if window_events else fallback_events
+        review_items = sorted(review_pool, key=lambda e: e["ts"])
+        if len(review_items) > 12:
+            review_items = review_items[-12:]
+
+        highlight_entry: Optional[Dict[str, Any]] = None
+        if review_items:
+            highlight_entry = max(
+                review_items,
+                key=lambda e: (float(e.get("score", 0.0)), e.get("ts", 0.0)),
+            )
+            if not highlight_entry.get("summary"):
+                highlight_entry = review_items[-1]
+            highlight_entry = dict(highlight_entry)
+            highlight_entry.setdefault("reason", "top_score")
+
+        emotions = self.bound.get("emotions") if hasattr(self, "bound") else None
+        affect: Dict[str, Any] = {}
+        if emotions and hasattr(emotions, "get_affect"):
+            try:
+                affect = emotions.get_affect() or {}
+            except Exception:
+                affect = {}
+        try:
+            valence = float(affect.get("valence", 0.0)) if isinstance(affect, dict) else 0.0
+        except Exception:
+            valence = 0.0
+        emotion_report = {
+            "valence": valence,
+            "label": affect.get("label") if isinstance(affect, dict) else None,
+            "captured_at": time.time(),
+        }
+        if highlight_entry:
+            emotion_report["focus"] = highlight_entry.get("summary")
+
+        integration: Dict[str, Any] = {"should_integrate": bool(highlight_entry), "status": "skipped"}
+        belief_result: Optional[Dict[str, Any]] = None
+        arch = self.bound.get("arch") if hasattr(self, "bound") else None
+        if highlight_entry:
+            relation = metadata.get("integration_relation") or ("values" if valence >= 0 else "reconsiders")
+            subject = metadata.get("integration_subject") or "self:agent"
+            conf_hint = metadata.get("integration_confidence")
+            if conf_hint is not None:
+                try:
+                    confidence = float(conf_hint)
+                except Exception:
+                    confidence = 0.6
+            else:
+                base_conf = 0.55 if valence >= 0 else 0.45
+                confidence = max(0.35, min(0.8, base_conf + 0.2 * valence))
+            summary_focus = highlight_entry.get("summary") or description or name
+            value = metadata.get("integration_value") or summary_focus
+            value = str(value)[:160]
+            integration.update(
+                {
+                    "subject": subject,
+                    "relation": relation,
+                    "value": value,
+                    "confidence": confidence,
+                    "source_summary": summary_focus,
+                }
+            )
+            if arch and hasattr(arch, "beliefs") and subject and relation and value:
+                try:
+                    ev_weight = max(0.2, min(1.0, 0.4 + 0.2 * abs(valence)))
+                    evidence = Evidence.new(
+                        kind="memory",
+                        source=f"habit:{name}",
+                        snippet=str(summary_focus)[:280],
+                        weight=ev_weight,
+                    )
+                    belief = arch.beliefs.update(
+                        subject,
+                        relation,
+                        value,
+                        confidence=float(confidence),
+                        polarity=+1,
+                        evidence=evidence,
+                        created_by=f"habit:{name}",
+                    )
+                    integration["status"] = "recorded"
+                    integration["belief_id"] = belief.id
+                    integration["belief_confidence"] = belief.confidence
+                    belief_result = {"id": belief.id, "confidence": belief.confidence}
+                except Exception as exc:
+                    integration["status"] = "pending"
+                    integration["error"] = str(exc)
+            else:
+                integration["status"] = "pending"
+
+        report = {
+            "habit": {
+                "name": name,
+                "description": description,
+                "period": period,
+                "strength": strength,
+                "due_ts": due_ts,
+                "triggered_at": triggered_at,
+                "window": {"start": window_start, "end": window_end},
+                "tags": tags,
+                "metadata": metadata,
+            },
+            "steps": steps,
+            "review": review_items,
+            "highlight": highlight_entry,
+            "emotion": emotion_report,
+            "integration": integration,
+        }
+
+        sanitized_report = json_sanitize(report)
+        summary_parts: List[str] = []
+        if review_items:
+            summary_parts.append(f"{len(review_items)} évènements revus")
+        if highlight_entry:
+            summary_parts.append(f"Moment clé: {highlight_entry.get('summary')}")
+        if integration.get("status") == "recorded":
+            summary_parts.append("Hypothèse intégrée au self-model")
+        elif integration.get("should_integrate"):
+            summary_parts.append("Hypothèse à confirmer")
+        summary_text = " ; ".join(summary_parts) or (description or name)
+
+        if memory and hasattr(memory, "add_memory"):
+            try:
+                memory.add_memory(
+                    {
+                        "kind": "habit_reflection",
+                        "name": name,
+                        "content": summary_text,
+                        "metadata": sanitized_report,
+                        "ts": time.time(),
+                    }
+                )
+            except Exception:
+                pass
+
+        result = {
+            "ok": True,
+            "status": "done",
+            "habit_execution": sanitized_report,
+        }
+        if belief_result:
+            result["belief"] = belief_result
+        return result
 
     def _h_learn_concept(self, payload: Dict[str, Any], context: Dict[str, Any]):
         concept = (payload or {}).get("concept")

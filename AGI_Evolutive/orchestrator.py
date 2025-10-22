@@ -6,6 +6,7 @@ import logging
 import statistics
 import time
 import unicodedata
+from datetime import datetime, timedelta
 from contextlib import nullcontext
 from types import SimpleNamespace
 from collections import deque, defaultdict
@@ -18,6 +19,7 @@ except ImportError:  # pragma: no cover - Windows compatibility
 
 from AGI_Evolutive.cognition.context_inference import infer_where_and_apply
 from AGI_Evolutive.cognition.evolution_manager import EvolutionManager
+from AGI_Evolutive.cognition.habit_system import HabitRoutine, HabitSystem
 from AGI_Evolutive.cognition.homeostasis import Homeostasis
 from AGI_Evolutive.cognition.identity_mission import recommend_and_apply_mission
 from AGI_Evolutive.cognition.identity_principles import run_and_apply_principles
@@ -886,9 +888,40 @@ class _PolicyAdapter:
         return getattr(self._policy, item)
 
 
-class _HabitSystem:
+class _HabitAdapter:
+    def __init__(self, habits: HabitSystem):
+        self._habits = habits
+
     def poll_context_cue(self) -> Optional[Dict[str, Any]]:
-        return None
+        return self._habits.poll_context_cue()
+
+    def register_routine(
+        self,
+        name: str,
+        description: str,
+        *,
+        schedule: Optional[Dict[str, Any]] = None,
+        steps: Optional[Iterable[Dict[str, Any]]] = None,
+        tags: Optional[Iterable[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> HabitRoutine:
+        return self._habits.register_routine(
+            name,
+            description,
+            schedule=schedule,
+            steps=steps,
+            tags=tags,
+            metadata=metadata,
+        )
+
+    def record_completion(self, name: str, *, when: Optional[float] = None) -> None:
+        self._habits.record_completion(name, when=when)
+
+    def list_routines(self) -> List[str]:
+        return self._habits.list_routines()
+
+    def __getattr__(self, item: str) -> Any:
+        return getattr(self._habits, item)
 
 
 class _EvolutionAdapter:
@@ -944,6 +977,10 @@ class Orchestrator:
         self._emotion_engine = EmotionEngine()
         self._reflection_loop = ReflectionLoop(self._meta, interval_sec=300)
         self._reflection_loop.start()
+        self._habit_system = HabitSystem(
+            config_path="configs/habits.json",
+            state_path="data/habit_state.json",
+        )
         existing_interface = getattr(self.arch, "action_interface", None)
         bound: Dict[str, Any] = {}
         existing_jobs = None
@@ -1041,7 +1078,7 @@ class Orchestrator:
             homeostasis=_HomeostasisAdapter(self._homeostasis),
             meta=_MetaAdapter(self._meta),
             evolution=_EvolutionAdapter(self._evolution),
-            habits=_HabitSystem(),
+            habits=_HabitAdapter(self._habit_system),
         )
         self.core = SimpleNamespace(policy=_PolicyAdapter(self._policy_engine))
 
@@ -1110,6 +1147,56 @@ class Orchestrator:
             "concepts", 180, lambda: self._concepts.extract_from_recent(200)
         )
         self.scheduler.register_job("episodic_links", 120, lambda: self._episodic.link_recent(80))
+
+    def _build_habit_action_payload(self, trigger_payload: Dict[str, Any]) -> Dict[str, Any]:
+        data = dict(trigger_payload or {})
+        metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+        schedule = data.get("schedule") if isinstance(data.get("schedule"), dict) else {}
+        steps = data.get("steps") if isinstance(data.get("steps"), list) else []
+        tags = data.get("tags") if isinstance(data.get("tags"), list) else []
+        action_type = (
+            data.get("action_type")
+            or metadata.get("action_type")
+            or "habit_reflection"
+        )
+        try:
+            due_ts = float(data.get("due_ts", time.time()))
+        except Exception:
+            due_ts = time.time()
+        try:
+            triggered_at = float(data.get("triggered_at", time.time()))
+        except Exception:
+            triggered_at = time.time()
+
+        due_dt = datetime.fromtimestamp(due_ts if due_ts > 0 else time.time())
+        start_dt = datetime.combine(due_dt.date(), datetime.min.time())
+        end_dt = start_dt + timedelta(days=1)
+
+        payload = {
+            "type": action_type,
+            "habit": {
+                "name": data.get("name") or metadata.get("name"),
+                "description": data.get("description"),
+                "steps": steps,
+                "tags": tags,
+                "metadata": metadata,
+                "schedule": schedule,
+            },
+            "period": data.get("period"),
+            "status": data.get("status"),
+            "strength": data.get("strength"),
+            "due_ts": due_ts,
+            "triggered_at": triggered_at,
+            "window_start_ts": float(data.get("window_start_ts", start_dt.timestamp())),
+            "window_end_ts": float(data.get("window_end_ts", end_dt.timestamp())),
+        }
+        if "lead_time_sec" in schedule and payload["window_start_ts"] >= due_ts:
+            try:
+                lead = float(schedule.get("lead_time_sec") or 0.0)
+                payload["window_start_ts"] = max(0.0, due_ts - lead)
+            except Exception:
+                pass
+        return payload
 
     def _register_self_judgment_collectors(self):
 
@@ -1387,14 +1474,17 @@ class Orchestrator:
         cue = self.cognition.habits.poll_context_cue()
         if not cue:
             return []
+        importance = float(cue.get("strength", 0.6))
         return [
             Trigger(
                 TriggerType.HABIT,
                 {
                     "source": "habit",
-                    "importance": 0.5,
-                    "immediacy": 0.3,
+                    "importance": importance,
+                    "immediacy": 0.4,
                     "habit_strength": cue.get("strength", 0.7),
+                    "habit_name": cue.get("name"),
+                    "habit_period": cue.get("period"),
                 },
                 payload=cue,
             )
@@ -1815,6 +1905,52 @@ class Orchestrator:
             except Exception:
                 pass
 
+        if selection.family == "HABIT" and isinstance(trigger_payload, dict):
+            habit_payload = self._build_habit_action_payload(trigger_payload)
+            ctx["payload"] = dict(habit_payload)
+            scratch = ctx.setdefault("scratch", {})
+            scratch["habit_payload"] = habit_payload
+
+            habit_raw = habit_payload.get("habit")
+            habit_info = habit_raw if isinstance(habit_raw, dict) else {}
+            habit_name = habit_info.get("name") or habit_payload.get("name")
+            habit_desc = habit_info.get("description") or habit_payload.get("description") or ""
+
+            if habit_name:
+                ctx["topic"] = f"habit::{habit_name}"
+            if habit_desc:
+                ctx["text"] = habit_desc
+
+            expected_score = habit_payload.get("strength") or trigger.meta.get("importance") or 0.7
+            try:
+                expected_score = max(0.05, min(1.0, float(expected_score)))
+            except Exception:
+                expected_score = 0.7
+
+            habit_action = {
+                "type": habit_payload.get("type", "habit_reflection"),
+                "payload": dict(habit_payload),
+                "priority": expected_score,
+            }
+
+            scratch["frame"] = {
+                "trigger": trigger,
+                "source": "habit",
+                "text": habit_desc or habit_name or "",
+                "options": [
+                    {
+                        "action": habit_action,
+                        "expected": {"score": expected_score},
+                    }
+                ],
+                "stop_rules": {},
+            }
+
+            if not ctx.get("reason"):
+                ctx["reason"] = f"habit::{habit_name or 'routine'}"
+
+            scratch.setdefault("priority", expected_score)
+
         for step in steps:
             stg = step["stage"]
             skip_condition = step.get("skip_if")
@@ -2068,6 +2204,19 @@ class Orchestrator:
                         if (result and result.get("status") in ("ok", "done", "success"))
                         else float((ctx.get("obtained") or {"score": 0.0}).get("score", 0.0))
                     )
+                    if selection.family == "HABIT":
+                        habit_payload = (ctx.get("scratch", {}) or {}).get("habit_payload", {})
+                        if result is not None:
+                            ctx.setdefault("scratch", {})["habit_result"] = result
+                        habit_info = habit_payload.get("habit") if isinstance(habit_payload, dict) else {}
+                        habit_name = (habit_info or {}).get("name")
+                        if isinstance(habit_payload, dict):
+                            habit_name = habit_name or habit_payload.get("name")
+                        if habit_name and result and result.get("ok"):
+                            try:
+                                self.cognition.habits.record_completion(habit_name, when=time.time())
+                            except Exception:
+                                pass
                     if decision_journal and self._current_decision_id:
                         try:
                             decision_journal.close(self._current_decision_id, obtained_score)
