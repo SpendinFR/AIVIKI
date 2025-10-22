@@ -13,16 +13,50 @@ from typing import Dict, Iterable, Mapping, Optional
 try:  # pragma: no cover - optional numpy dependency
     import numpy as np  # type: ignore
 except Exception:  # pragma: no cover - lightweight fallback for tests
+    class _FallbackArray(list):
+        """Minimal list-backed array supporting scalar arithmetic."""
+
+        def __mul__(self, other):  # type: ignore[override]
+            if isinstance(other, (int, float)):
+                return _FallbackArray(float(v) * float(other) for v in self)
+            return NotImplemented
+
+        def __rmul__(self, other):
+            return self.__mul__(other)
+
+        def __imul__(self, other):  # type: ignore[override]
+            if not isinstance(other, (int, float)):
+                return NotImplemented
+            scale = float(other)
+            for idx, value in enumerate(self):
+                self[idx] = float(value) * scale
+            return self
+
+        def __add__(self, other):  # type: ignore[override]
+            if isinstance(other, (list, tuple, _FallbackArray)):
+                return _FallbackArray(float(a) + float(b) for a, b in zip(self, other))
+            return NotImplemented
+
+        def __iadd__(self, other):  # type: ignore[override]
+            if not isinstance(other, (list, tuple, _FallbackArray)):
+                return NotImplemented
+            for idx, value in enumerate(other):
+                if idx < len(self):
+                    self[idx] = float(self[idx]) + float(value)
+                else:
+                    self.append(float(value))
+            return self
+
     class _FallbackNumpy:
         inf = float("inf")
 
         @staticmethod
         def zeros(length: int, dtype=float):
-            return [dtype() for _ in range(length)]
+            return _FallbackArray(dtype() for _ in range(length))
 
         @staticmethod
         def append(array, value):
-            return list(array) + [value]
+            return _FallbackArray(list(array) + [value])
 
         @staticmethod
         def dot(a, b):
@@ -38,7 +72,7 @@ except Exception:  # pragma: no cover - lightweight fallback for tests
 
         @staticmethod
         def copy(array):
-            return list(array)
+            return _FallbackArray(array)
 
     np = _FallbackNumpy()  # type: ignore
 
