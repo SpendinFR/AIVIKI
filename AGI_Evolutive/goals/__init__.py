@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 import unicodedata
@@ -14,6 +15,9 @@ from .curiosity import CuriosityEngine
 from .dag_store import DagStore, GoalNode
 from .heuristics import HeuristicRegistry, default_heuristics
 from .intention_classifier import IntentionModel
+
+
+logger = logging.getLogger(__name__)
 
 
 class GoalType(Enum):
@@ -87,6 +91,7 @@ class GoalSystem:
         self._ensure_root_goal()
         self._hydrate_metadata()
         self._ensure_structural_hierarchy()
+        self._question_blocked = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -100,6 +105,10 @@ class GoalSystem:
 
         if user_msg:
             self._record_feedback(user_msg)
+
+        if self._question_blocked:
+            self.pending_actions.clear()
+            return
 
         if self._should_autopropose():
             self._propose_curiosity_goals()
@@ -842,6 +851,21 @@ class GoalSystem:
                 }
             )
         return actions
+
+    def set_question_block(self, blocked: bool) -> None:
+        flag = bool(blocked)
+        if self._question_blocked == flag:
+            return
+        self._question_blocked = flag
+        if flag:
+            self.pending_actions.clear()
+            message = "Blocage des objectifs primaires: en attente de réponses utilisateur"
+        else:
+            message = "Reprise des objectifs primaires: backlog de questions réduit"
+        try:
+            logger.info(message)
+        except Exception:
+            pass
 
     def _handle_goal_completion(
         self, goal: GoalNode, metadata: Optional[GoalMetadata]

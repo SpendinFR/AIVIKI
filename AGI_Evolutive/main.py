@@ -42,9 +42,14 @@ def _get_qm(auto) -> Any:
 
 
 def _print_pending(
-    qm, k: int = 3, preset: Optional[List[Dict[str, Any]]] = None
+    qm,
+    k: Optional[int] = 3,
+    preset: Optional[List[Dict[str, Any]]] = None,
+    *,
+    channel: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Affiche les k dernières questions, renvoie la même liste (ordre d'affichage)."""
+    """Affiche les questions en attente et renvoie la liste affichée."""
+
     if preset is not None:
         pending = list(preset)
     elif not qm:
@@ -53,14 +58,30 @@ def _print_pending(
         pending = list(getattr(qm, "pending_questions", []))
     if not pending:
         return []
-    # on prend les k dernières (les plus récentes) et on garde l'ordre d’affichage
-    view = pending[-k:]
+
+    def _chan(item: Dict[str, Any]) -> str:
+        meta = item.get("meta") or {}
+        return str(meta.get("channel") or "primary")
+
+    if channel:
+        pending = [q for q in pending if _chan(q) == channel]
+        if not pending:
+            return []
+
+    pending.sort(key=lambda item: (item.get("meta", {}).get("queued_at", 0.0)))
+    if k is None or k <= 0 or k >= len(pending):
+        view = pending
+    else:
+        view = pending[-k:]
+
     print("\n— Questions en attente —")
     for i, q in enumerate(view, 1):
         qtype = q.get("type", "?")
         score = q.get("score", 0.0)
         text = q.get("text", "")
-        print(f"[{i}] ({qtype}, score={score:.2f}) {text}")
+        chan = _chan(q)
+        auto = " ⚙️" if (q.get("meta", {}) or {}).get("auto_suggestions") else ""
+        print(f"[{i}] ({chan}/{qtype}, score={score:.2f}) {text}{auto}")
     print("Réponds avec : a <num> <ta réponse>   ex:  a 2 oui, c’était volontaire\n")
     return view
 
@@ -94,6 +115,7 @@ Commandes disponibles :
   /save        → force une sauvegarde immédiate
   /state       → montre les infos d'état globales
   /quit        → quitte proprement
+  q [channel]  → affiche toutes les questions en attente (channel=primary|immediate)
 Astuce : déposez vos fichiers (.txt, .md, .json, etc.) dans ./inbox/
          ils seront intégrés automatiquement en mémoire.
 """
@@ -514,6 +536,48 @@ def run_cli():
 
         elif msg == "/help":
             print(HELP_TEXT)
+            continue
+
+        elif (
+            msg_lower in {"q", "/q", "/questions"}
+            or msg_lower.startswith("q ")
+            or msg_lower.startswith("/q ")
+            or msg_lower.startswith("/questions ")
+        ):
+            qm = _get_qm(auto)
+            if not qm:
+                print("⚠️  Aucun gestionnaire de questions accessible.")
+                continue
+            pending_all = list(getattr(qm, "pending_questions", []))
+            if not pending_all:
+                print("ℹ️  Aucune question en attente.")
+                _last_view = []
+                _pending_cache = []
+                continue
+            parts = msg.strip().split()
+            channel = None
+            if len(parts) >= 2:
+                arg = parts[1].lower()
+                if arg.startswith("prim"):
+                    channel = "primary"
+                elif arg.startswith("imm"):
+                    channel = "immediate"
+            view = _print_pending(qm, k=None, preset=pending_all, channel=channel)
+            if not view:
+                label = f" pour le canal {channel}" if channel else ""
+                print(f"ℹ️  Aucune question{label}.")
+                continue
+            _last_view = list(view)
+            _pending_cache = list(view)
+            if channel:
+                print(f"Total questions ({channel}) : {len(view)}")
+            else:
+                print(f"Total questions : {len(view)}")
+            blocked_fn = getattr(qm, "blocked_channels", None)
+            if callable(blocked_fn):
+                blocked = list(blocked_fn())
+                if blocked:
+                    print("⛔ Blocage actif sur : " + ", ".join(blocked))
             continue
 
         elif msg == "/inbox":
