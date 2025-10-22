@@ -150,6 +150,7 @@ class Autopilot:
         self._last_cycle_metrics: Dict[str, Any] = {}
         self._step_counter = 0
         self._last_step_ts = 0.0
+        self._last_auto_attempt_ts = 0.0
 
         try:
             self.persist.load()
@@ -226,6 +227,9 @@ class Autopilot:
             "questions", self.questions.maybe_generate_questions
         )
         metrics["stages"]["questions"] = questions_result.to_metrics()
+        blocked_channels = self._sync_question_block_state()
+        if blocked_channels:
+            self._attempt_autonomous_resolution(blocked_channels)
 
         # 5) Persist the current state regularly.
         persistence_result = self._run_stage("persistence", self.persist.autosave_tick)
@@ -330,6 +334,64 @@ class Autopilot:
             candidates.values(), key=lambda q: q.get("score", 0.0), reverse=True
         )
         return ranked[: self.max_pending_questions]
+
+    def _sync_question_block_state(self) -> List[str]:
+        qm = getattr(self, "questions", None)
+        if not qm or not hasattr(qm, "blocked_channels"):
+            return []
+        blocked = list(qm.blocked_channels())
+        primary_blocked = bool(getattr(qm, "is_channel_blocked", lambda _c: False)("primary"))
+        immediate_blocked = bool(getattr(qm, "is_channel_blocked", lambda _c: False)("immediate"))
+
+        goals = getattr(self.arch, "goals", None)
+        if goals and hasattr(goals, "set_question_block"):
+            try:
+                goals.set_question_block(primary_blocked)
+            except Exception:
+                pass
+
+        if self.orchestrator and hasattr(self.orchestrator, "set_immediate_question_block"):
+            try:
+                self.orchestrator.set_immediate_question_block(immediate_blocked)
+            except Exception:
+                pass
+
+        return blocked
+
+    def _attempt_autonomous_resolution(self, blocked_channels: Iterable[str]) -> None:
+        now = time.time()
+        if now - self._last_auto_attempt_ts < 20.0:
+            return
+        self._last_auto_attempt_ts = now
+        channels_list = ",".join(sorted(set(blocked_channels)))
+        self._log("info", "Autonomous resolution attempt for blocked channels: %s", channels_list)
+
+        perception = getattr(self.arch, "perception_interface", None) or getattr(
+            self.arch, "perception", None
+        )
+        if perception and hasattr(perception, "scan_inbox"):
+            try:
+                perception.scan_inbox(force=False)
+            except TypeError:
+                try:
+                    perception.scan_inbox()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        goals = getattr(self.arch, "goals", None)
+        if goals and hasattr(goals, "step"):
+            try:
+                goals.step()
+            except Exception:
+                pass
+
+        if hasattr(self.questions, "attempt_auto_answers"):
+            try:
+                self.questions.attempt_auto_answers(channels=blocked_channels)
+            except Exception:
+                pass
 
     def save_now(self):
         """Force a persistence checkpoint."""

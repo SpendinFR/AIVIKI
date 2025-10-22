@@ -196,7 +196,11 @@ class QuestionManager:
         self.asked_recently: Dict[str, float] = {}
         self.question_history: Deque[Dict[str, Any]] = deque(maxlen=200)
         self.feedback_history: Deque[Dict[str, Any]] = deque(maxlen=200)
-        self.max_queue = 10
+        self.max_primary = 50
+        self.max_immediate = 10
+        self._channel_limits = {"primary": self.max_primary, "immediate": self.max_immediate}
+        self._channel_block: Dict[str, bool] = {"primary": False, "immediate": False}
+        self._overflow: Dict[str, List[Dict[str, Any]]] = {"primary": [], "immediate": []}
         self.last_generated = 0.0
         self.cooldown = 8.0  # secondes minimum entre générations
         self.reask_cooldown = 3600.0
@@ -220,18 +224,18 @@ class QuestionManager:
             return
 
         now = time.time()
+        base_meta = {**(metadata or {})}
+        base_meta.setdefault("ts", now)
         entry = {
-            "id": metadata.get("id") if metadata else str(uuid.uuid4()),
+            "id": base_meta.get("id") or str(uuid.uuid4()),
             "type": qtype,
             "text": text.strip(),
             "score": _clip(priority),
-            "meta": {**(metadata or {}), "ts": now},
+            "meta": base_meta,
         }
         self._push_to_bank(entry)
         if entry["text"] and not any(entry["text"] == q.get("text") for q in self.pending_questions):
-            if len(self.pending_questions) >= self.max_queue:
-                self.pending_questions.pop(0)
-            self.pending_questions.append(entry)
+            self._enqueue_pending(entry)
 
     def record_information_need(
         self,
@@ -299,8 +303,9 @@ class QuestionManager:
                 continue
             if any(text == q.get("text") for q in self.pending_questions):
                 continue
-            self.pending_questions.append(candidate)
-            if len(self.pending_questions) >= self.max_queue:
+            if not self._enqueue_pending(candidate):
+                continue
+            if any(self.is_channel_blocked(ch) for ch in self._channel_limits):
                 break
 
         if self.pending_questions:
@@ -311,21 +316,55 @@ class QuestionManager:
 
         now = time.time()
         out = []
-        while self.pending_questions:
-            q = self.pending_questions.pop(0)
+        for q in self.pending_questions:
+            meta = q.get("meta") or {}
+            if meta.get("state") == "answered":
+                continue
+            if meta.get("served_at"):
+                continue
             text = q.get("text")
             if not text:
                 continue
+            qid = q.get("id") or meta.get("id") or str(uuid.uuid4())
+            meta["served_at"] = now
+            meta.setdefault("state", "pending")
             self.asked_recently[text] = now
-            meta = q.get("meta", {})
-            qid = q.get("id", str(uuid.uuid4()))
             features = q.get("_features")
             if features:
                 self._asked_features[qid] = (now, tuple(features))
-            self.question_history.append({"ts": now, "id": qid, "question": text, "meta": meta})
+            self.question_history.append({"ts": now, "id": qid, "question": text, "meta": dict(meta)})
             self._novelty_tracker[text] = self._novelty_tracker.get(text, 0) + 1
             out.append(q)
         return out
+
+    def resolve_question(self, question_id: str, answer: Optional[str] = None) -> bool:
+        """Marque une question comme résolue et met à jour l'état de blocage."""
+
+        if not question_id:
+            return False
+        resolved = False
+        for idx in range(len(self.pending_questions) - 1, -1, -1):
+            q = self.pending_questions[idx]
+            qid = q.get("id") or q.get("meta", {}).get("id")
+            if qid != question_id:
+                continue
+            channel = self._channel_for_entry(q)
+            meta = q.get("meta") or {}
+            meta["state"] = "answered"
+            meta["answered_at"] = time.time()
+            if answer:
+                meta["answer"] = answer
+            self.pending_questions.pop(idx)
+            resolved = True
+            self._update_channel_block(channel)
+            break
+        if not resolved:
+            return False
+        try:
+            self._replenish_from_overflow()
+        except Exception:
+            pass
+        return True
 
     def register_outcome(
         self,
@@ -425,6 +464,162 @@ class QuestionManager:
         if len(self.question_bank) > 50:
             # prune the lowest scored entries
             self.question_bank = sorted(self.question_bank, key=lambda x: x.get("score", 0.0), reverse=True)[:50]
+
+    def _enqueue_pending(self, payload: Dict[str, Any]) -> bool:
+        channel = self._channel_for_entry(payload)
+        meta = payload.setdefault("meta", {})
+        now = time.time()
+        meta.setdefault("channel", channel)
+        meta.setdefault("queued_at", now)
+        meta.pop("served_at", None)
+        meta.setdefault("state", "pending")
+
+        if self._channel_count(channel) >= self._channel_limits[channel]:
+            meta.setdefault("channel", channel)
+            self._overflow[channel].append(payload)
+            self._update_channel_block(channel)
+            return False
+
+        self.pending_questions.append(payload)
+        self.pending_questions.sort(key=lambda item: (item.get("meta", {}).get("queued_at", 0.0)))
+        self._update_channel_block(channel)
+        return True
+
+    def _channel_for_entry(self, payload: Dict[str, Any]) -> str:
+        meta = payload.get("meta") or {}
+        channel = meta.get("channel")
+        if isinstance(channel, str) and channel in self._channel_limits:
+            return channel
+        source = str(meta.get("source") or payload.get("source") or "").lower()
+        qtype = str(payload.get("type") or "").lower()
+        immediacy = meta.get("immediacy")
+        try:
+            immediacy_val = float(immediacy)
+        except (TypeError, ValueError):
+            immediacy_val = 0.0
+        if immediacy_val >= 0.75:
+            return "immediate"
+        if any(token in source for token in ("trigger", "reflex", "alert", "threat")):
+            return "immediate"
+        if qtype in {"trigger", "urgent", "reflex"}:
+            return "immediate"
+        return "primary"
+
+    def _channel_count(self, channel: str) -> int:
+        return sum(1 for q in self.pending_questions if self._channel_for_entry(q) == channel)
+
+    def _update_channel_block(self, channel: str, blocked: Optional[bool] = None) -> None:
+        if blocked is None:
+            blocked = self._channel_count(channel) >= self._channel_limits[channel] or bool(
+                self._overflow[channel]
+            )
+        prev = self._channel_block.get(channel)
+        new_val = bool(blocked)
+        self._channel_block[channel] = new_val
+        if prev != new_val:
+            logger = getattr(self.arch, "logger", None)
+            if logger and hasattr(logger, "write"):
+                try:
+                    logger.write(
+                        "questions.block_state",
+                        channel=channel,
+                        blocked=new_val,
+                        pending=self._channel_count(channel),
+                        overflow=len(self._overflow[channel]),
+                    )
+                except Exception:
+                    pass
+
+    def _replenish_from_overflow(self) -> None:
+        for channel in self._channel_limits:
+            queue = self._overflow[channel]
+            if not queue:
+                continue
+            while queue and self._channel_count(channel) < self._channel_limits[channel]:
+                entry = queue.pop(0)
+                entry_meta = entry.setdefault("meta", {})
+                entry_meta["channel"] = channel
+                entry_meta.pop("served_at", None)
+                entry_meta["state"] = "pending"
+                entry_meta["queued_at"] = time.time()
+                self.pending_questions.append(entry)
+            self.pending_questions.sort(key=lambda item: (item.get("meta", {}).get("queued_at", 0.0)))
+            self._update_channel_block(channel)
+
+    def blocked_channels(self) -> List[str]:
+        return [name for name, blocked in self._channel_block.items() if blocked]
+
+    def is_channel_blocked(self, channel: str) -> bool:
+        return bool(self._channel_block.get(channel, False))
+
+    def is_blocked(self) -> bool:
+        return any(self._channel_block.values())
+
+    def attempt_auto_answers(self, channels: Optional[Iterable[str]] = None) -> List[Dict[str, Any]]:
+        """Essaie de proposer une réponse en autonomie pour les questions bloquantes."""
+
+        if channels is not None:
+            target_channels = {ch for ch in channels if ch in self._channel_limits}
+        else:
+            target_channels = set(self._channel_limits)
+        attempts: List[Dict[str, Any]] = []
+        for question in self.pending_questions:
+            meta = question.setdefault("meta", {})
+            channel = self._channel_for_entry(question)
+            if channel not in target_channels:
+                continue
+            if meta.get("state") == "answered":
+                continue
+            if meta.get("auto_attempted"):
+                continue
+            meta["auto_attempted"] = time.time()
+            suggestion = self._attempt_auto_answer_for(question)
+            if suggestion:
+                meta.setdefault("auto_suggestions", []).append(suggestion)
+                attempts.append({"question": question, "suggestion": suggestion})
+        return attempts
+
+    def _attempt_auto_answer_for(self, question: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        text = (question.get("text") or "").strip()
+        if not text:
+            return None
+        tokens = self._tokenize(text)
+        if not tokens:
+            return None
+        store = getattr(getattr(self.arch, "memory", None), "store", None)
+        if not store or not hasattr(store, "get_recent_memories"):
+            return None
+        candidates = store.get_recent_memories(200)
+        best_score = 0.0
+        best_item: Optional[Dict[str, Any]] = None
+        for item in reversed(candidates):
+            snippet = str(item.get("text") or item.get("content") or "")
+            if not snippet.strip():
+                continue
+            score = self._overlap_score(tokens, snippet)
+            if score > best_score:
+                best_score = score
+                best_item = item
+        if not best_item or best_score < 0.35:
+            return None
+        return {
+            "text": best_item.get("text") or best_item.get("content") or "",
+            "source": best_item.get("kind", "memory"),
+            "memory_id": best_item.get("id"),
+            "score": best_score,
+        }
+
+    def _tokenize(self, text: str) -> List[str]:
+        return [tok for tok in re.findall(r"[a-z0-9éèêàùûôîïç]+", text.lower()) if len(tok) > 2]
+
+    def _overlap_score(self, tokens: List[str], snippet: str) -> float:
+        if not tokens:
+            return 0.0
+        words = self._tokenize(snippet)
+        if not words:
+            return 0.0
+        overlap = len(set(tokens) & set(words))
+        return overlap / max(len(set(tokens)), 1)
 
     def _design_question(
         self,

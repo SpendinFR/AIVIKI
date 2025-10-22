@@ -1046,6 +1046,7 @@ class Orchestrator:
 
         self.trigger_bus = TriggerBus()
         self.trigger_router = TriggerRouter()
+        self.immediate_question_blocked = False
 
         self.memory = SimpleNamespace(
             store=_MemoryStoreAdapter(self._memory_store),
@@ -1140,6 +1141,21 @@ class Orchestrator:
             "Orchestrateur prêt",
             extra={"scheduler_jobs": job_count},
         )
+
+    def set_immediate_question_block(self, blocked: bool) -> None:
+        flag = bool(blocked)
+        if self.immediate_question_blocked == flag:
+            return
+        self.immediate_question_blocked = flag
+        notice = (
+            "Blocage des objectifs immédiats: backlog de questions critiques"
+            if flag
+            else "Reprise des objectifs immédiats: questions critiques traitées"
+        )
+        try:
+            logger.info(notice)
+        except Exception:
+            pass
 
     def _register_jobs(self):
         self.scheduler.register_job("scan_inbox", 30, lambda: self.io.perception.scan_inbox())
@@ -1820,6 +1836,23 @@ class Orchestrator:
         return result
 
     def _run_pipeline(self, trigger: Trigger) -> Dict[str, Any]:
+        if self.immediate_question_blocked:
+            meta = trigger.meta or {}
+            try:
+                immediacy = float(meta.get("immediacy", 0.0))
+            except (TypeError, ValueError):
+                immediacy = 0.0
+            if immediacy >= 0.75:
+                logger.info(
+                    "Déclencheur %s ignoré (questions immédiates bloquées)",
+                    trigger.type.name,
+                )
+                return {
+                    "meta": meta,
+                    "payload": trigger.payload or {},
+                    "blocked": True,
+                    "reason": "immediate_questions_backlog",
+                }
         family = self.trigger_router.select_pipeline(trigger)
         trigger_meta = trigger.meta or {}
         trigger_payload = trigger.payload or {}
