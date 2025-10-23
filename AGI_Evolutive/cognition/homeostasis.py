@@ -96,10 +96,12 @@ class Homeostasis:
                 "social_bonding": 0.4,
                 "competence": 0.5,
                 "play": 0.3,
+                "restoration": 0.45,
             },
             "last_update": _now(),
             "intrinsic_reward": 0.0,
             "extrinsic_reward": 0.0,
+            "hedonic_reward": 0.0,
             "meta": {},
         }
         self._load()
@@ -125,6 +127,7 @@ class Homeostasis:
                 "social_bonding": 0.4,
                 "competence": 0.5,
                 "play": 0.3,
+                "restoration": 0.45,
             },
         )
         for key, default in {
@@ -133,6 +136,7 @@ class Homeostasis:
             "social_bonding": 0.4,
             "competence": 0.5,
             "play": 0.3,
+            "restoration": 0.45,
         }.items():
             drives.setdefault(key, default)
 
@@ -171,6 +175,8 @@ class Homeostasis:
                 "bias": 0.1,
                 "curiosity": 0.4,
                 "competence": 0.3,
+                "play": 0.2,
+                "restoration": 0.25,
             },
         )
         intrinsic_meta.setdefault("lr", 0.05)
@@ -194,6 +200,8 @@ class Homeostasis:
         self.state.setdefault("last_update", timestamp)
         self.state.setdefault("intrinsic_reward", 0.0)
         self.state.setdefault("extrinsic_reward", 0.0)
+        self.state.setdefault("hedonic_reward", 0.0)
+        meta.setdefault("hedonic", {})
 
     def _save(self) -> None:
         os.makedirs(os.path.dirname(_PATH), exist_ok=True)
@@ -269,7 +277,7 @@ class Homeostasis:
     def _intrinsic_model(self) -> OnlineLinearModel:
         meta = self.state["meta"]["intrinsic_model"]
         model = OnlineLinearModel(
-            feature_names=["bias", "curiosity", "competence"],
+            feature_names=["bias", "curiosity", "competence", "play", "restoration"],
             weights=meta.get("weights", {}),
             lr=float(meta.get("lr", 0.05)),
             l2=float(meta.get("l2", 0.01)),
@@ -284,10 +292,14 @@ class Homeostasis:
     def _prepare_intrinsic_features(self, info_gain: float, progress: float) -> Dict[str, float]:
         curiosity_drive = float(self.state["drives"].get("curiosity", 0.5))
         competence_drive = float(self.state["drives"].get("competence", 0.5))
+        play_drive = float(self.state["drives"].get("play", 0.3))
+        restoration_drive = float(self.state["drives"].get("restoration", 0.45))
         features = {
             "bias": 1.0,
             "curiosity": curiosity_drive * float(info_gain),
             "competence": competence_drive * float(progress),
+            "play": play_drive * float(info_gain),
+            "restoration": restoration_drive * (1.0 - float(progress)),
         }
         return features
 
@@ -365,6 +377,43 @@ class Homeostasis:
         updated = max(0.0, min(1.0, self.state["drives"].get(drive, 0.5) + capped_delta))
         self.state["drives"][drive] = updated
         self._record_drive_history(drive, updated)
+
+    def adjust_drive(self, drive: str, delta: float, max_step: float = 0.08) -> None:
+        """Public helper used by other modules (e.g. EmotionEngine)."""
+        self._apply_drive_update(drive, delta, max_step=max_step)
+        self._save()
+
+    def register_hedonic_state(self, pleasure: float, mode: str = "travail", meta: Optional[Dict[str, Any]] = None) -> None:
+        """Track hedonic events (flânerie, repos) and adjust drives accordingly."""
+        pleasure = max(-1.0, min(1.0, float(pleasure)))
+        self.state["hedonic_reward"] = pleasure
+        play_delta = 0.08 * pleasure
+        restoration_delta = 0.12 * pleasure if mode == "flanerie" else 0.04 * pleasure
+        self._apply_drive_update("play", play_delta)
+        self._apply_drive_update("restoration", restoration_delta, max_step=0.12)
+        hedonic_meta = self.state.setdefault("meta", {}).setdefault("hedonic", {})
+        hedonic_meta.update({
+            "last_mode": mode,
+            "last_ts": _now(),
+            "last_meta": meta or {},
+        })
+        self._save()
+
+    def register_global_slowdown(self, slowdown: float, meta: Optional[Dict[str, Any]] = None) -> None:
+        """Record a physiological slowdown and bias drives toward recovery."""
+
+        slowdown = max(0.0, min(1.0, float(slowdown)))
+        phenom_meta = self.state.setdefault("meta", {}).setdefault("phenomenal", {})
+        phenom_meta["global_slowdown"] = {
+            "value": slowdown,
+            "ts": _now(),
+            "meta": meta or {},
+        }
+        if slowdown <= 0.0:
+            self._save()
+            return
+        self.adjust_drive("restoration", 0.15 * slowdown, max_step=0.12)
+        self.adjust_drive("task_activation", -0.18 * slowdown)
 
     def _record_drive_history(self, drive: str, value: float) -> None:
         drift_meta = self.state["meta"]["drift"]

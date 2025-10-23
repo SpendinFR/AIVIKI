@@ -224,9 +224,9 @@ class RewardEngine:
         met à jour systèmes, et retourne l'événement.
         """
         ev = self._analyze_feedback(user_id, text, context or {}, channel)
-        self._apply_reward(ev)
-        self._log_reward_event(ev)
-        self._notify_metacognition(ev)
+        self._apply_reward(ev, intrinsic=False)
+        self._log_reward_event(ev, intrinsic=False)
+        self._notify_metacognition(ev, intrinsic=False)
         self._notify_listeners(ev)
         return ev
 
@@ -243,6 +243,41 @@ class RewardEngine:
                 listener(event)
             except Exception:
                 continue
+
+    def register_intrinsic_reward(
+        self,
+        source: str,
+        pleasure: float,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> RewardEvent:
+        ctx = dict(context or {})
+        kernel = ctx.get("phenomenal_kernel")
+        intensity = max(0.0, min(1.0, abs(float(pleasure))))
+        polarity = "positive" if pleasure > 0 else "negative" if pleasure < 0 else "neutral"
+        features: Dict[str, Any] = {
+            "hedonic_source": source,
+            "hedonic_value": float(pleasure),
+            "hedonic_mode": ctx.get("mode"),
+            "intensity": intensity,
+        }
+        if isinstance(kernel, dict):
+            features["kernel"] = dict(kernel)
+        ev = RewardEvent(
+            timestamp=time.time(),
+            user_id=source or "internal",
+            text=str(ctx.get("text", "[intrinsic_reward]")),
+            channel="internal",
+            extrinsic_reward=0.0,
+            polarity=polarity,
+            intensity=intensity,
+            features=features,
+            context=ctx,
+        )
+        self._apply_reward(ev, intrinsic=True)
+        self._log_reward_event(ev, intrinsic=True)
+        self._notify_metacognition(ev, intrinsic=True)
+        self._notify_listeners(ev)
+        return ev
 
     def _analyze_feedback(
         self, user_id: str, text: str, context: Dict[str, Any], channel: str
@@ -313,10 +348,24 @@ class RewardEngine:
             context=context,
         )
 
-    def _apply_reward(self, ev: RewardEvent):
+    def _apply_reward(self, ev: RewardEvent, intrinsic: bool = False):
         try:
             emo = self.emotions
-            if emo:
+            hedonic_val = 0.0
+            hedonic_mode = None
+            if isinstance(ev.features, dict):
+                raw_hedonic = ev.features.get("hedonic_value")
+                if isinstance(raw_hedonic, (int, float)):
+                    hedonic_val = float(raw_hedonic)
+                hedonic_mode = ev.features.get("hedonic_mode") or (ev.features.get("kernel") or {}).get("mode")
+            if isinstance(ev.context, dict) and not hedonic_mode:
+                hedonic_mode = ev.context.get("mode")
+            if emo and hedonic_val and hasattr(emo, "register_intrinsic_pleasure"):
+                try:
+                    emo.register_intrinsic_pleasure(hedonic_val, meta=asdict(ev))
+                except Exception:
+                    pass
+            if not intrinsic and emo:
                 if hasattr(emo, "register_social_feedback"):
                     emo.register_social_feedback(
                         ev.extrinsic_reward,
@@ -324,63 +373,76 @@ class RewardEngine:
                         ev.polarity,
                         meta=asdict(ev),
                     )
-                else:
-                    if hasattr(emo, "state"):
-                        st = emo.state
-                        st["valence"] = max(
-                            -1.0,
-                            min(1.0, st.get("valence", 0.0) + 0.3 * ev.extrinsic_reward),
-                        )
-                        st["arousal"] = max(
-                            0.0,
-                            min(1.0, st.get("arousal", 0.5) + 0.2 * ev.intensity),
-                        )
-        except Exception:
-            pass
-
-        try:
-            if self.goals:
-                active = None
-                if hasattr(self.goals, "get_active_goal"):
-                    active = self.goals.get_active_goal()
-                elif hasattr(self.goals, "current_goal"):
-                    active = getattr(self.goals, "current_goal")
-
-                if active:
-                    lr = 0.25 * (0.5 + 0.5 * ev.intensity)
-                    new_val = max(
+                elif hasattr(emo, "state"):
+                    st = emo.state
+                    st["valence"] = max(
+                        -1.0,
+                        min(1.0, st.get("valence", 0.0) + 0.3 * ev.extrinsic_reward),
+                    )
+                    st["arousal"] = max(
                         0.0,
-                        min(1.0, active.get("value", 0.5) + lr * ev.extrinsic_reward),
+                        min(1.0, st.get("arousal", 0.5) + 0.2 * ev.intensity),
                     )
-                    active["value"] = new_val
-                    if "evidence" not in active:
-                        active["evidence"] = []
-                    active["evidence"].append(
-                        {
-                            "t": ev.timestamp,
-                            "type": "social_feedback",
-                            "delta_value": lr * ev.extrinsic_reward,
-                            "user_id": ev.user_id,
-                            "text": ev.text,
-                        }
-                    )
-                    if hasattr(self.goals, "update_goal"):
-                        self.goals.update_goal(active.get("id"), active)
         except Exception:
             pass
 
-        if ev.extrinsic_reward > 0.05:
-            self._last_reward_event = ev.timestamp
+        if hedonic_val:
+            homeo = getattr(self.arch, "homeostasis", None)
+            if homeo and hasattr(homeo, "register_hedonic_state"):
+                try:
+                    homeo.register_hedonic_state(
+                        hedonic_val,
+                        mode=str(hedonic_mode or "travail"),
+                        meta=ev.features if isinstance(ev.features, dict) else {},
+                    )
+                except Exception:
+                    pass
 
-        self._maybe_spawn_curiosity_goals(ev)
+        if not intrinsic:
+            try:
+                if self.goals:
+                    active = None
+                    if hasattr(self.goals, "get_active_goal"):
+                        active = self.goals.get_active_goal()
+                    elif hasattr(self.goals, "current_goal"):
+                        active = getattr(self.goals, "current_goal")
+
+                    if active:
+                        lr = 0.25 * (0.5 + 0.5 * ev.intensity)
+                        new_val = max(
+                            0.0,
+                            min(1.0, active.get("value", 0.5) + lr * ev.extrinsic_reward),
+                        )
+                        active["value"] = new_val
+                        if "evidence" not in active:
+                            active["evidence"] = []
+                        active["evidence"].append(
+                            {
+                                "t": ev.timestamp,
+                                "type": "social_feedback",
+                                "delta_value": lr * ev.extrinsic_reward,
+                                "user_id": ev.user_id,
+                                "text": ev.text,
+                            }
+                        )
+                        if hasattr(self.goals, "update_goal"):
+                            self.goals.update_goal(active.get("id"), active)
+            except Exception:
+                pass
+
+            if ev.extrinsic_reward > 0.05:
+                self._last_reward_event = ev.timestamp
+
+            self._maybe_spawn_curiosity_goals(ev)
 
         try:
             if self.memory:
                 payload = {
-                    "type": "social_feedback",
+                    "type": "intrinsic_feedback" if intrinsic else "social_feedback",
                     "reward": ev.extrinsic_reward,
                     "polarity": ev.polarity,
                     "intensity": ev.intensity,
+                    "hedonic_value": hedonic_val,
                     "features": ev.features,
                     "user_id": ev.user_id,
                     "text": ev.text,
@@ -395,21 +457,34 @@ class RewardEngine:
 
         self._metacognitive_loop_adjustment(ev)
 
-    def _notify_metacognition(self, ev: RewardEvent):
+    def _notify_metacognition(self, ev: RewardEvent, intrinsic: bool = False):
         try:
             m = self.metacognition
             if not m:
                 return
             if hasattr(m, "_record_metacognitive_event"):
+                event_type = "intrinsic_feedback" if intrinsic else "social_feedback"
+                description = (
+                    f"Intrinsic pleasure {ev.polarity} (I={ev.intensity:.2f})"
+                    if intrinsic
+                    else f"Feedback {ev.polarity} (r={ev.extrinsic_reward:.2f}, I={ev.intensity:.2f})"
+                )
+                significance = ev.intensity if intrinsic else abs(ev.extrinsic_reward) * ev.intensity
+                hedonic_val = 0.0
+                if intrinsic and isinstance(ev.features, dict):
+                    try:
+                        hedonic_val = float(ev.features.get("hedonic_value", 0.0))
+                    except (TypeError, ValueError):
+                        hedonic_val = 0.0
                 m._record_metacognitive_event(
-                    event_type="social_feedback",
+                    event_type=event_type,
                     domain=getattr(m, "CognitiveDomain", None).DECISION_MAKING
                     if hasattr(m, "CognitiveDomain")
                     else None,
-                    description=f"Feedback {ev.polarity} (r={ev.extrinsic_reward:.2f}, I={ev.intensity:.2f})",
-                    significance=abs(ev.extrinsic_reward) * ev.intensity,
+                    description=description,
+                    significance=significance,
                     confidence=0.7,
-                    emotional_valence=ev.extrinsic_reward,
+                    emotional_valence=ev.extrinsic_reward if not intrinsic else hedonic_val,
                     cognitive_load=0.0,
                     related_memories=[],
                     action_taken=None,
@@ -417,9 +492,10 @@ class RewardEngine:
         except Exception:
             pass
 
-    def _log_reward_event(self, ev: RewardEvent):
+    def _log_reward_event(self, ev: RewardEvent, intrinsic: bool = False):
         try:
-            path = os.path.join(self.persist_dir, "logs", "social_feedback.jsonl")
+            filename = "intrinsic_feedback.jsonl" if intrinsic else "social_feedback.jsonl"
+            path = os.path.join(self.persist_dir, "logs", filename)
             with open(path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(json_sanitize(asdict(ev)), ensure_ascii=False) + "\n")
         except Exception:
@@ -492,6 +568,26 @@ class RewardEngine:
             features["expected_reward"] = float(context["expected_reward"])
         if isinstance(context.get("conversation_turn"), (int, float)):
             features["conversation_turn"] = float(context["conversation_turn"])
+        kernel = context.get("phenomenal_kernel")
+        if isinstance(kernel, dict):
+            energy = kernel.get("energy")
+            if isinstance(energy, (int, float)):
+                features["kernel_energy"] = float(energy)
+            fatigue = kernel.get("fatigue")
+            if isinstance(fatigue, (int, float)):
+                features["kernel_fatigue"] = float(fatigue)
+            hedonic = kernel.get("hedonic_reward")
+            if isinstance(hedonic, (int, float)):
+                features["kernel_hedonic"] = float(hedonic)
+            slowdown = kernel.get("global_slowdown")
+            if isinstance(slowdown, (int, float)):
+                features["kernel_slowdown"] = float(slowdown)
+            alert_pressure = kernel.get("alert_pressure")
+            if isinstance(alert_pressure, (int, float)):
+                features["kernel_alert_pressure"] = float(alert_pressure)
+            feel_like = kernel.get("feel_like")
+            if isinstance(feel_like, str):
+                features["kernel_feel_pause"] = 1.0 if feel_like == "pause" else 0.5 if feel_like == "slow" else 0.0
         return features
 
     def _heuristic_reward(

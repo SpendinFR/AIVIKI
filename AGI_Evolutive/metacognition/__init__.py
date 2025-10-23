@@ -20,6 +20,10 @@ from AGI_Evolutive.cognition.meta_cognition import OnlineLinear
 
 from .experimentation import MetacognitionExperimenter, calibrate_self_model
 
+
+def _clip(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
+    return max(lo, min(hi, float(value)))
+
 class MetacognitiveState(Enum):
     """États métacognitifs possibles"""
     MONITORING = "surveillance"
@@ -1738,37 +1742,65 @@ class BiasMonitoringSystem:
 class ResourceMonitoringSystem:
     """Système de surveillance des ressources cognitives"""
 
+    def __init__(self) -> None:
+        self._last_kernel_state: Dict[str, Any] = {}
+        self._last_kernel_ts: float = 0.0
+
+    def _refresh_kernel_state(self, cognitive_architecture) -> Dict[str, Any]:
+        kernel_state = None
+        if cognitive_architecture is not None:
+            try:
+                kernel_state = getattr(cognitive_architecture, "phenomenal_kernel_state", None)
+                if not kernel_state:
+                    kernel_state = getattr(cognitive_architecture, "_phenomenal_kernel_state", None)
+            except Exception:
+                kernel_state = None
+        if isinstance(kernel_state, dict) and kernel_state:
+            self._last_kernel_state = dict(kernel_state)
+            self._last_kernel_ts = time.time()
+        return dict(self._last_kernel_state)
+
+    def sample_machine_state(self) -> Dict[str, Any]:
+        """Expose the last phenomenal kernel snapshot."""
+
+        return dict(self._last_kernel_state)
+
+    @property
+    def last_snapshot(self) -> Optional[Dict[str, Any]]:
+        return dict(self._last_kernel_state) if self._last_kernel_state else None
+
     def assess_cognitive_load(self, cognitive_architecture, reasoning_system) -> float:
         """Évalue la charge cognitive actuelle"""
+
         load_indicators = []
 
-        # --- Sécurisation de la structure cognitive ---
         if not hasattr(cognitive_architecture, "global_activation"):
-            # Si le thread a démarré trop tôt, on initialise une valeur par défaut
             cognitive_architecture.global_activation = 0.5
 
         if not hasattr(cognitive_architecture, "get_cognitive_status"):
-            # Si la méthode n'existe pas encore, on retourne une valeur neutre
             return 0.5
 
         if isinstance(reasoning_system, str) or not hasattr(reasoning_system, "reasoning_history"):
-            # Le raisonnement n'est pas encore opérationnel → charge moyenne
             return 0.5
 
-        # --- Charge basée sur l'activation globale ---
         global_activation = getattr(cognitive_architecture, "global_activation", 0.5)
         load_indicators.append(global_activation)
 
-        # --- Charge basée sur la mémoire de travail ---
+        kernel_state = self._refresh_kernel_state(cognitive_architecture)
+        energy = kernel_state.get("energy")
+        if isinstance(energy, (int, float)):
+            load_indicators.append(1.0 - float(_clip(energy)))
+        slowdown = kernel_state.get("global_slowdown")
+        if isinstance(slowdown, (int, float)):
+            load_indicators.append(float(_clip(slowdown)))
+
         try:
             wm_load = cognitive_architecture.get_cognitive_status().get("working_memory_load", 0)
-            normalized_wm_load = min(wm_load / 10.0, 1.0)  # Normalisation
+            normalized_wm_load = min(wm_load / 10.0, 1.0)
             load_indicators.append(normalized_wm_load)
         except Exception:
-            # Si la mémoire n'est pas prête, on ne bloque pas la boucle
             load_indicators.append(0.5)
 
-        # --- Charge basée sur la complexité des raisonnements récents ---
         try:
             recent_inferences = reasoning_system.reasoning_history.get("recent_inferences", [])
             if recent_inferences:
@@ -1779,7 +1811,6 @@ class ResourceMonitoringSystem:
         except Exception:
             load_indicators.append(0.5)
 
-        # --- Calcul final ---
         return float(np.mean(load_indicators)) if load_indicators else 0.5
 
     def _assess_performance_decline(self, performance_history: list) -> float:
@@ -1787,11 +1818,11 @@ class ResourceMonitoringSystem:
         Évalue une éventuelle dégradation des performances cognitives.
         Retourne une valeur entre 0 (aucune baisse) et 1 (baisse significative).
         """
+
         if not performance_history or len(performance_history) < 2:
             return 0.0
 
         try:
-            # On compare les 3 derniers scores moyens
             recent_scores = [p.get("score", 0.5) for p in performance_history[-3:]]
             diffs = [recent_scores[i + 1] - recent_scores[i] for i in range(len(recent_scores) - 1)]
             decline = -np.mean([d for d in diffs if d < 0]) if any(d < 0 for d in diffs) else 0.0
@@ -1799,27 +1830,32 @@ class ResourceMonitoringSystem:
         except Exception:
             return 0.0
 
-    
     def assess_fatigue(self, metacognitive_history, cognitive_architecture) -> float:
         """Évalue le niveau de fatigue cognitive"""
+
         fatigue_indicators = []
-        
-        # Fatigue basée sur la durée de fonctionnement
+
+        kernel_state = self._refresh_kernel_state(cognitive_architecture)
+        kernel_fatigue = kernel_state.get("fatigue")
+        if isinstance(kernel_fatigue, (int, float)):
+            fatigue_indicators.append(0.4 * float(_clip(kernel_fatigue)))
+        slowdown = kernel_state.get("global_slowdown")
+        if isinstance(slowdown, (int, float)):
+            fatigue_indicators.append(0.3 * float(_clip(slowdown)))
+
         operation_time = time.time() - metacognitive_history.get("system_start_time", time.time())
-        time_fatigue = min(operation_time / 3600.0, 1.0)  # Normalisation sur 1 heure
-        fatigue_indicators.append(time_fatigue * 0.3)
-        
-        # Fatigue basée sur le nombre d'événements récents
+        time_fatigue = min(operation_time / 3600.0, 1.0)
+        fatigue_indicators.append(time_fatigue * 0.2)
+
         recent_events = len(metacognitive_history.get("events", []))
         event_fatigue = min(recent_events / 100.0, 1.0)
-        fatigue_indicators.append(event_fatigue * 0.4)
-        
-        # Fatigue basée sur les performances (si disponibles)
+        fatigue_indicators.append(event_fatigue * 0.2)
+
         if cognitive_architecture:
             performance_decline = self._assess_performance_decline(cognitive_architecture)
-            fatigue_indicators.append(performance_decline * 0.3)
-        
-        return sum(fatigue_indicators)
+            fatigue_indicators.append(performance_decline * 0.2)
+
+        return float(sum(fatigue_indicators))
 
 class ProgressTrackingSystem:
     """Système de suivi des progrès cognitifs"""

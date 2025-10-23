@@ -191,6 +191,7 @@ class AutonomyCore:
             progress_after=progress_after,
             episode=ep,
             policy_decision=decision,
+            hedonic_signal=getattr(self.arch, "phenomenal_kernel_state", {}).get("hedonic_reward") if getattr(self.arch, "phenomenal_kernel_state", None) else None,
         )
 
         # 5) Ping métacognition (si existante)
@@ -220,6 +221,19 @@ class AutonomyCore:
 
         progress_delta = max(0.0, progress_after - progress)
         reward_signal = min(1.0, 0.4 * evi + 5.0 * progress_delta)
+        kernel_state = getattr(self.arch, "phenomenal_kernel_state", None)
+        hedonic_reward = 0.0
+        mode = "travail"
+        if isinstance(kernel_state, dict):
+            try:
+                hedonic_reward = float(kernel_state.get("hedonic_reward", 0.0))
+            except Exception:
+                hedonic_reward = 0.0
+            mode = kernel_state.get("mode") or kernel_state.get("mode_suggestion") or "travail"
+        if hedonic_reward:
+            blend = 0.5 if mode == "flanerie" else 0.2
+            hedonic_scaled = max(0.0, min(1.0, 0.5 + 0.5 * hedonic_reward))
+            reward_signal = max(0.0, min(1.0, (1.0 - blend) * reward_signal + blend * hedonic_scaled))
         if isinstance(decision, dict) and decision.get("decision") == "apply":
             reward_signal = min(
                 1.0,
