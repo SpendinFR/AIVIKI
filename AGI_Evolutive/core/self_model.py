@@ -6,6 +6,12 @@ import time
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Mapping
 
 from AGI_Evolutive.core.config import cfg
+from AGI_Evolutive.core.life_story import (
+    GeneticProfile,
+    LifeStoryManager,
+    ensure_genetics_structure,
+    ensure_story_structure,
+)
 from AGI_Evolutive.utils import now_iso, safe_write_json
 
 _DEFAULT_SELF: Dict[str, Any] = {
@@ -37,6 +43,9 @@ class SelfModel:
         self.state: Dict[str, Any] = copy.deepcopy(_DEFAULT_SELF)
         self.identity: Dict[str, Any] = {}
         self.persona: Dict[str, Any] = {}
+        self._genetics: Optional[GeneticProfile] = None
+        self._story: Optional[LifeStoryManager] = None
+        self._awakening_last_check = 0.0
         self._load()
         self._refresh_identity_views()
         self.ensure_identity_paths()
@@ -63,6 +72,39 @@ class SelfModel:
         self.identity = identity if isinstance(identity, dict) else {}
         persona = self.state.get("persona")
         self.persona = persona if isinstance(persona, dict) else {}
+
+    def _ensure_story_objects(self) -> None:
+        ident = self.identity if isinstance(self.identity, dict) else {}
+        genetics_data = ensure_genetics_structure(ident.get("genetics"))
+        self._genetics = GeneticProfile(genetics_data)
+        ident["genetics"] = self._genetics.data
+
+        story_data = ensure_story_structure(ident.get("story"))
+        self._story = LifeStoryManager(story_data, self._genetics)
+        ident["story"] = self._story.data
+
+    def _align_story_goals(self) -> None:
+        if not isinstance(self.identity, dict):
+            return
+        if self._story is None:
+            return
+        purpose = self.identity.setdefault("purpose", {})
+        near_term = purpose.setdefault("near_term_goals", [])
+        origin = purpose.setdefault("origin_story", [])
+        anchors = self.identity.get("story", {}).get("anchors", {})
+        ultimate = anchors.get("ultimate_goal")
+        if ultimate and not purpose.get("ultimate"):
+            purpose["ultimate"] = ultimate
+        updated = False
+        for goal in self._story.foundation_goals():
+            if goal not in near_term:
+                near_term.append(goal)
+                updated = True
+            if goal not in origin:
+                origin.append(goal)
+                updated = True
+        if updated and len(near_term) > 12:
+            del near_term[:-12]
 
     def _sync_identity(self) -> None:
         if isinstance(self.identity, dict):
@@ -236,6 +278,7 @@ class SelfModel:
         purpose.setdefault("near_term_goals", list(purpose.get("near_term_goals", [])))
         purpose.setdefault("daily_focus", list(purpose.get("daily_focus", [])))
         purpose.setdefault("current_goal", purpose.get("current_goal"))
+        purpose.setdefault("origin_story", list(purpose.get("origin_story", [])))
         ident.setdefault("principles", [])  # [{key,desc,evidence_refs[]}]
         ident.setdefault("beliefs", {}).setdefault("index", {})  # topic→{conf,last_seen,refs[],stance}
         ident.setdefault("ideals", [])
@@ -346,8 +389,13 @@ class SelfModel:
         ident.setdefault("telemetry", {"counters": {}, "latency": {}, "health": {}})
         ident.setdefault("last_update_ts", self._now_ts())
 
+        ident["genetics"] = ensure_genetics_structure(ident.get("genetics"))
+        ident["story"] = ensure_story_structure(ident.get("story"))
+
         # réécrit dans self.identity (pas self.state) pour compatibilité avec ton fichier actuel
         self.identity = ident
+        self._ensure_story_objects()
+        self._align_story_goals()
         self._sync_identity()
 
     def set_identity_patch(self, patch: Dict[str, Any]) -> None:
@@ -386,6 +434,260 @@ class SelfModel:
         self.identity["last_update_ts"] = self._now_ts()
         self._sync_identity()
         self.save()
+
+    # -------------------- Histoire et génétique --------------------
+
+    def genetics_profile(self) -> GeneticProfile:
+        self.ensure_identity_paths()
+        if self._genetics is None:
+            self._ensure_story_objects()
+        return self._genetics  # type: ignore[return-value]
+
+    def life_story(self) -> LifeStoryManager:
+        self.ensure_identity_paths()
+        if self._story is None:
+            self._ensure_story_objects()
+        return self._story  # type: ignore[return-value]
+
+    def awakening_status(self) -> Dict[str, Any]:
+        story = self.life_story()
+        return story.awakening_status(now=self._now_ts())
+
+    def seed_genetics(
+        self,
+        *,
+        seeds: Optional[Dict[str, Any]] = None,
+        traits: Optional[Dict[str, float]] = None,
+        drives: Optional[Dict[str, float]] = None,
+        scripts: Optional[List[Dict[str, Any]]] = None,
+        affinities: Optional[Dict[str, float]] = None,
+    ) -> Dict[str, Any]:
+        self.ensure_identity_paths()
+        profile = self._genetics.seed_profile(
+            seeds=seeds,
+            traits=traits,
+            drives=drives,
+            scripts=scripts,
+            affinities=affinities,
+        )
+        self.identity["genetics"] = self._genetics.data
+        self.identity["last_update_ts"] = self._now_ts()
+        self._align_story_goals()
+        self._sync_identity()
+        self.save()
+        return profile
+
+    def bootstrap_story(
+        self,
+        *,
+        environment: Optional[Dict[str, Any]] = None,
+        prompts: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        self.ensure_identity_paths()
+        origin = self._story.bootstrap_origin(environment=environment, prompts=prompts)
+        self.identity["story"] = self._story.data
+        self.identity["last_update_ts"] = self._now_ts()
+        self._align_story_goals()
+        self._sync_identity()
+        self.save()
+        return origin
+
+    def ensure_awakened(
+        self,
+        *,
+        question_manager: Optional[Any] = None,
+        now: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        self.ensure_identity_paths()
+        story = self.life_story()
+        now_ts = float(now if now is not None else self._now_ts())
+        status = story.awakening_status(now=now_ts)
+        asked_prompt = None
+        pending_prompts = status.get("pending_prompts", []) or []
+        if question_manager is not None and pending_prompts:
+            prompt = pending_prompts[0]
+            prompt_id = prompt.get("id")
+            prompt_text = prompt.get("prompt")
+            if prompt_id and prompt_text:
+                metadata = {
+                    "source": "self_model.awakening",
+                    "type": "identity_foundation",
+                    "topic": f"awakening::{prompt_id}",
+                    "immediacy": 0.85,
+                }
+                try:
+                    question_manager.record_information_need(
+                        f"awakening::{prompt_id}",
+                        float(prompt.get("urgency", 0.7) or 0.7),
+                        metadata=metadata,
+                        explicit_question=prompt_text,
+                    )
+                    asked_prompt = story.mark_checkpoint_prompted(prompt_id, asked_at=now_ts)
+                except Exception:
+                    asked_prompt = None
+        if asked_prompt is not None:
+            status = story.awakening_status(now=now_ts)
+            self.identity["story"] = story.data
+            self.identity["last_update_ts"] = now_ts
+            self._align_story_goals()
+            self._sync_identity()
+            self.save()
+        self._awakening_last_check = now_ts
+        return status
+
+    def add_lifelong_motif(
+        self,
+        concept: str,
+        *,
+        tags: Optional[Iterable[str]] = None,
+        aliases: Optional[Iterable[str]] = None,
+        reason: Optional[str] = None,
+        bias: Optional[float] = None,
+        source: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        self.ensure_identity_paths()
+        self._ensure_story_objects()
+
+        tag_list: List[str] = []
+        if tags:
+            for tag in tags:
+                tag_text = str(tag or "").strip()
+                if tag_text:
+                    tag_list.append(tag_text)
+
+        alias_list: List[str] = []
+        if aliases:
+            for alias in aliases:
+                alias_text = str(alias or "").strip()
+                if alias_text:
+                    alias_list.append(alias_text)
+
+        genetics_result = self._genetics.add_lifelong_motif(
+            concept,
+            aliases=alias_list,
+            bias=bias,
+        )
+        if genetics_result is None:
+            return None
+
+        story_result = self._story.register_lifelong_motif(
+            genetics_result.get("concept", concept),
+            tags=tag_list + alias_list,
+            reason=reason,
+            source=source or "motif",
+            bias=genetics_result.get("bias"),
+            occurrences=genetics_result.get("occurrences"),
+            created=genetics_result.get("created", True),
+        )
+
+        self.identity["genetics"] = self._genetics.data
+        self.identity["story"] = self._story.data
+        self.identity["last_update_ts"] = self._now_ts()
+        self._align_story_goals()
+        self._sync_identity()
+        self.save()
+
+        return {
+            "concept": genetics_result.get("concept"),
+            "normalized": genetics_result.get("normalized"),
+            "genetics": genetics_result,
+            "story": story_result,
+        }
+
+    def register_stimulus(
+        self,
+        *,
+        concept: Optional[str],
+        tags: Optional[List[str]] = None,
+        intensity: float = 1.0,
+        source: Optional[str] = None,
+        description: Optional[str] = None,
+        lifelong: bool = False,
+        motif_aliases: Optional[Iterable[str]] = None,
+        motif_reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        self.ensure_identity_paths()
+        payload = {
+            "concept": concept,
+            "tags": tags or [],
+            "intensity": intensity,
+            "source": source,
+            "description": description,
+        }
+        motif_payload = None
+        if concept and lifelong:
+            motif_payload = self.add_lifelong_motif(
+                concept,
+                tags=tags,
+                aliases=motif_aliases,
+                reason=motif_reason or description,
+                bias=intensity,
+                source=source or "stimulus",
+            )
+        genetics_result = self._genetics.integrate_stimulus(payload)
+        story_event = self._story.integrate_stimulus(payload, genetics_result)
+        event = story_event
+        quest = story_event.get("quest") if isinstance(story_event, dict) else None
+
+        prefs = self.identity.setdefault("preferences", {})
+        likes = prefs.setdefault("likes", [])
+        dislikes = prefs.setdefault("dislikes", [])
+        bias = genetics_result.get("bias", 0.0) or 0.0
+        if concept:
+            if bias >= 0.2 and concept not in likes:
+                likes.append(concept)
+                if concept in dislikes:
+                    dislikes.remove(concept)
+            elif bias <= -0.2 and concept not in dislikes:
+                dislikes.append(concept)
+                if concept in likes:
+                    likes.remove(concept)
+        if len(likes) > 40:
+            del likes[:-40]
+        if len(dislikes) > 40:
+            del dislikes[:-40]
+
+        self.identity["genetics"] = self._genetics.data
+        self.identity["story"] = self._story.data
+        self.identity["last_update_ts"] = self._now_ts()
+        self._align_story_goals()
+        self._sync_identity()
+        self.save()
+        return {
+            "stimulus": payload,
+            "affinity": genetics_result,
+            "event": event,
+            "quest": quest,
+            "motif": motif_payload,
+        }
+
+    def record_story_event(
+        self,
+        description: str,
+        *,
+        tags: Optional[List[str]] = None,
+        impact: float = 0.3,
+        origin: Optional[str] = None,
+        bias: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        self.ensure_identity_paths()
+        event = self._story.record_event(
+            description=description,
+            tags=tags,
+            impact=impact,
+            origin=origin,
+            bias=bias,
+        )
+        self.identity["story"] = self._story.data
+        self.identity["last_update_ts"] = self._now_ts()
+        self._align_story_goals()
+        self._sync_identity()
+        self.save()
+        return event
+
+    def story_snapshot(self, max_events: int = 5) -> Dict[str, Any]:
+        self.ensure_identity_paths()
+        return self._story.to_summary(max_events=max_events)
 
     def attach_selfhood(
         self,
@@ -535,6 +837,37 @@ class SelfModel:
         self._sync_identity()
         self.save()
 
+    def _maybe_capture_awaken_response(self, entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if self._story is None:
+            return None
+        sender = str(entry.get("with") or "").lower()
+        if sender not in {"user", "humain", "human", "interlocuteur", "interlocutor"}:
+            return None
+        text = entry.get("summary") or entry.get("text") or entry.get("content")
+        if not text:
+            return None
+        answer = str(text).strip()
+        if not answer:
+            return None
+        status = self._story.awakening_status(now=self._now_ts())
+        awaiting = [cp for cp in status.get("checkpoints", []) if cp.get("state") == "prompted"]
+        if not awaiting:
+            return None
+        checkpoint_id = awaiting[0].get("id")
+        if not checkpoint_id:
+            return None
+        event = self._story.record_awaken_answer(
+            checkpoint_id,
+            answer,
+            source=entry.get("with"),
+            context=entry,
+        )
+        if event:
+            self.identity["story"] = self._story.data
+            self.identity["last_update_ts"] = self._now_ts()
+            self._align_story_goals()
+        return event
+
     def record_interaction(self, entry: Dict[str, Any]) -> None:
         """
         entry: {with, when, topic, summary, ref}
@@ -542,6 +875,7 @@ class SelfModel:
         self.ensure_identity_paths()
         soc = self.identity["social"]
         SelfModel._bounded_append(soc.setdefault("interactions", []), entry, self._MAX_RECENT_INTERACTIONS)
+        self._maybe_capture_awaken_response(entry)
         self.identity["last_update_ts"] = self._now_ts()
         self._sync_identity()
         self.save()
@@ -677,6 +1011,20 @@ class SelfModel:
 
         history = extra.get("history", [])
         features["history_volume"] = norm_len(history, 500)
+
+        if self._genetics is not None:
+            genetics_features = self._genetics.to_features()
+        else:
+            genetics_features = GeneticProfile(ident.get("genetics")).to_features()
+        for key, value in genetics_features.items():
+            features[f"genetics_{key}"] = SelfModel._safe_float(value, 0.0)
+
+        if self._story is not None:
+            story_features = self._story.to_features()
+        else:
+            story_features = LifeStoryManager(ident.get("story"), GeneticProfile(ident.get("genetics"))).to_features()
+        for key, value in story_features.items():
+            features[key] = SelfModel._safe_float(value, 0.0)
 
         # indices dérivés du contexte immédiat
         features["context_complexity"] = SelfModel._safe_float(context.get("complexity"), 0.0)
@@ -849,6 +1197,56 @@ class SelfModel:
         reflections = ident.get("reflections", {})
         state = ident.get("state", {})
         self_judgment = ident.get("self_judgment", {})
+        genetics = ident.get("genetics", {})
+        if self._story is not None:
+            story_summary = self._story.to_summary(max_events=max_items if max_items else 0)
+        else:
+            story_summary = LifeStoryManager(
+                ident.get("story"), GeneticProfile(ident.get("genetics"))
+            ).to_summary(max_events=max_items if max_items else 0)
+
+        anchors_payload: Mapping[str, Any] = {}
+        story_payload = ident.get("story")
+        if isinstance(story_payload, Mapping):
+            anchors_candidate = story_payload.get("anchors")
+            if isinstance(anchors_candidate, Mapping):
+                anchors_payload = anchors_candidate
+
+        guiding_motifs: List[Dict[str, Any]] = []
+        motifs_entries = anchors_payload.get("long_term_motifs") if isinstance(anchors_payload, Mapping) else []
+        if isinstance(motifs_entries, list):
+            for entry in motifs_entries:
+                if not isinstance(entry, Mapping):
+                    continue
+                guiding_motifs.append(
+                    {
+                        "concept": entry.get("concept") or entry.get("goal"),
+                        "goal": entry.get("goal"),
+                        "bias": SelfModel._safe_float(entry.get("bias"), 0.0),
+                        "occurrences": int(entry.get("occurrences", 0) or 0),
+                        "updated_at": entry.get("updated_at"),
+                    }
+                )
+        if max_items > 0:
+            guiding_motifs = guiding_motifs[:max_items]
+
+        lifelong_quests: List[Dict[str, Any]] = []
+        quests_entries = story_summary.get("quests", []) if isinstance(story_summary, Mapping) else []
+        if isinstance(quests_entries, list):
+            for quest in quests_entries:
+                if not isinstance(quest, Mapping):
+                    continue
+                if quest.get("scope") == "long_term" or quest.get("lifelong"):
+                    lifelong_quests.append(
+                        {
+                            "goal": quest.get("goal"),
+                            "reason": quest.get("reason"),
+                            "motivation": quest.get("motivation"),
+                            "status": quest.get("status"),
+                        }
+                    )
+        if max_items > 0:
+            lifelong_quests = lifelong_quests[:max_items]
 
         likes = _take(preferences.get("likes", []))
         dislikes = _take(preferences.get("dislikes", []))
@@ -902,6 +1300,19 @@ class SelfModel:
         reflections_past = _take(reflections.get("past", []))
         present_reflection = reflections.get("present", {})
 
+        genetics_traits = dict(genetics.get("traits", {}))
+        genetics_drives = dict(genetics.get("drives", {}))
+        genetics_scripts = _take(genetics.get("scripts", []))
+        genetics_imprints = _take(genetics.get("imprints", []))
+        genetics_motifs: Dict[str, Any] = {}
+        motifs_payload = genetics.get("motifs") if isinstance(genetics, Mapping) else {}
+        if isinstance(motifs_payload, Mapping):
+            genetics_motifs = {
+                "long_term": list(motifs_payload.get("long_term", [])),
+                "occurrences": dict(motifs_payload.get("occurrences", {})),
+                "bias": dict(motifs_payload.get("bias", {})),
+            }
+
         summary = {
             "identity": {
                 "name": core.get("name", ident.get("name")),
@@ -940,6 +1351,16 @@ class SelfModel:
                 "cognition": dict(state.get("cognition", {})),
                 "doubts": _take(state.get("doubts", [])),
             },
+            "genetics": {
+                "traits": genetics_traits,
+                "drives": genetics_drives,
+                "scripts": genetics_scripts,
+                "imprints": genetics_imprints,
+                "motifs": genetics_motifs,
+            },
+            "story": story_summary,
+            "guiding_motifs": guiding_motifs,
+            "lifelong_quests": lifelong_quests,
             "self_judgment": {
                 "traits": dict(self_judgment.get("traits", {})),
                 "phase": self_judgment.get("phase"),
@@ -947,6 +1368,8 @@ class SelfModel:
                 "present": dict(present_reflection) if isinstance(present_reflection, Mapping) else {},
             },
         }
+
+        summary["awakening"] = story_summary.get("awakening", {})
 
         return summary
 
