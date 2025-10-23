@@ -112,6 +112,23 @@ def test_self_model_build_synthesis(tmp_path):
         source="user",
         description="Promesse de gloire future",
     )
+    motif_info = model.add_lifelong_motif(
+        concept="sagesse",
+        tags=["philosophie"],
+        aliases=["wisdom"],
+        reason="Orientation vers la sagesse",
+        bias=0.5,
+    )
+    compassion_result = model.register_stimulus(
+        concept="compassion",
+        tags=["altruisme"],
+        intensity=0.7,
+        source="lecture",
+        description="Invitation à cultiver la compassion",
+        lifelong=True,
+        motif_aliases=["empathie"],
+        motif_reason="Vision empathique durable",
+    )
     model.record_story_event(
         "Découverte des propres origines",
         tags=["identité", "apprentissage"],
@@ -149,16 +166,27 @@ def test_self_model_build_synthesis(tmp_path):
     assert stimulus_result["quest"] is not None
     assert stimulus_result["quest"]["scope"] == "long_term"
     assert "gloire" in stimulus_result["quest"]["goal"]
+    assert motif_info["concept"] == "sagesse"
+    assert compassion_result["affinity"]["lifelong"] is True
+    assert compassion_result["motif"]["concept"] == "compassion"
     assert any("programme informatique" in goal for goal in summary["near_term_goals"])
     assert all("gloire" not in goal for goal in summary["near_term_goals"])
     guiding = summary.get("guiding_motifs", [])
     assert any(entry.get("concept") and "gloire" in entry.get("concept") for entry in guiding)
+    assert any(entry.get("concept") and "sagesse" in entry.get("concept") for entry in guiding)
+    assert any(entry.get("concept") and "compassion" in entry.get("concept") for entry in guiding)
     lifelong = summary.get("lifelong_quests", [])
     assert any("gloire" in quest.get("goal", "") for quest in lifelong)
+    assert any("sagesse" in quest.get("goal", "") for quest in lifelong)
+    assert any("compassion" in quest.get("goal", "") for quest in lifelong)
     quests = summary["story"].get("quests", [])
     assert any("programme informatique" in quest["goal"] for quest in quests)
     assert any(
         "gloire" in quest.get("goal", "") and quest.get("scope") == "long_term"
+        for quest in quests
+    )
+    assert any(
+        "compassion" in quest.get("goal", "") and quest.get("scope") == "long_term"
         for quest in quests
     )
     anchors = summary["story"].get("anchors", {})
@@ -167,6 +195,18 @@ def test_self_model_build_synthesis(tmp_path):
         isinstance(entry, dict)
         and entry.get("concept")
         and "gloire" in entry.get("concept")
+        for entry in long_term_motifs
+    )
+    assert any(
+        isinstance(entry, dict)
+        and entry.get("concept")
+        and "sagesse" in entry.get("concept")
+        for entry in long_term_motifs
+    )
+    assert any(
+        isinstance(entry, dict)
+        and entry.get("concept")
+        and "compassion" in entry.get("concept")
         for entry in long_term_motifs
     )
 

@@ -530,6 +530,91 @@ class GeneticProfile:
             "concept": concept_label or stimulus.get("concept"),
         }
 
+    def add_lifelong_motif(
+        self,
+        concept: str,
+        *,
+        aliases: Optional[Iterable[str]] = None,
+        bias: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
+        label = str(concept or "").strip()
+        if not label:
+            return None
+
+        normalized = _normalize_label(label)
+        motifs_payload = self.data.setdefault("motifs", {})
+        long_term = motifs_payload.setdefault("long_term", [])
+
+        seen: set[str] = set()
+        cleaned_long_term: List[str] = []
+        for entry in long_term:
+            if not entry:
+                continue
+            text = str(entry).strip()
+            if not text:
+                continue
+            norm = _normalize_label(text)
+            if norm in seen:
+                continue
+            seen.add(norm)
+            cleaned_long_term.append(text)
+
+        created = normalized not in seen
+        if created:
+            cleaned_long_term.append(label)
+            seen.add(normalized)
+
+        alias_list: List[str] = []
+        aliases_added: List[str] = []
+        if aliases:
+            for alias in aliases:
+                alias_text = str(alias or "").strip()
+                if not alias_text:
+                    continue
+                alias_norm = _normalize_label(alias_text)
+                alias_list.append(alias_text)
+                if alias_norm in seen:
+                    continue
+                cleaned_long_term.append(alias_text)
+                seen.add(alias_norm)
+                aliases_added.append(alias_text)
+
+        motifs_payload["long_term"] = cleaned_long_term
+
+        occurrences = motifs_payload.setdefault("occurrences", {})
+        occ_value = int(occurrences.get(normalized, 0) or 0)
+        occurrences[normalized] = occ_value
+
+        bias_map = motifs_payload.setdefault("bias", {})
+        if bias is not None:
+            try:
+                bias_value = _clamp(float(bias), -1.0, 1.0)
+            except (TypeError, ValueError):
+                bias_value = _clamp(float(bias_map.get(normalized, 0.0) or 0.0), -1.0, 1.0)
+        else:
+            bias_value = _clamp(float(bias_map.get(normalized, 0.0) or 0.0), -1.0, 1.0)
+        bias_map[normalized] = bias_value
+
+        labels = motifs_payload.setdefault("labels", {})
+        labels[normalized] = label
+
+        last_activation = motifs_payload.setdefault("last_activation", {})
+        now = time.time()
+        last_activation.setdefault(normalized, now)
+
+        self.data["last_update_ts"] = now
+
+        return {
+            "concept": label,
+            "normalized": normalized,
+            "aliases": alias_list,
+            "aliases_added": aliases_added,
+            "bias": bias_value,
+            "occurrences": occ_value,
+            "last_activation": last_activation.get(normalized),
+            "created": created,
+        }
+
     def to_features(self) -> Dict[str, float]:
         drives = self.data.get("drives", {})
         traits = self.data.get("traits", {})
@@ -964,6 +1049,106 @@ class LifeStoryManager:
         self._append_event(event)
         self._advance_arcs(tags, event["impact"])
         return event
+
+    def register_lifelong_motif(
+        self,
+        concept: str,
+        *,
+        tags: Optional[Iterable[str]] = None,
+        reason: Optional[str] = None,
+        source: Optional[str] = None,
+        bias: Optional[float] = None,
+        occurrences: Optional[int] = None,
+        created: bool = True,
+    ) -> Optional[Dict[str, Any]]:
+        label = str(concept or "").strip()
+        if not label:
+            return None
+
+        normalized = _normalize_label(label)
+        normalized_tags = _normalize_tags(tags or [])
+        now = time.time()
+        source_label = source or "motif"
+
+        if bias is None:
+            bias_value = 0.6 if created else 0.4
+        else:
+            try:
+                bias_value = _clamp(float(bias), -1.0, 1.0)
+            except (TypeError, ValueError):
+                bias_value = 0.6 if created else 0.4
+
+        occ_value = max(0, int(occurrences or 0))
+
+        anchors = self.data.setdefault("anchors", {})
+        motifs_list = anchors.setdefault("long_term_motifs", [])
+        motif_entry = {
+            "goal": f"Cultiver le motif «{label}»",
+            "concept": label,
+            "tags": list(dict.fromkeys(normalized_tags + [label])),
+            "occurrences": occ_value,
+            "bias": bias_value,
+            "updated_at": now,
+            "lifelong": True,
+        }
+
+        replaced = False
+        for idx, existing in enumerate(motifs_list):
+            if not isinstance(existing, Mapping):
+                continue
+            existing_norm = _normalize_label(existing.get("concept") or existing.get("goal"))
+            if existing_norm == normalized:
+                current = dict(existing)
+                current.update(motif_entry)
+                motifs_list[idx] = current
+                replaced = True
+                break
+        if not replaced:
+            motifs_list.append(motif_entry)
+        if len(motifs_list) > 20:
+            del motifs_list[:-20]
+
+        description = reason or (
+            f"Adoption du motif fondateur «{label}»" if created else f"Renforcement du motif «{label}»"
+        )
+
+        motivation = max(0.55 if created else 0.35, abs(bias_value))
+        quest = self._record_quest(
+            f"Cultiver le motif «{label}»",
+            reason=description,
+            source=source_label,
+            motivation=motivation,
+            tags=normalized_tags + [label, "motif"],
+            scope="long_term",
+            anchor_metadata={
+                "concept": label,
+                "occurrences": occ_value,
+                "bias": bias_value,
+            },
+        )
+
+        event_tags = list(dict.fromkeys(normalized_tags + [label, "motif", "long_term"]))
+        impact = max(0.4 if created else 0.25, abs(bias_value))
+        event = {
+            "ts": now,
+            "kind": "motif" if created else "motif_update",
+            "concept": label,
+            "description": description,
+            "tags": event_tags,
+            "source": source_label,
+            "bias": bias_value,
+            "impact": impact,
+        }
+        event["genes"] = self.genetics.to_features()
+        self._append_event(event)
+        self._advance_arcs(event_tags, impact)
+
+        return {
+            "motif": motif_entry,
+            "quest": quest,
+            "event": event,
+            "created": created,
+        }
 
     def record_event(
         self,

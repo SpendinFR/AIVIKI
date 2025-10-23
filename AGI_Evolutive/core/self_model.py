@@ -535,6 +535,65 @@ class SelfModel:
         self._awakening_last_check = now_ts
         return status
 
+    def add_lifelong_motif(
+        self,
+        concept: str,
+        *,
+        tags: Optional[Iterable[str]] = None,
+        aliases: Optional[Iterable[str]] = None,
+        reason: Optional[str] = None,
+        bias: Optional[float] = None,
+        source: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        self.ensure_identity_paths()
+        self._ensure_story_objects()
+
+        tag_list: List[str] = []
+        if tags:
+            for tag in tags:
+                tag_text = str(tag or "").strip()
+                if tag_text:
+                    tag_list.append(tag_text)
+
+        alias_list: List[str] = []
+        if aliases:
+            for alias in aliases:
+                alias_text = str(alias or "").strip()
+                if alias_text:
+                    alias_list.append(alias_text)
+
+        genetics_result = self._genetics.add_lifelong_motif(
+            concept,
+            aliases=alias_list,
+            bias=bias,
+        )
+        if genetics_result is None:
+            return None
+
+        story_result = self._story.register_lifelong_motif(
+            genetics_result.get("concept", concept),
+            tags=tag_list + alias_list,
+            reason=reason,
+            source=source or "motif",
+            bias=genetics_result.get("bias"),
+            occurrences=genetics_result.get("occurrences"),
+            created=genetics_result.get("created", True),
+        )
+
+        self.identity["genetics"] = self._genetics.data
+        self.identity["story"] = self._story.data
+        self.identity["last_update_ts"] = self._now_ts()
+        self._align_story_goals()
+        self._sync_identity()
+        self.save()
+
+        return {
+            "concept": genetics_result.get("concept"),
+            "normalized": genetics_result.get("normalized"),
+            "genetics": genetics_result,
+            "story": story_result,
+        }
+
     def register_stimulus(
         self,
         *,
@@ -543,6 +602,9 @@ class SelfModel:
         intensity: float = 1.0,
         source: Optional[str] = None,
         description: Optional[str] = None,
+        lifelong: bool = False,
+        motif_aliases: Optional[Iterable[str]] = None,
+        motif_reason: Optional[str] = None,
     ) -> Dict[str, Any]:
         self.ensure_identity_paths()
         payload = {
@@ -552,6 +614,16 @@ class SelfModel:
             "source": source,
             "description": description,
         }
+        motif_payload = None
+        if concept and lifelong:
+            motif_payload = self.add_lifelong_motif(
+                concept,
+                tags=tags,
+                aliases=motif_aliases,
+                reason=motif_reason or description,
+                bias=intensity,
+                source=source or "stimulus",
+            )
         genetics_result = self._genetics.integrate_stimulus(payload)
         story_event = self._story.integrate_stimulus(payload, genetics_result)
         event = story_event
@@ -586,6 +658,7 @@ class SelfModel:
             "affinity": genetics_result,
             "event": event,
             "quest": quest,
+            "motif": motif_payload,
         }
 
     def record_story_event(
