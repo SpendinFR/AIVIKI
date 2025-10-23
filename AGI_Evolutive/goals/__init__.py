@@ -107,6 +107,22 @@ class GoalSystem:
         self._ensure_structural_hierarchy()
         self._refresh_active_goal()
 
+        awakening_block = False
+        if self.architecture is not None:
+            self_model = getattr(self.architecture, "self_model", None)
+            if self_model is not None and hasattr(self_model, "awakening_status"):
+                try:
+                    status = self_model.awakening_status()
+                    awakening_block = not bool(status.get("complete"))
+                except Exception:
+                    awakening_block = False
+        if awakening_block:
+            self.set_question_block(True)
+            self.pending_actions.clear()
+            return
+        else:
+            self.set_question_block(False)
+
         if user_msg:
             self._record_feedback(user_msg)
 

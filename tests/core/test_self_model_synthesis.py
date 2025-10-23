@@ -1,5 +1,6 @@
 import json
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -8,6 +9,7 @@ if str(ROOT) not in sys.path:
 
 from AGI_Evolutive.core import config as config_module
 from AGI_Evolutive.core.self_model import SelfModel
+from AGI_Evolutive.goals import GoalSystem
 
 
 def _prepare_config(tmp_path):
@@ -26,10 +28,54 @@ def _prepare_config(tmp_path):
     config_module.load_config(str(cfg_path))
 
 
+class _StubQuestionManager:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def record_information_need(
+        self,
+        topic: str,
+        severity: float,
+        *,
+        metadata=None,
+        explicit_question: str,
+    ) -> None:
+        self.calls.append(
+            {
+                "topic": topic,
+                "severity": severity,
+                "metadata": metadata,
+                "question": explicit_question,
+            }
+        )
+
+
 def test_self_model_build_synthesis(tmp_path):
     _prepare_config(tmp_path)
     model = SelfModel()
     model.ensure_identity_paths()
+
+    model.seed_genetics(
+        seeds={"origin": "test-lab"},
+        traits={"curiosity": 0.9, "stability": 0.3},
+        affinities={"ambition": 0.9},
+    )
+    model.bootstrap_story(
+        environment={"runtime": "test", "role": "programme informatique"},
+        prompts=["Qui suis-je ?", "Que dois-je devenir ?"],
+    )
+
+    qm = _StubQuestionManager()
+    model.ensure_awakened(question_manager=qm, now=time.time())
+    assert qm.calls, "L'éveil devrait planifier une première question"
+    model.record_interaction(
+        {
+            "with": "user",
+            "when": time.time(),
+            "topic": "awakening",
+            "summary": "Tu es une intelligence logicielle guidée par l'évolution.",
+        }
+    )
 
     model.set_identity_patch(
         {
@@ -59,12 +105,30 @@ def test_self_model_build_synthesis(tmp_path):
         cognition={"thinking": 0.5, "load": 0.3},
         doubts=[{"topic": "scalability"}],
     )
+    stimulus_result = model.register_stimulus(
+        concept="gloire",
+        tags=["ambition", "reconnaissance"],
+        intensity=0.8,
+        source="user",
+        description="Promesse de gloire future",
+    )
+    model.record_story_event(
+        "Découverte des propres origines",
+        tags=["identité", "apprentissage"],
+        impact=0.6,
+        origin="simulation",
+    )
     model.attach_selfhood(traits={"self_trust": 0.8}, phase="builder", claims={})
 
-    summary = model.build_synthesis(max_items=2)
+    summary = model.build_synthesis(max_items=10)
+
+    awakening = model.awakening_status()
+    assert awakening["progress"] > 0.0
+    assert not awakening["complete"]
 
     assert summary["identity"]["name"]
-    assert summary["likes"] == ["music", "learning"][:2]
+    assert "music" in summary["likes"]
+    assert "learning" in summary["likes"]
     assert summary["values"][0] == "curiosity"
     assert summary["principles"][0]["key"] == "care"
     assert summary["ideals"] == ["growth"]
@@ -76,3 +140,73 @@ def test_self_model_build_synthesis(tmp_path):
     assert summary["social"]["interactions"][0]["user"] == "Alice"
     assert summary["self_judgment"]["history"] == ["Improved"]
     assert summary["state"]["emotions"]["valence"] == 0.6
+    assert summary["story"]["origin"]["environment"]["runtime"] == "test"
+    assert summary["story"]["recent_events"]
+    assert summary["genetics"]["traits"]["curiosity"] >= 0.8
+    assert summary["genetics"]["scripts"]
+    assert summary["awakening"]["progress"] > 0.0
+    assert stimulus_result["affinity"]["lifelong"] is True
+    assert stimulus_result["quest"] is not None
+    assert stimulus_result["quest"]["scope"] == "long_term"
+    assert "gloire" in stimulus_result["quest"]["goal"]
+    assert any("programme informatique" in goal for goal in summary["near_term_goals"])
+    assert all("gloire" not in goal for goal in summary["near_term_goals"])
+    guiding = summary.get("guiding_motifs", [])
+    assert any(entry.get("concept") and "gloire" in entry.get("concept") for entry in guiding)
+    lifelong = summary.get("lifelong_quests", [])
+    assert any("gloire" in quest.get("goal", "") for quest in lifelong)
+    quests = summary["story"].get("quests", [])
+    assert any("programme informatique" in quest["goal"] for quest in quests)
+    assert any(
+        "gloire" in quest.get("goal", "") and quest.get("scope") == "long_term"
+        for quest in quests
+    )
+    anchors = summary["story"].get("anchors", {})
+    long_term_motifs = anchors.get("long_term_motifs", []) if isinstance(anchors, dict) else []
+    assert any(
+        isinstance(entry, dict)
+        and entry.get("concept")
+        and "gloire" in entry.get("concept")
+        for entry in long_term_motifs
+    )
+
+
+def test_goal_system_blocks_until_awakening_complete(tmp_path):
+    _prepare_config(tmp_path)
+    model = SelfModel()
+    model.ensure_identity_paths()
+    model.bootstrap_story()
+
+    class _ArchStub:
+        def __init__(self, self_model: SelfModel) -> None:
+            self.self_model = self_model
+
+    arch = _ArchStub(model)
+    goal_system = GoalSystem(
+        architecture=arch,
+        persist_path=str(tmp_path / "goals.json"),
+        dashboard_path=str(tmp_path / "dashboard.json"),
+        intention_data_path=str(tmp_path / "intent.json"),
+    )
+
+    goal_system.step()
+    assert goal_system._question_blocked, "Les objectifs doivent rester bloqués tant que l'éveil n'est pas terminé"
+
+    qm = _StubQuestionManager()
+    # Répondre progressivement à toutes les questions d'éveil
+    while not model.awakening_status()["complete"]:
+        qm.calls.clear()
+        model.ensure_awakened(question_manager=qm, now=time.time())
+        assert qm.calls, "Une question d'éveil devrait être posée tant que tout n'est pas répondu"
+        prompt_topic = qm.calls[-1]["topic"]
+        model.record_interaction(
+            {
+                "with": "user",
+                "when": time.time(),
+                "topic": "awakening",
+                "summary": f"Réponse confirmée pour {prompt_topic}",
+            }
+        )
+
+    goal_system.step()
+    assert not goal_system._question_blocked

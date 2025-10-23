@@ -303,6 +303,13 @@ class Autopilot:
         candidates: Dict[str, Dict[str, Any]] = {}
 
         try:
+            self_model = getattr(self.arch, "self_model", None)
+            if self_model is not None and hasattr(self_model, "ensure_awakened"):
+                self_model.ensure_awakened(question_manager=self.questions, now=now)
+        except Exception:
+            pass
+
+        try:
             generated = self.questions.pop_questions()
         except Exception:
             generated = []
