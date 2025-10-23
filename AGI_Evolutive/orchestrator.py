@@ -4,6 +4,7 @@ import random
 import re
 import logging
 import statistics
+import threading
 import time
 import unicodedata
 from datetime import datetime, timedelta
@@ -61,6 +62,7 @@ from AGI_Evolutive.memory.memory_store import MemoryStore
 from AGI_Evolutive.light_scheduler import LightScheduler
 from AGI_Evolutive.runtime.job_manager import JobManager
 from AGI_Evolutive.runtime.phenomenal_kernel import ModeManager, PhenomenalKernel
+from AGI_Evolutive.runtime.system_monitor import SystemMonitor
 
 
 logger = logging.getLogger(__name__)
@@ -75,6 +77,46 @@ _DEFAULT_SJ_CONF = {
     "heartbeat_immediacy": 0.20,
     "surprise_importance": 0.70,
     "surprise_immediacy": 0.60,
+}
+
+
+_DEFAULT_NEED_PROTOCOL = {
+    "label": "drive physiologique",
+    "message": "Ralentissement préventif pour protéger le système.",
+    "min_factor": {"interactive": 0.65, "background": 0.45},
+    "slowdown_bias": 0.25,
+    "duration": 40.0,
+}
+
+_NEED_PROTOCOLS = {
+    "thermal_regulation": {
+        "label": "thermorégulation",
+        "message": "Température élevée détectée, je réduis la charge pour refroidir.",
+        "min_factor": {"interactive": 0.45, "background": 0.25},
+        "slowdown_bias": 0.35,
+        "duration": 60.0,
+    },
+    "respiration": {
+        "label": "charge CPU",
+        "message": "La respiration computationnelle est entravée, ralentissement temporaire.",
+        "min_factor": {"interactive": 0.5, "background": 0.3},
+        "slowdown_bias": 0.3,
+        "duration": 45.0,
+    },
+    "energy": {
+        "label": "énergie",
+        "message": "Réserves d'énergie faibles, je bascule en mode économie.",
+        "min_factor": {"interactive": 0.55, "background": 0.35},
+        "slowdown_bias": 0.28,
+        "duration": 75.0,
+    },
+    "memory_balance": {
+        "label": "mémoire",
+        "message": "Pression mémoire détectée, je limite les allocations lourdes.",
+        "min_factor": {"interactive": 0.6, "background": 0.4},
+        "slowdown_bias": 0.22,
+        "duration": 50.0,
+    },
 }
 
 
@@ -1014,6 +1056,11 @@ class Orchestrator:
             exit_veto_threshold=0.45,
             min_switch_interval=75.0,
         )
+        self._system_monitor = SystemMonitor(interval=3.0)
+        self._last_system_snapshot: Dict[str, Any] = {}
+        self._pending_system_alerts: List[Dict[str, Any]] = []
+        self._last_system_slowdown: float = 0.0
+        self._last_system_slowdown_ts: float = 0.0
         self.phenomenal_kernel_state: Dict[str, Any] = {}
         self.current_mode: str = "travail"
         self._last_intrinsic_reward_ts: float = 0.0
@@ -1027,6 +1074,8 @@ class Orchestrator:
             queue: info.get("max_running", 1)
             for queue, info in self.job_manager.budgets.items()
         }
+        self._need_directives: List[Dict[str, Any]] = []
+        self._need_directives_lock = threading.RLock()
 
         if isinstance(existing_interface, ActionInterface):
             bind_kwargs = {}
@@ -1048,6 +1097,8 @@ class Orchestrator:
                 bind_kwargs["memory"] = self._memory_store
             if bound.get("jobs") is None and job_manager is not None:
                 bind_kwargs["jobs"] = job_manager
+            if bind_kwargs.get("jobs") is job_manager or "jobs" not in bind_kwargs:
+                bind_kwargs.setdefault("job_bases", self._job_base_budgets)
             if bind_kwargs:
                 self._action_interface.bind(**bind_kwargs)
         else:
@@ -1060,6 +1111,7 @@ class Orchestrator:
                 language=getattr(self.arch, "language", None),
                 simulator=getattr(self.arch, "simulator", None),
                 jobs=job_manager,
+                job_bases=self._job_base_budgets,
             )
         self._perception_interface = PerceptionInterface(self._memory_store)
         self.curiosity = CuriosityEngine(architecture=self.arch)
@@ -1247,6 +1299,197 @@ class Orchestrator:
             except Exception:
                 pass
         return payload
+
+    def _prepare_need_action(self, trigger: Trigger, trigger_payload: Dict[str, Any]) -> Dict[str, Any]:
+        need = trigger_payload.get("need") if isinstance(trigger_payload, dict) else {}
+        drive = str((need or {}).get("drive") or "unknown")
+        try:
+            level = max(0.0, min(1.0, float((need or {}).get("level", 0.0))))
+        except Exception:
+            level = 0.0
+        severity = max(0.0, min(1.0, (need or {}).get("severity", 1.0 - level)))
+        spec = dict(_DEFAULT_NEED_PROTOCOL)
+        spec.update(_NEED_PROTOCOLS.get(drive, {}))
+
+        min_factor_map = dict(_DEFAULT_NEED_PROTOCOL["min_factor"])
+        min_factor_map.update(spec.get("min_factor", {}))
+        budgets: Dict[str, float] = {}
+        for queue in ("interactive", "background"):
+            min_factor = max(0.1, min(1.0, float(min_factor_map.get(queue, 0.5))))
+            factor = max(min_factor, 1.0 - severity * (1.0 - min_factor))
+            budgets[queue] = round(max(0.1, min(1.0, factor)), 3)
+
+        slowdown_bias = float(spec.get("slowdown_bias", _DEFAULT_NEED_PROTOCOL["slowdown_bias"]))
+        slowdown = max(severity, min(1.0, severity + slowdown_bias))
+        base_duration = float(spec.get("duration", _DEFAULT_NEED_PROTOCOL["duration"]))
+        duration = max(10.0, base_duration * (0.5 + 0.5 * severity))
+        label = spec.get("label", drive)
+        message = spec.get("message", _DEFAULT_NEED_PROTOCOL["message"])
+        priority = max(0.55, min(1.0, 0.6 + 0.35 * severity))
+        expected_score = max(0.65, min(0.95, priority + 0.1))
+        timestamp = (need or {}).get("timestamp") or time.time()
+
+        action = {
+            "type": "regulate_resources",
+            "priority": priority,
+            "payload": {
+                "drive": drive,
+                "level": level,
+                "severity": severity,
+                "slowdown": slowdown,
+                "budgets": budgets,
+                "duration": duration,
+                "message": message,
+                "timestamp": timestamp,
+                "source": "homeostasis",
+            },
+        }
+
+        summary = f"{label.capitalize()} sous contrainte ({int(round(severity * 100))}% d'urgence)"
+        frame = {
+            "trigger": trigger,
+            "source": "homeostasis",
+            "text": message,
+            "options": [
+                {
+                    "action": action,
+                    "expected": {"score": expected_score},
+                    "summary": (
+                        "Budgets interactif={:.2f}, background={:.2f}".format(
+                            budgets["interactive"], budgets["background"]
+                        )
+                    ),
+                }
+            ],
+            "stop_rules": {},
+        }
+
+        need_context = {
+            "drive": drive,
+            "level": level,
+            "severity": severity,
+            "label": label,
+            "budgets": budgets,
+            "slowdown": slowdown,
+        }
+
+        return {
+            "action": action,
+            "priority": priority,
+            "expected_score": expected_score,
+            "reason": message,
+            "summary": summary,
+            "topic": f"need::{drive}",
+            "frame": frame,
+            "need": need_context,
+        }
+
+    def _need_budget_factor(self, queue: str) -> float:
+        now = time.time()
+        factor = 1.0
+        with self._need_directives_lock:
+            active: List[Dict[str, Any]] = []
+            for directive in self._need_directives:
+                expires = float(directive.get("expires_at", 0.0))
+                if expires <= now:
+                    continue
+                active.append(directive)
+                budgets = directive.get("budgets") if isinstance(directive.get("budgets"), dict) else {}
+                if queue in budgets:
+                    try:
+                        factor = min(factor, max(0.1, min(1.0, float(budgets[queue]))))
+                    except Exception:
+                        continue
+            self._need_directives = active
+        return max(0.1, min(1.0, factor))
+
+    def register_need_directive(self, directive: Dict[str, Any]) -> Dict[str, Any]:
+        data = dict(directive or {})
+        drive = str(data.get("drive") or "unknown")
+        try:
+            severity = max(0.0, min(1.0, float(data.get("severity", 0.0))))
+        except Exception:
+            severity = 0.0
+        try:
+            slowdown = max(0.0, min(1.0, float(data.get("slowdown", severity))))
+        except Exception:
+            slowdown = severity
+        try:
+            duration = max(5.0, float(data.get("duration", 30.0)))
+        except Exception:
+            duration = 30.0
+        raw_budgets = data.get("budgets") if isinstance(data.get("budgets"), dict) else {}
+        budgets: Dict[str, float] = {}
+        for queue, factor in raw_budgets.items():
+            try:
+                budgets[str(queue)] = max(0.1, min(1.0, float(factor)))
+            except Exception:
+                continue
+
+        now = time.time()
+        expires_at = now + duration
+        entry = {
+            "drive": drive,
+            "severity": severity,
+            "slowdown": slowdown,
+            "budgets": budgets,
+            "expires_at": expires_at,
+            "registered_at": now,
+            "message": data.get("message"),
+        }
+        with self._need_directives_lock:
+            self._need_directives = [
+                item
+                for item in self._need_directives
+                if float(item.get("expires_at", 0.0)) > now
+            ]
+            self._need_directives.append(entry)
+
+        applied_budgets: Dict[str, int] = {}
+        for queue, factor in budgets.items():
+            base = self._job_base_budgets.get(queue, 1)
+            target = max(1, int(math.ceil(float(base) * factor)))
+            self.job_manager.budgets.setdefault(queue, {})["max_running"] = target
+            applied_budgets[queue] = target
+
+        if slowdown > 0.0:
+            try:
+                self._homeostasis.register_global_slowdown(
+                    slowdown,
+                    meta={
+                        "source": "need_directive",
+                        "drive": drive,
+                        "severity": severity,
+                        "duration": duration,
+                        "registered_at": now,
+                    },
+                )
+            except Exception:
+                pass
+
+        try:
+            self.telemetry.log(
+                "homeostasis",
+                "need_directive",
+                {
+                    "drive": drive,
+                    "severity": severity,
+                    "slowdown": slowdown,
+                    "duration": duration,
+                    "budgets": budgets,
+                    "applied": applied_budgets,
+                },
+            )
+        except Exception:
+            pass
+
+        return {
+            "ok": True,
+            "drive": drive,
+            "applied_budgets": applied_budgets,
+            "slowdown": slowdown,
+            "expires_at": expires_at,
+        }
 
     def _register_self_judgment_collectors(self):
 
@@ -1453,16 +1696,31 @@ class Orchestrator:
         need = self.cognition.homeostasis.poll_need()
         if not need:
             return []
+        try:
+            level = max(0.0, min(1.0, float(need.get("level", 0.0))))
+        except Exception:
+            level = 0.0
+        severity = max(0.0, min(1.0, 1.0 - level))
+        importance = max(0.5, min(1.0, 0.55 + 0.35 * severity))
+        immediacy = max(0.3, min(1.0, 0.45 + 0.45 * severity))
+        payload = {
+            "need": {
+                **need,
+                "severity": severity,
+                "timestamp": time.time(),
+            }
+        }
         return [
             Trigger(
                 TriggerType.NEED,
                 {
                     "source": "homeostasis",
-                    "importance": 0.8,
-                    "immediacy": 0.6,
+                    "importance": importance,
+                    "immediacy": immediacy,
                     "effort": 0.2,
+                    "severity": severity,
                 },
-                payload={"need": need},
+                payload=payload,
             )
         ]
 
@@ -1653,6 +1911,106 @@ class Orchestrator:
                 except Exception:
                     continue
 
+    def _update_physiology_from_system(self, resource_monitor: Optional[Any]) -> List[Dict[str, Any]]:
+        if not hasattr(self, "_system_monitor") or self._system_monitor is None:
+            return []
+
+        try:
+            snapshot = self._system_monitor.poll()
+        except Exception as exc:
+            self.telemetry.log("system_monitor", "poll_error", {"error": str(exc)})
+            return []
+
+        if not snapshot:
+            return []
+
+        self._last_system_snapshot = dict(snapshot)
+
+        if resource_monitor and hasattr(resource_monitor, "register_machine_snapshot"):
+            try:
+                resource_monitor.register_machine_snapshot(snapshot)
+            except Exception:
+                pass
+
+        try:
+            updated_drives = self._homeostasis.integrate_system_metrics(snapshot)
+        except Exception as exc:
+            self.telemetry.log("system_monitor", "homeostasis_error", {"error": str(exc)})
+            updated_drives = {}
+
+        drive_levels: Dict[str, float] = {}
+        for name in ("energy", "respiration", "thermal_regulation", "memory_balance"):
+            if name in updated_drives:
+                drive_levels[name] = float(updated_drives[name])
+            else:
+                drive_levels[name] = float(self._homeostasis.state["drives"].get(name, 0.5))
+
+        severity: Dict[str, float] = {
+            name: max(0.0, 1.0 - float(value)) for name, value in drive_levels.items()
+        }
+
+        alerts: List[Dict[str, Any]] = []
+        slowdown = 0.0
+
+        def _maybe_alert(drive: str, kind: str, *, threshold: float = 0.35, slowdown_bias: float = 0.15) -> None:
+            nonlocal slowdown
+            sev = severity.get(drive, 0.0)
+            if sev < threshold:
+                return
+            intensity = max(0.0, min(1.0, sev + 0.05))
+            slowdown_val = max(0.0, min(1.0, sev + slowdown_bias))
+            alerts.append(
+                {
+                    "kind": kind,
+                    "intensity": intensity,
+                    "slowdown": slowdown_val,
+                    "timestamp": snapshot.get("timestamp"),
+                }
+            )
+            slowdown = max(slowdown, slowdown_val)
+
+        _maybe_alert("thermal_regulation", "system_overheat", slowdown_bias=0.25)
+        _maybe_alert("respiration", "cpu_overload", slowdown_bias=0.2)
+        _maybe_alert("energy", "energy_depletion", slowdown_bias=0.15)
+        _maybe_alert("memory_balance", "memory_pressure", slowdown_bias=0.1, threshold=0.4)
+
+        if any(val >= 0.35 for val in severity.values()):
+            summary = {
+                "timestamp": snapshot.get("timestamp"),
+                "cpu_load": snapshot.get("cpu", {}).get("load") if isinstance(snapshot.get("cpu"), dict) else None,
+                "ram_percent": snapshot.get("memory", {}).get("percent") if isinstance(snapshot.get("memory"), dict) else None,
+                "gpu_temp": snapshot.get("gpu", {}).get("temp_c") if isinstance(snapshot.get("gpu"), dict) else None,
+                "gpu_util": snapshot.get("gpu", {}).get("util_pct") if isinstance(snapshot.get("gpu"), dict) else None,
+                "power_draw": snapshot.get("power", {}).get("draw_w") if isinstance(snapshot.get("power"), dict) else None,
+                "severity": severity,
+            }
+            self.telemetry.log("system_monitor", "alert", summary)
+
+        if slowdown >= 0.3:
+            now = time.time()
+            if (
+                slowdown - self._last_system_slowdown > 0.05
+                or now - self._last_system_slowdown_ts > 15.0
+            ):
+                try:
+                    self._homeostasis.register_global_slowdown(
+                        slowdown,
+                        meta={
+                            "source": "system_monitor",
+                            "severity": severity,
+                            "timestamp": snapshot.get("timestamp"),
+                        },
+                    )
+                except Exception:
+                    pass
+                self._last_system_slowdown = slowdown
+                self._last_system_slowdown_ts = now
+        else:
+            self._last_system_slowdown = slowdown
+
+        self._pending_system_alerts = alerts
+        return alerts
+
     # --- Cycle principal ----------------------------------------------------
     def run_once_cycle(self, user_msg: Optional[str] = None) -> List[Dict[str, Any]]:
         try:
@@ -1689,6 +2047,7 @@ class Orchestrator:
             resource_monitor = self._meta.cognitive_monitoring.get("resource_monitoring")
         except Exception:
             resource_monitor = None
+        system_alerts = self._update_physiology_from_system(resource_monitor)
         scored = self.trigger_bus.collect_and_score(valence=valence)
         self._collect_kernel_alerts_from_triggers(scored)
         selected: List[Any] = []
@@ -1731,10 +2090,13 @@ class Orchestrator:
             extrinsic_reward=extrinsic_signal,
             hedonic_signal=hedonic_signal,
             fatigue=fatigue,
+            alerts=system_alerts,
         )
         self.phenomenal_kernel_state.clear()
         self.phenomenal_kernel_state.update(kernel_state)
         self.phenomenal_kernel_state.setdefault("mode", self.current_mode)
+        if self._last_system_snapshot:
+            self.phenomenal_kernel_state["system_snapshot"] = dict(self._last_system_snapshot)
         setattr(self.arch, "phenomenal_kernel_state", self.phenomenal_kernel_state)
         mode_info = self._mode_manager.update(self.phenomenal_kernel_state, urgent=urgent)
         self.current_mode = mode_info.get("mode", self.current_mode)
@@ -1753,7 +2115,7 @@ class Orchestrator:
             pass
         slowdown_factor = max(0.1, min(1.0, 1.0 - 0.7 * slowdown))
         for queue, base in self._job_base_budgets.items():
-            factor = slowdown_factor
+            factor = slowdown_factor * self._need_budget_factor(queue)
             if self.current_mode == "flanerie" and queue == "background":
                 factor *= 0.5
             target = max(1, math.ceil(base * factor))
@@ -2142,6 +2504,18 @@ class Orchestrator:
                 ctx["reason"] = f"habit::{habit_name or 'routine'}"
 
             scratch.setdefault("priority", expected_score)
+
+        elif selection.family == "NEED":
+            need_context = self._prepare_need_action(trigger, trigger_payload)
+            ctx["payload"] = dict(need_context["action"])
+            scratch = ctx.setdefault("scratch", {})
+            scratch["frame"] = need_context["frame"]
+            scratch["priority"] = need_context["priority"]
+            scratch["need"] = need_context["need"]
+            ctx["reason"] = need_context["reason"]
+            ctx["summary"] = need_context["summary"]
+            ctx["topic"] = need_context["topic"]
+            ctx["expected"] = {"score": need_context["expected_score"]}
 
         for step in steps:
             stg = step["stage"]

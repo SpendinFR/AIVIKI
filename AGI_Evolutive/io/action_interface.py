@@ -265,11 +265,17 @@ class ActionInterface:
         simulator: Any = None,
         jobs: Any = None,
         perception: Any = None,
+        job_bases: Optional[Dict[str, int]] = None,
     ) -> None:
         if memory is not None:
             self.bound["memory"] = memory
         if jobs is not None:
             self.bound["jobs"] = jobs
+        if job_bases is not None:
+            try:
+                self.bound["job_base_budgets"] = {k: int(v) for k, v in dict(job_bases).items()}
+            except Exception:
+                self.bound["job_base_budgets"] = {}
         if perception is not None:
             self.bound["perception"] = perception
         if simulator is None and arch is not None:
@@ -607,6 +613,7 @@ class ActionInterface:
                 "promote_code": lambda act: self._h_promote_code(act.payload, act.context),
                 "rollback_code": lambda act: self._h_rollback_code(act.payload, act.context),
                 "rotate_curriculum": lambda act: self._h_rotate_curriculum(act.payload, act.context),
+                "regulate_resources": self._h_regulate_resources,
             }
             handler = handlers.get(act.type, self._h_simulate)
 
@@ -1368,6 +1375,84 @@ class ActionInterface:
         except Exception:
             pass
         return {"ok": True, "text": text, "path": path}
+
+    def _h_regulate_resources(self, act: Action) -> Dict[str, Any]:
+        payload = dict(act.payload or {})
+        drive = str(payload.get("drive") or "unknown")
+        try:
+            level = max(0.0, min(1.0, float(payload.get("level", 0.0))))
+        except Exception:
+            level = 0.0
+        try:
+            severity = max(0.0, min(1.0, float(payload.get("severity", 0.0))))
+        except Exception:
+            severity = max(0.0, min(1.0, 1.0 - level))
+        try:
+            slowdown = max(0.0, min(1.0, float(payload.get("slowdown", severity))))
+        except Exception:
+            slowdown = severity
+        try:
+            duration = max(5.0, float(payload.get("duration", 30.0)))
+        except Exception:
+            duration = 30.0
+
+        raw_budgets = payload.get("budgets") if isinstance(payload.get("budgets"), dict) else {}
+        budgets: Dict[str, float] = {}
+        for queue, factor in raw_budgets.items():
+            try:
+                budgets[str(queue)] = max(0.1, min(1.0, float(factor)))
+            except Exception:
+                continue
+
+        jobs = self.bound.get("jobs")
+        orchestrator = getattr(jobs, "arch", None) if jobs is not None else None
+        directive = {
+            "drive": drive,
+            "level": level,
+            "severity": severity,
+            "slowdown": slowdown,
+            "duration": duration,
+            "budgets": dict(budgets),
+            "message": payload.get("message"),
+            "timestamp": payload.get("timestamp") or time.time(),
+            "source": payload.get("source", "homeostasis"),
+        }
+
+        ack: Dict[str, Any] = {}
+        if orchestrator and hasattr(orchestrator, "register_need_directive"):
+            try:
+                ack = orchestrator.register_need_directive(directive)
+            except Exception as exc:  # pragma: no cover - defensive guard
+                ack = {"ok": False, "error": str(exc)}
+        else:
+            ack = {"ok": False, "reason": "orchestrator_unavailable"}
+
+        base_budgets = self.bound.get("job_base_budgets") or {}
+        applied_budgets: Dict[str, int] = {}
+        if jobs is not None:
+            for queue, factor in budgets.items():
+                base = base_budgets.get(queue)
+                if base is None:
+                    base = jobs.budgets.get(queue, {}).get("max_running", 1)
+                target = max(1, int(math.ceil(float(base) * factor)))
+                jobs.budgets.setdefault(queue, {})["max_running"] = target
+                applied_budgets[queue] = target
+
+        success = bool(ack.get("ok", False))
+        if budgets and not applied_budgets:
+            success = False
+
+        result = {
+            "ok": success,
+            "status": "ok" if success else "error",
+            "drive": drive,
+            "severity": severity,
+            "slowdown": slowdown,
+            "budgets": applied_budgets,
+            "directive": ack,
+            "message": payload.get("message"),
+        }
+        return result
 
     def _h_plan_step(self, act: Action) -> Dict[str, Any]:
         payload = dict(act.payload or {})

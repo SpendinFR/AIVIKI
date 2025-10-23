@@ -22,6 +22,21 @@ def _now() -> float:
     return time.time()
 
 
+_DEFAULT_DRIVES: Dict[str, float] = {
+    "curiosity": 0.6,
+    "self_preservation": 0.7,
+    "social_bonding": 0.4,
+    "competence": 0.5,
+    "play": 0.3,
+    "restoration": 0.45,
+    "task_activation": 0.55,
+    "energy": 0.65,
+    "respiration": 0.7,
+    "thermal_regulation": 0.75,
+    "memory_balance": 0.6,
+}
+
+
 class OnlineLinearModel:
     """Very small online ridge-regression helper."""
 
@@ -90,14 +105,7 @@ class Homeostasis:
 
     def __init__(self) -> None:
         self.state: Dict[str, Any] = {
-            "drives": {
-                "curiosity": 0.6,
-                "self_preservation": 0.7,
-                "social_bonding": 0.4,
-                "competence": 0.5,
-                "play": 0.3,
-                "restoration": 0.45,
-            },
+            "drives": dict(_DEFAULT_DRIVES),
             "last_update": _now(),
             "intrinsic_reward": 0.0,
             "extrinsic_reward": 0.0,
@@ -119,25 +127,8 @@ class Homeostasis:
                 )
 
     def _ensure_schema(self) -> None:
-        drives = self.state.setdefault(
-            "drives",
-            {
-                "curiosity": 0.6,
-                "self_preservation": 0.7,
-                "social_bonding": 0.4,
-                "competence": 0.5,
-                "play": 0.3,
-                "restoration": 0.45,
-            },
-        )
-        for key, default in {
-            "curiosity": 0.6,
-            "self_preservation": 0.7,
-            "social_bonding": 0.4,
-            "competence": 0.5,
-            "play": 0.3,
-            "restoration": 0.45,
-        }.items():
+        drives = self.state.setdefault("drives", dict(_DEFAULT_DRIVES))
+        for key, default in _DEFAULT_DRIVES.items():
             drives.setdefault(key, default)
 
         meta = self.state.setdefault("meta", {})
@@ -382,6 +373,104 @@ class Homeostasis:
         """Public helper used by other modules (e.g. EmotionEngine)."""
         self._apply_drive_update(drive, delta, max_step=max_step)
         self._save()
+
+    def integrate_system_metrics(self, metrics: MutableMapping[str, Any]) -> Dict[str, float]:
+        """Translate raw machine metrics into drive levels.
+
+        Returns the subset of drives that were updated with their new values.
+        """
+
+        if not isinstance(metrics, MutableMapping):
+            return {}
+
+        timestamp = float(metrics.get("timestamp", _now())) if isinstance(metrics.get("timestamp"), (int, float)) else _now()
+
+        def _inverse_scale(value: Optional[float], comfort: float, critical: float) -> Optional[float]:
+            if value is None:
+                return None
+            try:
+                val = float(value)
+            except Exception:
+                return None
+            if val <= comfort:
+                return 1.0
+            if val >= critical:
+                return 0.0
+            return max(0.0, min(1.0, (critical - val) / (critical - comfort)))
+
+        def _avg(values: Iterable[float]) -> Optional[float]:
+            vals = [float(v) for v in values if v is not None]
+            if not vals:
+                return None
+            return sum(vals) / len(vals)
+
+        cpu_info = metrics.get("cpu") if isinstance(metrics.get("cpu"), MutableMapping) else {}
+        mem_info = metrics.get("memory") if isinstance(metrics.get("memory"), MutableMapping) else {}
+        gpu_info = metrics.get("gpu") if isinstance(metrics.get("gpu"), MutableMapping) else {}
+        power_info = metrics.get("power") if isinstance(metrics.get("power"), MutableMapping) else {}
+
+        cpu_load = cpu_info.get("load") if isinstance(cpu_info, MutableMapping) else None
+        cpu_temp = cpu_info.get("temp_c") if isinstance(cpu_info, MutableMapping) else None
+        mem_percent = mem_info.get("percent") if isinstance(mem_info, MutableMapping) else None
+        gpu_temp = gpu_info.get("temp_c") if isinstance(gpu_info, MutableMapping) else None
+        gpu_util = gpu_info.get("util_pct") if isinstance(gpu_info, MutableMapping) else None
+        power_draw = power_info.get("draw_w") if isinstance(power_info, MutableMapping) else None
+
+        respiration_target = _inverse_scale(cpu_load, 45.0, 95.0)
+        memory_target = _inverse_scale(mem_percent, 65.0, 95.0)
+        thermal_candidates = [
+            _inverse_scale(cpu_temp, 65.0, 90.0),
+            _inverse_scale(gpu_temp, 65.0, 85.0),
+        ]
+        thermal_target = _avg(v for v in thermal_candidates if v is not None)
+
+        energy_components: List[Optional[float]] = [
+            _inverse_scale(cpu_load, 55.0, 95.0),
+            _inverse_scale(gpu_util, 60.0, 100.0),
+            _inverse_scale(power_draw, 60.0, 150.0),
+        ]
+        energy_target = _avg(v for v in energy_components if v is not None)
+
+        updates: Dict[str, float] = {}
+        changed = False
+
+        def _apply_target(name: str, target: Optional[float], step: float = 0.4) -> None:
+            nonlocal changed
+            current = float(self.state["drives"].get(name, _DEFAULT_DRIVES.get(name, 0.5)))
+            if target is None:
+                updates[name] = current
+                return
+            target = max(0.0, min(1.0, float(target)))
+            delta = target - current
+            if abs(delta) < 0.01:
+                updates[name] = current
+                return
+            prev = current
+            self.adjust_drive(name, delta, max_step=step)
+            new_value = float(self.state["drives"].get(name, current))
+            updates[name] = new_value
+            if abs(new_value - prev) >= 1e-3:
+                changed = True
+
+        _apply_target("respiration", respiration_target)
+        _apply_target("memory_balance", memory_target)
+        _apply_target("thermal_regulation", thermal_target)
+        _apply_target("energy", energy_target)
+
+        if changed:
+            physiology_meta = self.state.setdefault("meta", {}).setdefault("physiology", {})
+            physiology_meta["last_snapshot"] = {
+                "timestamp": timestamp,
+                "cpu_load": float(cpu_load) if isinstance(cpu_load, (int, float)) else None,
+                "cpu_temp": float(cpu_temp) if isinstance(cpu_temp, (int, float)) else None,
+                "mem_percent": float(mem_percent) if isinstance(mem_percent, (int, float)) else None,
+                "gpu_temp": float(gpu_temp) if isinstance(gpu_temp, (int, float)) else None,
+                "gpu_util": float(gpu_util) if isinstance(gpu_util, (int, float)) else None,
+                "power_draw": float(power_draw) if isinstance(power_draw, (int, float)) else None,
+                "drives": {k: updates.get(k, self.state["drives"].get(k)) for k in ("energy", "respiration", "thermal_regulation", "memory_balance")},
+            }
+            self._save()
+        return updates
 
     def register_hedonic_state(self, pleasure: float, mode: str = "travail", meta: Optional[Dict[str, Any]] = None) -> None:
         """Track hedonic events (flânerie, repos) and adjust drives accordingly."""
