@@ -806,6 +806,25 @@ class CognitiveArchitecture:
                 "last_assistant_output": self.last_output_text,
                 "active_goal_id": getattr(self.goals, "active_goal_id", None),
             }
+            try:
+                if self.goals and hasattr(self.goals, "get_active_goal"):
+                    context["active_goal"] = self.goals.get_active_goal()
+            except Exception:
+                context.setdefault("active_goal", None)
+            try:
+                if self.emotions and hasattr(self.emotions, "get_affect"):
+                    context["emotional_state"] = self.emotions.get_affect()
+            except Exception:
+                pass
+            kernel_state = None
+            try:
+                kernel_state = getattr(self, "phenomenal_kernel_state", None)
+                if not kernel_state:
+                    kernel_state = getattr(self, "_phenomenal_kernel_state", None)
+            except Exception:
+                kernel_state = None
+            if isinstance(kernel_state, dict) and kernel_state:
+                context["phenomenal_kernel"] = dict(kernel_state)
             self.reward_engine.ingest_user_message(
                 self.last_user_id, user_msg, context=context, channel="chat"
             )

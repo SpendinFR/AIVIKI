@@ -60,6 +60,7 @@ from AGI_Evolutive.memory.episodic_linker import EpisodicLinker
 from AGI_Evolutive.memory.memory_store import MemoryStore
 from AGI_Evolutive.light_scheduler import LightScheduler
 from AGI_Evolutive.runtime.job_manager import JobManager
+from AGI_Evolutive.runtime.phenomenal_kernel import ModeManager, PhenomenalKernel
 
 
 logger = logging.getLogger(__name__)
@@ -1004,6 +1005,28 @@ class Orchestrator:
             job_manager = existing_jobs
 
         self.job_manager = job_manager
+        self._phenomenal_kernel = PhenomenalKernel()
+        self._mode_manager = ModeManager(
+            target_work_ratio=0.8,
+            window=900.0,
+            enter_energy_threshold=0.38,
+            exit_energy_threshold=0.55,
+            exit_veto_threshold=0.45,
+            min_switch_interval=75.0,
+        )
+        self.phenomenal_kernel_state: Dict[str, Any] = {}
+        self.current_mode: str = "travail"
+        self._last_intrinsic_reward_ts: float = 0.0
+        self._intrinsic_reward_cooldown = 90.0
+        self._hedonic_reward_min_gain = 0.4
+        try:
+            setattr(self.arch, "phenomenal_kernel_state", self.phenomenal_kernel_state)
+        except Exception:
+            pass
+        self._job_base_budgets = {
+            queue: info.get("max_running", 1)
+            for queue, info in self.job_manager.budgets.items()
+        }
 
         if isinstance(existing_interface, ActionInterface):
             bind_kwargs = {}
@@ -1071,6 +1094,17 @@ class Orchestrator:
             perception=_PerceptionAdapter(self._perception_interface),
             action=_ActionAdapter(self._action_interface),
         )
+        try:
+            self._emotion_engine.bind(
+                arch=self,
+                memory=getattr(self.arch, "memory", None),
+                metacog=self._meta,
+                goals=getattr(self.arch, "goals", None),
+                language=getattr(self.arch, "language", None),
+                evolution=self._evolution,
+            )
+        except Exception:
+            pass
         self.emotions = _EmotionAdapter(self._emotion_engine)
         self.cognition = SimpleNamespace(
             planner=_PlannerAdapter(self._planner),
@@ -1582,6 +1616,43 @@ class Orchestrator:
                     {"kind": "error", "text": f"Proposal error: {exc}", "ts": time.time()}
                 )
 
+    def _collect_kernel_alerts_from_triggers(self, scored_triggers: Iterable["ScoredTrigger"]) -> None:
+        for scored in scored_triggers:
+            trigger = getattr(scored, "trigger", None)
+            if trigger is None:
+                continue
+            meta = getattr(trigger, "meta", None) or {}
+            payload = getattr(trigger, "payload", None) or {}
+            alert_meta = meta.get("phenomenal_alert") or payload.get("phenomenal_alert")
+            if not isinstance(alert_meta, dict) and isinstance(meta.get("system_alert"), dict):
+                alert_meta = meta.get("system_alert")
+            if isinstance(alert_meta, dict):
+                kind = str(
+                    alert_meta.get("kind")
+                    or meta.get("kind")
+                    or payload.get("kind")
+                    or trigger.type.name.lower()
+                )
+                intensity = float(
+                    alert_meta.get(
+                        "intensity",
+                        meta.get("immediacy", getattr(scored, "priority", 0.8)),
+                    )
+                )
+                slowdown = alert_meta.get("slowdown")
+                duration = alert_meta.get("duration", alert_meta.get("ttl", 30.0))
+                timestamp = alert_meta.get("timestamp")
+                try:
+                    self._phenomenal_kernel.register_alert(
+                        kind,
+                        intensity=intensity,
+                        slowdown=slowdown,
+                        duration=duration,
+                        timestamp=timestamp,
+                    )
+                except Exception:
+                    continue
+
     # --- Cycle principal ----------------------------------------------------
     def run_once_cycle(self, user_msg: Optional[str] = None) -> List[Dict[str, Any]]:
         try:
@@ -1606,9 +1677,20 @@ class Orchestrator:
             self.observe(None)
 
         emo_state = self.emotions.read()
+        emotion_context = {}
+        if emo_state is not None:
+            emotion_context = {
+                "valence": float(getattr(emo_state, "valence", 0.0)),
+                "arousal": float(getattr(emo_state, "arousal", 0.0)),
+            }
         valence = getattr(emo_state, "valence", 0.0) if emo_state else 0.0
-
+        resource_monitor = None
+        try:
+            resource_monitor = self._meta.cognitive_monitoring.get("resource_monitoring")
+        except Exception:
+            resource_monitor = None
         scored = self.trigger_bus.collect_and_score(valence=valence)
+        self._collect_kernel_alerts_from_triggers(scored)
         selected: List[Any] = []
         for st in scored:
             if (
@@ -1620,6 +1702,83 @@ class Orchestrator:
                 break
         if not selected:
             selected = scored[:3]
+
+        urgent = any(
+            item.trigger.type is TriggerType.THREAT and item.trigger.meta.get("immediacy", 0.0) >= 0.7
+            for item in selected
+        )
+        novelty = abs(self._last_prediction_error)
+        belief = 0.5
+        if hasattr(self.self_model, "confidence") and callable(getattr(self.self_model, "confidence")):
+            try:
+                belief = float(self.self_model.confidence({}))  # type: ignore[call-arg]
+            except Exception:
+                belief = 0.5
+        progress_signal = float(self._homeostasis.state.get("intrinsic_reward", 0.0))
+        extrinsic_signal = float(self._homeostasis.state.get("extrinsic_reward", 0.0))
+        hedonic_signal = float(self._homeostasis.state.get("hedonic_reward", 0.0))
+        fatigue = None
+        if resource_monitor and hasattr(resource_monitor, "assess_fatigue"):
+            try:
+                fatigue = float(resource_monitor.assess_fatigue(self._meta.metacognitive_history, self.arch))
+            except Exception:
+                fatigue = None
+        kernel_state = self._phenomenal_kernel.update(
+            emotional_state=emotion_context,
+            novelty=novelty,
+            belief=belief,
+            progress=progress_signal,
+            extrinsic_reward=extrinsic_signal,
+            hedonic_signal=hedonic_signal,
+            fatigue=fatigue,
+        )
+        self.phenomenal_kernel_state.clear()
+        self.phenomenal_kernel_state.update(kernel_state)
+        self.phenomenal_kernel_state.setdefault("mode", self.current_mode)
+        setattr(self.arch, "phenomenal_kernel_state", self.phenomenal_kernel_state)
+        mode_info = self._mode_manager.update(self.phenomenal_kernel_state, urgent=urgent)
+        self.current_mode = mode_info.get("mode", self.current_mode)
+        self.phenomenal_kernel_state["mode"] = self.current_mode
+        self.phenomenal_kernel_state["flanerie_ratio"] = mode_info.get("flanerie_ratio")
+        self.phenomenal_kernel_state["flanerie_budget_remaining"] = mode_info.get("flanerie_budget_remaining")
+        self.phenomenal_kernel_state["urgent"] = urgent
+        slowdown = float(self.phenomenal_kernel_state.get("global_slowdown", 0.0) or 0.0)
+        try:
+            setattr(self.arch, "global_slowdown", slowdown)
+        except Exception:
+            pass
+        try:
+            setattr(self.arch, "current_mode", self.current_mode)
+        except Exception:
+            pass
+        slowdown_factor = max(0.1, min(1.0, 1.0 - 0.7 * slowdown))
+        for queue, base in self._job_base_budgets.items():
+            factor = slowdown_factor
+            if self.current_mode == "flanerie" and queue == "background":
+                factor *= 0.5
+            target = max(1, math.ceil(base * factor))
+            self.job_manager.budgets.setdefault(queue, {})["max_running"] = target
+        hedonic_gain = float(self.phenomenal_kernel_state.get("hedonic_reward", 0.0))
+        budget_remaining = float(
+            self.phenomenal_kernel_state.get("flanerie_budget_remaining", 0.0) or 0.0
+        )
+        if (
+            self.current_mode == "flanerie"
+            and hedonic_gain >= self._hedonic_reward_min_gain
+            and budget_remaining > 0.0
+            and (time.time() - self._last_intrinsic_reward_ts) > self._intrinsic_reward_cooldown
+        ):
+            reward_engine = getattr(self.arch, "reward_engine", None)
+            if reward_engine and hasattr(reward_engine, "register_intrinsic_reward"):
+                try:
+                    reward_engine.register_intrinsic_reward(
+                        "phenomenal_kernel",
+                        hedonic_gain,
+                        context={"phenomenal_kernel": dict(self.phenomenal_kernel_state), "mode": self.current_mode},
+                    )
+                    self._last_intrinsic_reward_ts = time.time()
+                except Exception:
+                    pass
 
         contexts: List[Dict[str, Any]] = []
         for scored_trigger in selected:

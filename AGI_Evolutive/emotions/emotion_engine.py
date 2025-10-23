@@ -157,6 +157,35 @@ class RewardPlugin(AppraisalPlugin):
                                confidence=conf, meta={"reward": rew})
 
 
+class IntrinsicPleasurePlugin(AppraisalPlugin):
+    name = "intrinsic_pleasure"
+
+    def __call__(self, ctx: Dict[str, Any]) -> AppraisalOutput:
+        kernel = ctx.get("phenomenal_kernel") or {}
+        pleasure = ctx.get("hedonic_signal")
+        if pleasure is None and isinstance(kernel, dict):
+            pleasure = kernel.get("hedonic_reward")
+        try:
+            pleasure_val = float(pleasure)
+        except (TypeError, ValueError):
+            pleasure_val = 0.0
+        pleasure_val = clip(pleasure_val, -1.0, 1.0)
+        intensity = abs(pleasure_val)
+        meta = {"pleasure": pleasure_val}
+        if isinstance(kernel, dict):
+            meta.update({
+                "mode": kernel.get("mode"),
+                "suggestion": kernel.get("mode_suggestion"),
+            })
+        return AppraisalOutput(
+            dv=0.40 * pleasure_val,
+            da=0.12 * intensity,
+            dd=0.06 * pleasure_val,
+            confidence=0.4 + 0.4 * intensity,
+            meta=meta,
+        )
+
+
 class FatiguePlugin(AppraisalPlugin):
     name = "fatigue"
     def __call__(self, ctx: Dict[str, Any]) -> AppraisalOutput:
@@ -551,6 +580,7 @@ class EmotionEngine:
             ErrorPlugin(),
             SuccessPlugin(),
             RewardPlugin(),
+            IntrinsicPleasurePlugin(),
             FatiguePlugin(),
             SocialFeedbackPlugin(),
             SynthesizedPlugin(self._synthesizer),
@@ -605,6 +635,22 @@ class EmotionEngine:
         da = (arousal_hint if arousal_hint is not None else 0.0) * m
         dd = (dominance_hint if dominance_hint is not None else 0.0) * 0.5 * m
         self._nudge(dv, da, dd, source=f"event:{kind}", confidence=confidence, meta=meta or {})
+
+    def register_intrinsic_pleasure(self, intensity: float, meta: Optional[Dict[str, Any]] = None) -> None:
+        try:
+            value = float(intensity)
+        except (TypeError, ValueError):
+            value = 0.0
+        value = clip(value, -1.0, 1.0)
+        self.register_event(
+            "intrinsic_pleasure",
+            intensity=abs(value),
+            valence_hint=value,
+            arousal_hint=0.2 * abs(value),
+            dominance_hint=0.1 * value,
+            confidence=0.6,
+            meta=meta or {},
+        )
 
     def get_modulators(self) -> Dict[str, Any]:
         self.step(force=True)
@@ -686,6 +732,43 @@ class EmotionEngine:
             if hasattr(homeostasis, "_save"):
                 try: homeostasis._save()
                 except Exception: pass
+        kernel_state = mods.get("phenomenal_kernel")
+        if not kernel_state:
+            arch = self.bound.get("arch")
+            if arch is not None:
+                try:
+                    kernel_state = getattr(arch, "phenomenal_kernel_state", None)
+                except Exception:
+                    kernel_state = None
+        slowdown_meta: Dict[str, Any] = {}
+        slowdown_val = None
+        if isinstance(kernel_state, dict):
+            slowdown_val = kernel_state.get("global_slowdown")
+            slowdown_meta = {
+                "mode": kernel_state.get("mode") or kernel_state.get("mode_suggestion") or "travail",
+                "energy": kernel_state.get("energy"),
+                "feel_like": kernel_state.get("feel_like"),
+                "budget": kernel_state.get("flanerie_budget_remaining"),
+            }
+        if isinstance(kernel_state, dict) and hasattr(homeostasis, "register_hedonic_state"):
+            hedonic_val = kernel_state.get("hedonic_reward")
+            if isinstance(hedonic_val, (int, float)) and abs(hedonic_val) > 1e-3:
+                mode = slowdown_meta.get("mode", "travail")
+                meta = {
+                    "energy": kernel_state.get("energy"),
+                    "feel_like": kernel_state.get("feel_like"),
+                    "budget": kernel_state.get("flanerie_budget_remaining"),
+                }
+                slowdown_meta.update({k: v for k, v in meta.items() if v is not None})
+                try:
+                    homeostasis.register_hedonic_state(float(hedonic_val), mode=mode, meta=meta)
+                except Exception:
+                    pass
+        if isinstance(slowdown_val, (int, float)) and hasattr(homeostasis, "register_global_slowdown"):
+            try:
+                homeostasis.register_global_slowdown(float(slowdown_val), meta=slowdown_meta)
+            except Exception:
+                pass
         _apply("curiosity", +0.05 + 0.10 * curiosity_boost)
         _apply("task_activation", activation_delta)
 
@@ -752,6 +835,21 @@ class EmotionEngine:
             except Exception: pass
         if language is not None:
             ctx.setdefault("social_cues", getattr(language, "recent_user_cues", None))
+        kernel_state = None
+        if arch is not None:
+            try:
+                kernel_state = getattr(arch, "phenomenal_kernel_state", None)
+                if not kernel_state:
+                    kernel_state = getattr(arch, "_phenomenal_kernel_state", None)
+            except Exception:
+                kernel_state = None
+        if isinstance(kernel_state, dict) and kernel_state:
+            ctx.setdefault("phenomenal_kernel", dict(kernel_state))
+            hedonic_val = kernel_state.get("hedonic_reward")
+            if "hedonic_signal" not in ctx and isinstance(hedonic_val, (int, float)):
+                ctx["hedonic_signal"] = float(hedonic_val)
+            if "fatigue" not in ctx and isinstance(kernel_state.get("fatigue"), (int, float)):
+                ctx["fatigue"] = float(kernel_state.get("fatigue"))
         ctx.setdefault("time_of_day", time.localtime().tm_hour)
         ctx = {k: v for k, v in ctx.items() if v is not None}
         latent = self._synthesizer.augment(ctx)
@@ -871,6 +969,20 @@ class EmotionEngine:
             "uncertainty": unc,
             "label": self.state.label,  # alias compat si l'ancien code lisait label ici
         }
+        arch = self.bound.get("arch")
+        kernel_state = None
+        if arch is not None:
+            try:
+                kernel_state = getattr(arch, "phenomenal_kernel_state", None)
+            except Exception:
+                kernel_state = None
+        if isinstance(kernel_state, dict) and kernel_state:
+            mods["phenomenal_kernel"] = dict(kernel_state)
+            if "hedonic_reward" in kernel_state:
+                try:
+                    mods["hedonic_reward"] = float(kernel_state["hedonic_reward"])
+                except Exception:
+                    pass
         return mods
 
     def _dispatch_modulators(self, mods: Dict[str, Any]):
