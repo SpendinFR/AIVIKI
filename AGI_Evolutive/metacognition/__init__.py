@@ -1745,6 +1745,7 @@ class ResourceMonitoringSystem:
     def __init__(self) -> None:
         self._last_kernel_state: Dict[str, Any] = {}
         self._last_kernel_ts: float = 0.0
+        self._last_machine_snapshot: Dict[str, Any] = {}
 
     def _refresh_kernel_state(self, cognitive_architecture) -> Dict[str, Any]:
         kernel_state = None
@@ -1763,11 +1764,22 @@ class ResourceMonitoringSystem:
     def sample_machine_state(self) -> Dict[str, Any]:
         """Expose the last phenomenal kernel snapshot."""
 
-        return dict(self._last_kernel_state)
+        state = dict(self._last_kernel_state)
+        if self._last_machine_snapshot:
+            state["machine"] = dict(self._last_machine_snapshot)
+        return state
 
     @property
     def last_snapshot(self) -> Optional[Dict[str, Any]]:
         return dict(self._last_kernel_state) if self._last_kernel_state else None
+
+    @property
+    def last_machine_snapshot(self) -> Optional[Dict[str, Any]]:
+        return dict(self._last_machine_snapshot) if self._last_machine_snapshot else None
+
+    def register_machine_snapshot(self, snapshot: Dict[str, Any]) -> None:
+        if isinstance(snapshot, dict):
+            self._last_machine_snapshot = dict(snapshot)
 
     def assess_cognitive_load(self, cognitive_architecture, reasoning_system) -> float:
         """Évalue la charge cognitive actuelle"""
@@ -1793,6 +1805,18 @@ class ResourceMonitoringSystem:
         slowdown = kernel_state.get("global_slowdown")
         if isinstance(slowdown, (int, float)):
             load_indicators.append(float(_clip(slowdown)))
+
+        machine = dict(self._last_machine_snapshot)
+        cpu_load = machine.get("cpu", {}).get("load") if isinstance(machine.get("cpu"), dict) else None
+        mem_percent = machine.get("memory", {}).get("percent") if isinstance(machine.get("memory"), dict) else None
+        gpu_util = machine.get("gpu", {}).get("util_pct") if isinstance(machine.get("gpu"), dict) else None
+
+        if isinstance(cpu_load, (int, float)):
+            load_indicators.append(max(0.0, min(1.0, float(cpu_load) / 100.0)))
+        if isinstance(mem_percent, (int, float)):
+            load_indicators.append(max(0.0, min(1.0, float(mem_percent) / 100.0)))
+        if isinstance(gpu_util, (int, float)):
+            load_indicators.append(max(0.0, min(1.0, float(gpu_util) / 100.0)))
 
         try:
             wm_load = cognitive_architecture.get_cognitive_status().get("working_memory_load", 0)
@@ -1842,6 +1866,14 @@ class ResourceMonitoringSystem:
         slowdown = kernel_state.get("global_slowdown")
         if isinstance(slowdown, (int, float)):
             fatigue_indicators.append(0.3 * float(_clip(slowdown)))
+
+        machine = dict(self._last_machine_snapshot)
+        cpu_load = machine.get("cpu", {}).get("load") if isinstance(machine.get("cpu"), dict) else None
+        mem_percent = machine.get("memory", {}).get("percent") if isinstance(machine.get("memory"), dict) else None
+        if isinstance(cpu_load, (int, float)):
+            fatigue_indicators.append(0.1 * max(0.0, min(1.0, float(cpu_load) / 100.0)))
+        if isinstance(mem_percent, (int, float)):
+            fatigue_indicators.append(0.1 * max(0.0, min(1.0, float(mem_percent) / 100.0)))
 
         operation_time = time.time() - metacognitive_history.get("system_start_time", time.time())
         time_fatigue = min(operation_time / 3600.0, 1.0)

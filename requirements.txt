@@ -5,3 +5,4 @@ numpy
 opensearchpy
 sentence_transformers
 torch
+psutil
