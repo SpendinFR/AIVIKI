@@ -2,7 +2,8 @@
 # et met à jour les InteractionRule (postérieurs + ema_reward).
 from __future__ import annotations
 from typing import Any, Dict, Optional, List, Tuple
-import time, json, random
+import time, json, random, re
+from collections import deque
 
 from AGI_Evolutive.social.adaptive_lexicon import AdaptiveLexicon
 from AGI_Evolutive.social.interaction_rule import (
@@ -23,6 +24,22 @@ NEG_MARKERS = [
 ]
 ACCEPTANCE = ["ok", "d'accord", "merci", "compris", "noté", "ça marche", "bien reçu"]
 
+REL_PRONOUNS = [
+    "je", "j'", "moi", "mon", "ma", "mes", "nous", "notre", "nos",
+    "toi", "t'", "te", "ton", "ta", "tes",
+]
+REL_KEYWORDS = [
+    "ensemble", "relation", "lien", "connex", "ami", "amie", "partage", "partager",
+    "dis-moi", "parle-moi", "histoire", "journee", "journée", "ressenti", "confiance",
+    "prends soin", "souvenir", "souviens",
+]
+REL_QUESTIONS = [
+    "comment", "qu'est-ce", "que fais", "tu as fait", "raconte", "parle de",
+]
+REL_DISCLOSURE = [
+    "aujourd'hui", "hier", "demain", "perso", "pers", "famille", "travail", "projet",
+]
+
 
 def _contains_any(s: str, words: List[str]) -> bool:
     s = s.lower()
@@ -42,6 +59,77 @@ def _sentiment_heuristic(s: str) -> float:
 
 def _acceptance_marker(s: str) -> bool:
     return _contains_any(s, ACCEPTANCE)
+
+
+def _relationship_signal(
+    message: str,
+    decision_trace: Optional[Dict[str, Any]] = None,
+    pre_ctx: Optional[Dict[str, Any]] = None,
+    post_ctx: Optional[Dict[str, Any]] = None,
+) -> Tuple[float, Dict[str, Any]]:
+    text = (message or "").strip()
+    if not text:
+        return 0.2, {"topics": [], "sentiment": 0.0}
+    low = text.lower()
+    tokens = re.findall(r"\w+", low)
+    length_bonus = min(len(tokens) / 45.0, 1.0)
+
+    pronoun_hits = sum(1 for pron in REL_PRONOUNS if pron in low)
+    pronoun_score = min(1.0, pronoun_hits / 4.0)
+
+    relational_hits = sum(1 for w in REL_KEYWORDS if w in low)
+    relational_score = min(1.0, relational_hits / 3.0)
+
+    disclosure_hits = sum(1 for w in REL_DISCLOSURE if w in low)
+    disclosure_score = min(1.0, disclosure_hits / 4.0)
+
+    question_score = 0.0
+    if "?" in text:
+        question_score = 0.55
+    if any(w in low for w in REL_QUESTIONS):
+        question_score = max(question_score, 0.85)
+
+    sentiment = _sentiment_heuristic(message)
+    sentiment_gate = 1.0 if sentiment >= 0.0 else 0.6
+
+    topics: List[str] = []
+    topic_signal = 0.0
+    ctx_topics = []
+    if isinstance(post_ctx, dict):
+        ctx_topics = post_ctx.get("conversation_topics") or []
+    elif isinstance(pre_ctx, dict):
+        ctx_topics = pre_ctx.get("conversation_topics") or []
+    for item in ctx_topics:
+        if isinstance(item, str):
+            topic = item.strip()
+            if topic and topic not in topics:
+                topics.append(topic)
+    if topics:
+        topic_signal = min(1.0, len(topics) / 3.0)
+
+    shared_recall = 0.0
+    try:
+        shared_recall = 1.0 if (post_ctx or {}).get("shared_reference") else 0.0
+    except Exception:
+        shared_recall = 0.0
+
+    raw_score = (
+        0.22 * pronoun_score
+        + 0.22 * relational_score
+        + 0.14 * disclosure_score
+        + 0.18 * question_score
+        + 0.12 * length_bonus
+        + 0.12 * topic_signal
+    )
+    score = clamp((raw_score * sentiment_gate) + 0.08 * shared_recall, 0.0, 1.0)
+
+    meta = {
+        "topics": topics,
+        "sentiment": sentiment,
+        "length": len(tokens),
+        "question_score": question_score,
+    }
+    return score, meta
 
 
 # ----------------- Critic -----------------
@@ -83,6 +171,8 @@ class ContextualWeightLearner:
         if name == "explicit_feedback":
             return clamp(value, 0.1, 0.65)
         if name == "acceptance":
+            return clamp(value, 0.0, 0.35)
+        if name == "relationship_growth":
             return clamp(value, 0.0, 0.35)
         return clamp(value, -0.35, 0.35)
 
@@ -214,6 +304,7 @@ class SocialCritic:
             "continue_dialogue",
             "valence",
             "acceptance",
+            "relationship_growth",
             "identity_consist",
         ]
         self._component_names = components
@@ -230,6 +321,9 @@ class SocialCritic:
             name: {"fast": 0.5, "slow": 0.5, "last_drift": 0.0}
             for name in components
         }
+        self._relationship_baseline: float = 0.5
+        self._relationship_history: deque[Dict[str, Any]] = deque(maxlen=60)
+        self._last_relationship_event: float = 0.0
 
     def _load_cfg(self) -> Dict[str, Any]:
         path = getattr(self.arch, "social_critic_cfg_path", "data/social_critic_config.json")
@@ -246,8 +340,9 @@ class SocialCritic:
                 "explicit_feedback": 0.45,   # j'adore / trop / etc.
                 "uncertainty_delta": 0.20,   # baisse des pending_questions
                 "continue_dialogue": 0.10,   # fil continue
-                "valence":           0.15,   # valence heuristique
+                "valence":           0.12,   # valence heuristique
                 "acceptance":        0.10,   # ok / d'accord / merci
+                "relationship_growth": 0.12, # profondeur d'échange
                 "identity_consist":  0.05,   # alignment persona
                 "policy_friction":  -0.15    # pénalité si friction
             },
@@ -311,6 +406,26 @@ class SocialCritic:
         val = _sentiment_heuristic(user_msg or "")
         acc = _acceptance_marker(user_msg or "")
 
+        relationship_depth, rel_meta = _relationship_signal(
+            user_msg or "",
+            decision_trace,
+            pre_ctx,
+            post_ctx,
+        )
+        baseline_before = float(getattr(self, "_relationship_baseline", 0.5))
+        growth_signal = clamp(0.5 + (relationship_depth - baseline_before) * 0.8, 0.0, 1.0)
+        self._relationship_baseline = 0.92 * baseline_before + 0.08 * relationship_depth
+
+        snapshot = self._build_relationship_snapshot(
+            user_msg or "",
+            rel_meta,
+            decision_trace,
+            pre_ctx,
+            post_ctx,
+            relationship_depth,
+            growth_signal,
+        )
+
         # feedback explicite (hybride: statique + lexique appris)
         user_id = getattr(self.arch, "user_id", None)
         match_fn = getattr(self.lex, "match", None)
@@ -347,6 +462,7 @@ class SocialCritic:
             ("continue_dialogue", 1.0 if cont else 0.0),
             ("valence",           val01),
             ("acceptance",        1.0 if acc else 0.0),
+            ("relationship_growth", growth_signal),
             ("identity_consist",  identity_consist),
         ]
         for name, v in parts:
@@ -364,6 +480,7 @@ class SocialCritic:
         support += 0.20 if reduced_unc else 0.0
         support += 0.10 if cont else 0.0
         support += 0.10 if acc else 0.0
+        support += 0.18 if growth_signal >= 0.55 else 0.05
         support += 0.10  # base
         confidence = clamp(max(self.cfg.get("min_confidence", 0.15), support), 0.0, 1.0)
 
@@ -389,6 +506,9 @@ class SocialCritic:
             "confidence": round(confidence, 3),
             "components": comp,
             "context_key": ctx_key,
+            "relationship_depth": round(relationship_depth, 4),
+            "relationship_growth": round(growth_signal, 4),
+            "relationship_snapshot": snapshot,
             "features": {name: float(val) for name, val in parts},
         }
         return outcome
@@ -466,9 +586,180 @@ class SocialCritic:
                         )
                         self._last_calibration_ts = _now()
             self._learn_from_outcome(outcome)
+            try:
+                rel_depth = outcome.get("relationship_depth")
+            except Exception:
+                rel_depth = None
+            snapshot_payload = outcome.get("relationship_snapshot")
+            growth_value = outcome.get("relationship_growth")
+            self._record_relationship_metric(rel_depth, snapshot=snapshot_payload, growth=growth_value)
             return newd
         except Exception:
             return None
+
+    def _record_relationship_metric(
+        self,
+        value: Optional[float],
+        *,
+        snapshot: Optional[Dict[str, Any]] = None,
+        growth: Optional[float] = None,
+    ) -> None:
+        if value is None:
+            return
+        try:
+            depth = float(value)
+        except (TypeError, ValueError):
+            return
+        metacog = getattr(self.arch, "metacognition", None)
+        if not metacog or not hasattr(metacog, "cognitive_monitoring"):
+            return
+        try:
+            tracking = metacog.cognitive_monitoring.setdefault("performance_tracking", {})
+        except Exception:
+            return
+        try:
+            hist = tracking.setdefault("relationship_depth", [])
+            hist.append({"timestamp": _now(), "value": clamp(depth, 0.0, 1.0), "context": "social_reward"})
+        except Exception:
+            pass
+        if snapshot:
+            snapshot = dict(snapshot)
+            snapshot.setdefault("timestamp", _now())
+            self._store_relationship_snapshot(snapshot)
+        self._last_relationship_event = _now()
+        experimenter = getattr(metacog, "experimenter", None)
+        if experimenter and hasattr(experimenter, "record_outcome"):
+            try:
+                experimenter.record_outcome("relationship_depth", new_value=clamp(depth, 0.0, 1.0))
+            except Exception:
+                pass
+        self._emit_relationship_event(depth, snapshot=snapshot, growth=growth)
+
+    def _build_relationship_snapshot(
+        self,
+        message: str,
+        rel_meta: Dict[str, Any],
+        decision_trace: Optional[Dict[str, Any]],
+        pre_ctx: Optional[Dict[str, Any]],
+        post_ctx: Optional[Dict[str, Any]],
+        depth: float,
+        growth: float,
+    ) -> Optional[Dict[str, Any]]:
+        text = (message or "").strip()
+        if not text:
+            return None
+        if depth < 0.35 and growth < 0.55:
+            return None
+        meta_topics = [t for t in rel_meta.get("topics", []) if isinstance(t, str)] if isinstance(rel_meta, dict) else []
+        ctx_topics = []
+        for ctx in (pre_ctx, post_ctx):
+            if isinstance(ctx, dict):
+                for item in ctx.get("conversation_topics", []) or []:
+                    if isinstance(item, str):
+                        val = item.strip()
+                        if val and val not in meta_topics and val not in ctx_topics:
+                            ctx_topics.append(val)
+        topics = meta_topics or ctx_topics
+        if not topics and len(text) < 20:
+            return None
+        agent_reply = None
+        trace = decision_trace or {}
+        for key in ("rendered_reply", "response_text", "assistant_reply", "message"):
+            val = trace.get(key)
+            if isinstance(val, str) and val.strip():
+                agent_reply = val.strip()
+                break
+        shared_reference = False
+        if isinstance(post_ctx, dict):
+            shared_reference = bool(post_ctx.get("shared_reference"))
+        payload = {
+            "message": text,
+            "topics": topics,
+            "sentiment": rel_meta.get("sentiment") if isinstance(rel_meta, dict) else 0.0,
+            "depth": clamp(depth, 0.0, 1.0),
+            "growth": clamp(growth, 0.0, 1.0),
+            "agent_reply": agent_reply,
+            "shared_reference": shared_reference,
+        }
+        if isinstance(post_ctx, dict):
+            payload["user_traits"] = {k: post_ctx.get(k) for k in ("user_segment", "mood", "persona_alignment") if k in post_ctx}
+        return payload
+
+    def _store_relationship_snapshot(self, snapshot: Dict[str, Any]) -> None:
+        if not snapshot:
+            return
+        memory = getattr(self.arch, "memory", None)
+        if not memory or not hasattr(memory, "add_memory"):
+            return
+        latest = self._relationship_history[-1] if self._relationship_history else None
+        if latest and latest.get("message") == snapshot.get("message"):
+            return
+        entry = {
+            "kind": "relationship_snapshot",
+            "timestamp": snapshot.get("timestamp", _now()),
+            "message": snapshot.get("message"),
+            "topics": snapshot.get("topics", []),
+            "depth": snapshot.get("depth"),
+            "growth": snapshot.get("growth"),
+            "sentiment": snapshot.get("sentiment"),
+            "agent_reply": snapshot.get("agent_reply"),
+            "shared_reference": snapshot.get("shared_reference", False),
+            "metadata": snapshot.get("user_traits") or {},
+        }
+        try:
+            memory.add_memory(entry)
+        except Exception:
+            pass
+        self._relationship_history.append(entry)
+
+    def _emit_relationship_event(
+        self,
+        depth: float,
+        *,
+        snapshot: Optional[Dict[str, Any]] = None,
+        growth: Optional[float] = None,
+    ) -> None:
+        metacog = getattr(self.arch, "metacognition", None)
+        if not metacog:
+            return
+        event_fn = getattr(metacog, "_record_metacognitive_event", None)
+        domain_enum = getattr(metacog, "CognitiveDomain", None)
+        if not callable(event_fn) or domain_enum is None:
+            return
+        try:
+            domain = getattr(domain_enum, "SOCIAL")
+        except AttributeError:
+            domain = getattr(domain_enum, "LANGUAGE", None)
+        if domain is None:
+            return
+        growth_val = clamp(float(growth) if growth is not None else depth, 0.0, 1.0)
+        centred = depth - 0.5
+        magnitude = abs(centred)
+        sentiment = 0.0
+        if snapshot:
+            try:
+                sentiment = float(snapshot.get("sentiment", 0.0))
+            except (TypeError, ValueError):
+                sentiment = 0.0
+        event_type = "relationship_gain" if growth_val >= 0.55 and depth >= 0.45 else "relationship_regress" if depth < 0.35 else "relationship_update"
+        description = "Actualisation du lien relationnel"
+        if snapshot and snapshot.get("topics"):
+            topic_preview = ", ".join(snapshot["topics"][:2])
+            description = f"Lien relationnel autour de {topic_preview}"
+        significance = clamp(0.35 + magnitude * 0.6, 0.0, 1.0)
+        confidence = clamp(0.55 + (growth_val - 0.5) * 0.5, 0.1, 0.95)
+        try:
+            event_fn(
+                event_type,
+                domain,
+                description,
+                significance,
+                confidence,
+                emotional_valence=sentiment,
+                cognitive_load=max(0.0, 0.4 - confidence * 0.3),
+            )
+        except Exception:
+            return
 
     # ----------- apprentissage pondéré & dérive ----------
     def _normalize_ctx_value(self, value: Any) -> Any:

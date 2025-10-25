@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections import deque
 from dataclasses import dataclass
-from typing import Callable, Deque, Dict, Iterable, Optional, Pattern
+from typing import Callable, Deque, Dict, Iterable, Optional, Pattern, List
 
 from .dag_store import GoalNode
 
@@ -381,5 +381,81 @@ def default_heuristics() -> HeuristicRegistry:
         return actions
 
     registry.register_regex("declarative_concept", declarative_pattern, build_declarative)
+
+    relationship_pattern = r"(?is)(?:relation|lien|rapport)"
+
+    def build_relationship(goal: GoalNode, match: re.Match[str]) -> ActionDeque:
+        priority = getattr(goal, "priority", 0.6) or 0.6
+        topics: List[str] = []
+        memory_hint: Optional[str] = None
+        sentiment_hint: Optional[float] = None
+        for criterion in getattr(goal, "criteria", []) or []:
+            topic_match = re.search(r"Relancer sur\s+(.+?)\s+en", criterion, re.IGNORECASE)
+            if topic_match:
+                topics.append(topic_match.group(1).strip(" ."))
+            if memory_hint is None:
+                memo_match = re.search(r"Souvenir mentionné : «(.+?)»", criterion)
+                if memo_match:
+                    memory_hint = memo_match.group(1).strip()
+            if sentiment_hint is None:
+                senti_match = re.search(r"Sentiment récent estimé : ([+-]?[0-9]+(?:\.[0-9]+)?)", criterion)
+                if senti_match:
+                    try:
+                        sentiment_hint = float(senti_match.group(1))
+                    except ValueError:
+                        sentiment_hint = None
+        topic = topics[0] if topics else "ta journée"
+        if memory_hint:
+            question = f"Tu me parlais de {memory_hint}. Comment ça évolue aujourd'hui ?"
+        else:
+            question = f"Comment se passe {topic} pour toi en ce moment ?"
+        if sentiment_hint is not None:
+            if sentiment_hint <= -0.15:
+                question = (
+                    f"La dernière fois {topic} semblait délicat. Où en es-tu et comment tu te sens ?"
+                )
+            elif sentiment_hint >= 0.2 and memory_hint:
+                question = (
+                    f"Tu semblais heureux(se) à propos de {memory_hint}. Qu'est-ce qui t'a fait plaisir récemment ?"
+                )
+            elif sentiment_hint >= 0.2:
+                question = (
+                    f"J'ai eu l'impression que {topic} avançait bien. Quelle bonne nouvelle as-tu envie de partager ?"
+                )
+        reflection_hint = "Préparer un partage sincère pour nourrir la réciprocité."
+        if len(topics) > 1:
+            reflection_hint = (
+                f"Repérer ce que je peux partager en lien avec {topics[0]} et {topics[1]}."
+            )
+        if sentiment_hint is not None and sentiment_hint <= -0.15:
+            reflection_hint = (
+                "Préparer un soutien concret et un partage personnel sur une difficulté similaire."
+            )
+        actions: ActionDeque = deque()
+        actions.append(
+            {
+                "type": "ask",
+                "payload": {
+                    "goal_id": goal.id,
+                    "question": question,
+                    "source": "goal_system",
+                    "type": "relationship_checkin",
+                },
+                "priority": min(1.0, priority + 0.12),
+            }
+        )
+        actions.append(
+            {
+                "type": "reflect",
+                "payload": {
+                    "goal_id": goal.id,
+                    "hint": reflection_hint,
+                },
+                "priority": priority,
+            }
+        )
+        return actions
+
+    registry.register_regex("relationship_development", relationship_pattern, build_relationship)
 
     return registry

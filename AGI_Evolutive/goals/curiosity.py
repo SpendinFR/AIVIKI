@@ -145,6 +145,14 @@ class CuriosityEngine:
                 "Mesurer le gain de clarté obtenu grâce à ce rituel.",
             ],
         },
+        "relationship_depth": {
+            "description": "Renforcer mon lien avec l'utilisateur par des échanges réciproques et mémorables.",
+            "criteria": [
+                "Identifier ce que je sais déjà de la personne et les sujets qu'elle apprécie partager.",
+                "Initier un échange ouvert en proposant un partage sincère ou une question personnalisée.",
+                "Observer la réponse et consigner ce qui a renforcé la relation pour l'utiliser plus tard.",
+            ],
+        },
     }
 
     def __init__(self, architecture=None):
@@ -275,6 +283,7 @@ class CuriosityEngine:
         # Concepts récemment extraits mais pas encore “appris”
         novel_concepts: List[str] = []
         known_concepts: set = set()
+        relationship_highlights: List[Dict[str, Any]] = []
         try:
             if memory and hasattr(memory, "get_recent_memories"):
                 recents = memory.get_recent_memories(200)
@@ -298,8 +307,28 @@ class CuriosityEngine:
                             c = str(c).strip()
                             if c and c not in known_concepts and c not in novel_concepts:
                                 novel_concepts.append(c)
+                    if kind == "relationship_snapshot":
+                        topics = [
+                            str(t).strip()
+                            for t in (item.get("topics") or [])
+                            if isinstance(t, str) and t.strip()
+                        ]
+                        message = (item.get("message") or "").strip()
+                        if len(message) > 160:
+                            message = message[:157].rstrip() + "…"
+                        highlight = {
+                            "topics": topics,
+                            "message": message,
+                            "timestamp": item.get("timestamp", 0.0),
+                            "sentiment": item.get("sentiment"),
+                            "growth": item.get("growth"),
+                        }
+                        relationship_highlights.append(highlight)
         except Exception:
             pass
+
+        if relationship_highlights:
+            relationship_highlights.sort(key=lambda h: h.get("timestamp") or 0.0, reverse=True)
 
         contradictions: List[Dict[str, Any]] = []
         beliefs = getattr(self.architecture, "beliefs", None)
@@ -323,6 +352,7 @@ class CuriosityEngine:
             "reasoning": reasoning_stats,
             "novel_concepts": novel_concepts,
             "contradictions": contradictions,
+            "relationship_highlights": relationship_highlights,
         }
 
     def _identify_gaps(self, context: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -336,6 +366,19 @@ class CuriosityEngine:
             {"domain": name, "score": value, "severity": float(max(0.0, min(1.0, 1.0 - value)))}
             for name, value in low_metrics[:3]
         ]
+
+        highlights = context.get("relationship_highlights") or []
+        if highlights:
+            for gap in gaps:
+                if (gap.get("domain") or "").lower() == "relationship_depth":
+                    gap["personal_topics"] = highlights[:3]
+                    anchor = highlights[0]
+                    topics = anchor.get("topics") or []
+                    if topics:
+                        gap["question_topic"] = topics[0]
+                    if anchor.get("message"):
+                        gap["memory_snippet"] = anchor.get("message")
+                    gap["recent_sentiment"] = anchor.get("sentiment")
 
         reasoning_errors = context.get("reasoning", {}).get("common_errors", [])
         gaps.extend(
@@ -392,6 +435,28 @@ class CuriosityEngine:
                 "Identifier une observation décisive à collecter.",
                 "Mettre à jour la croyance avec justification.",
             ]
+        elif domain == "relationship_depth":
+            highlights = gap.get("personal_topics") or []
+            anchor = highlights[0] if highlights else {}
+            topics = anchor.get("topics") or []
+            main_topic = topics[0] if topics else gap.get("question_topic") or "tes projets"
+            description = (
+                f"Approfondir notre lien en revenant sur {main_topic}."
+            )
+            criteria = [
+                f"Relancer sur {main_topic} en demandant une mise à jour concrète.",
+                "Partager un élément authentique sur ma progression pour équilibrer l'échange.",
+                "Consigner les détails reçus pour renforcer ma mémoire relationnelle.",
+            ]
+            snippet = (gap.get("memory_snippet") or "").strip()
+            if snippet:
+                criteria.append(f"Souvenir mentionné : « {snippet} »")
+            if "recent_sentiment" in gap:
+                try:
+                    sentiment = float(gap["recent_sentiment"])
+                    criteria.append(f"Sentiment récent estimé : {sentiment:+.2f}")
+                except (TypeError, ValueError):
+                    pass
 
         return {
             "description": description,

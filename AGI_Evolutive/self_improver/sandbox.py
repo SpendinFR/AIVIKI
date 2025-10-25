@@ -336,6 +336,24 @@ class SandboxRunner:
             scores.append(acc)
         return samples, scores
 
+    def _social_metric_samples(self, arch: Any) -> List[Dict[str, float]]:
+        metacog = getattr(arch, "metacognition", None)
+        if not metacog or not hasattr(metacog, "cognitive_monitoring"):
+            return []
+        try:
+            tracking = metacog.cognitive_monitoring.get("performance_tracking", {})
+        except Exception:
+            tracking = {}
+        history = tracking.get("relationship_depth") if isinstance(tracking, dict) else None
+        if not history:
+            return []
+        latest = history[-1]
+        try:
+            value = float(latest.get("value", 0.0))
+        except (TypeError, ValueError, AttributeError):
+            return []
+        return [{"relationship_depth": max(0.0, min(1.0, value))}]
+
     # ------------------------------------------------------------------
     # Global run
     def _run_curriculum(
@@ -517,6 +535,8 @@ class SandboxRunner:
         concept_samples, concept_scores = self._eval_concepts(arch)
         acc_samples.extend(concept_samples)
         acc_scores.extend(concept_scores)
+
+        acc_samples.extend(self._social_metric_samples(arch))
 
         curriculum = self._run_curriculum(
             arch, base_samples=abduct_samples, base_scores=abduct_scores

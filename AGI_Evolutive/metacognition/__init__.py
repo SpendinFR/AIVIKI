@@ -43,6 +43,7 @@ class CognitiveDomain(Enum):
     PROBLEM_SOLVING = "résolution_problème"
     ATTENTION = "attention"
     LANGUAGE = "langage"
+    SOCIAL = "social"
 
 @dataclass
 class MetacognitiveEvent:
@@ -75,7 +76,8 @@ class SelfModel:
         "attention_control": 0.5,
         "problem_solving": 0.5,
         "creativity": 0.3,
-        "emotional_intelligence": 0.4
+        "emotional_intelligence": 0.4,
+        "relationship_management": 0.4,
     })
     
     # Limitations connues
@@ -231,7 +233,8 @@ class MetacognitiveSystem:
             "self_understanding": 0.1,
             "adaptive_capacity": 0.3,
             "insight_readiness": 0.4,
-            "cognitive_flexibility": 0.5
+            "cognitive_flexibility": 0.5,
+            "relationship_attunement": 0.3,
         }
 
         # === PARAMÈTRES DE FONCTIONNEMENT ===
@@ -260,6 +263,7 @@ class MetacognitiveSystem:
         self._state_performance_correlation: Dict[str, float] = {
             "awareness": 0.0,
             "understanding": 0.0,
+            "relationship": 0.0,
         }
 
         self._state_update_model: OnlineLinear = OnlineLinear(
@@ -434,6 +438,7 @@ class MetacognitiveSystem:
             "value": float(value),
             "awareness": float(self.metacognitive_states.get("awareness_level", 0.0)),
             "understanding": float(self.metacognitive_states.get("self_understanding", 0.0)),
+            "relationship": float(self.metacognitive_states.get("relationship_attunement", 0.0)),
         }
         self._state_performance_history.append(sample)
         if len(self._state_performance_history) >= 6:
@@ -445,6 +450,7 @@ class MetacognitiveSystem:
             return
         awareness_values = np.array([entry["awareness"] for entry in data])
         understanding_values = np.array([entry["understanding"] for entry in data])
+        relationship_values = np.array([entry["relationship"] for entry in data])
         metric_values = np.array([entry["value"] for entry in data])
 
         def safe_corr(a: np.ndarray, b: np.ndarray) -> float:
@@ -457,6 +463,7 @@ class MetacognitiveSystem:
 
         self._state_performance_correlation["awareness"] = safe_corr(awareness_values, metric_values)
         self._state_performance_correlation["understanding"] = safe_corr(understanding_values, metric_values)
+        self._state_performance_correlation["relationship"] = safe_corr(relationship_values, metric_values)
 
     def _select_self_model_rate(self) -> float:
         arm = self._self_model_rate_bandit.select()
@@ -484,11 +491,13 @@ class MetacognitiveSystem:
     ) -> float:
         delta_awareness = after_states.get("awareness_level", 0.0) - before_states.get("awareness_level", 0.0)
         delta_understanding = after_states.get("self_understanding", 0.0) - before_states.get("self_understanding", 0.0)
-        delta_total = delta_awareness + delta_understanding
+        delta_relationship = after_states.get("relationship_attunement", 0.0) - before_states.get("relationship_attunement", 0.0)
+        delta_total = delta_awareness + delta_understanding + 0.5 * delta_relationship
         pressure = 0.5 * (event.significance + event.confidence)
         corr_awareness = self._state_performance_correlation.get("awareness", 0.0)
         corr_understanding = self._state_performance_correlation.get("understanding", 0.0)
-        corr_component = 0.5 + 0.25 * corr_awareness + 0.25 * corr_understanding
+        corr_relationship = self._state_performance_correlation.get("relationship", 0.0)
+        corr_component = 0.4 + 0.2 * corr_awareness + 0.2 * corr_understanding + 0.2 * corr_relationship
         improvement_component = 0.5 + 0.5 * math.tanh(delta_total * 5.0)
         reward = pressure * 0.3 + improvement_component * corr_component * 0.7
         return max(0.0, min(1.0, reward))
@@ -855,6 +864,7 @@ class MetacognitiveSystem:
         before_states = {
             "awareness_level": self.metacognitive_states.get("awareness_level", 0.0),
             "self_understanding": self.metacognitive_states.get("self_understanding", 0.0),
+            "relationship_attunement": self.metacognitive_states.get("relationship_attunement", 0.0),
         }
 
         features: Dict[str, float] = {
@@ -893,9 +903,29 @@ class MetacognitiveSystem:
             self._log_drift("self_understanding", before_states["self_understanding"], new_understanding)
         self.metacognitive_states["self_understanding"] = new_understanding
 
+        rel_before = before_states["relationship_attunement"]
+        rel_delta = 0.0
+        if event.domain == CognitiveDomain.SOCIAL or event.event_type.startswith("relationship"):
+            base_rel = max(event.significance, abs(event.emotional_valence)) * 0.03
+            if event.event_type == "relationship_gain":
+                base_rel += 0.04
+            elif event.event_type == "relationship_regress":
+                base_rel -= 0.05
+            else:
+                base_rel += event.emotional_valence * 0.02
+            rel_delta = base_rel * (1.0 + modulation_factor)
+            rel_delta = max(-0.06, min(0.06, rel_delta))
+        else:
+            rel_delta = -0.01 * (rel_before - 0.35)
+        new_relationship = _clip(rel_before + rel_delta)
+        if abs(new_relationship - rel_before) > 0.02:
+            self._log_drift("relationship_attunement", rel_before, new_relationship)
+        self.metacognitive_states["relationship_attunement"] = new_relationship
+
         after_states = {
             "awareness_level": new_awareness,
             "self_understanding": new_understanding,
+            "relationship_attunement": new_relationship,
         }
 
         reward = self._estimate_state_update_reward(event, before_states, after_states)
@@ -986,7 +1016,8 @@ class MetacognitiveSystem:
             CognitiveDomain.PROBLEM_SOLVING: 0.7,
             CognitiveDomain.ATTENTION: 0.6,
             CognitiveDomain.PERCEPTION: 0.5,
-            CognitiveDomain.LANGUAGE: 0.7
+            CognitiveDomain.LANGUAGE: 0.7,
+            CognitiveDomain.SOCIAL: 0.85,
         }
         
         return impact_weights.get(domain, 0.5)
