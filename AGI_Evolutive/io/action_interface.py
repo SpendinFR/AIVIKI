@@ -241,6 +241,7 @@ class ActionInterface:
             "language": None,
             "simulator": None,
             "jobs": None,
+            "skills": None,
         }
 
         self.queue: List[Action] = []
@@ -265,6 +266,7 @@ class ActionInterface:
         simulator: Any = None,
         jobs: Any = None,
         perception: Any = None,
+        skills: Any = None,
         job_bases: Optional[Dict[str, int]] = None,
     ) -> None:
         if memory is not None:
@@ -282,6 +284,21 @@ class ActionInterface:
             simulator = getattr(arch, "simulator", None)
         if simulator is not None:
             self.bound["simulator"] = simulator
+        if skills is not None:
+            self.bound["skills"] = skills
+        skill_manager = self.bound.get("skills")
+        if skill_manager is not None and hasattr(skill_manager, "bind"):
+            try:
+                skill_manager.bind(
+                    memory=self.bound.get("memory"),
+                    language=language or self.bound.get("language"),
+                    simulator=simulator or self.bound.get("simulator"),
+                    jobs=self.bound.get("jobs"),
+                    arch=arch or self.bound.get("arch"),
+                    interface=self,
+                )
+            except Exception:
+                pass
         self.bound.update(
             {
                 "arch": arch,
@@ -534,6 +551,16 @@ class ActionInterface:
             priority=float(action.get("priority", 0.5)),
             context=context,
         )
+        skills = self.bound.get("skills")
+        if skills and hasattr(skills, "handle_simulation"):
+            builtin = self._builtin_handlers()
+            if act.type not in self._legacy_handlers and act.type not in builtin:
+                try:
+                    managed = skills.handle_simulation(act, self)
+                except Exception:
+                    managed = None
+                if isinstance(managed, dict):
+                    return managed
         self._prepare_priority_learning(act, act.priority, adjust_priority=False)
         previous_mode = self.current_mode
         try:
@@ -583,38 +610,7 @@ class ActionInterface:
                 act.status = "failed"
                 act.result = {"ok": False, "error": str(e)}
         else:
-            handlers = {
-                "message_user": self._h_message_user,
-                "write_memory": self._h_write_memory,
-                "save_file": self._h_save_file,
-                "reflect": self._h_reflect,
-                "habit_reflection": self._h_habit_reflection,
-                "learn_concept": self._h_learn_concept,
-                "search_memory": self._h_search_memory,
-                "communicate": self._h_communicate,
-                "log": self._h_log,
-                "plan_step": self._h_plan_step,
-                "update_belief": lambda act: self._h_update_belief(act.payload, act.context),
-                "assert_fact": lambda act: self._h_assert_fact(act.payload, act.context),
-                "link_entity": lambda act: self._h_link_entity(act.payload, act.context),
-                "abduce": lambda act: self._h_abduce(act.payload, act.context),
-                "set_user_pref": lambda act: self._h_set_user_pref(act.payload, act.context),
-                "self_improve": lambda act: self._h_self_improve(act.payload, act.context),
-                "promote": lambda act: self._h_promote(act.payload, act.context),
-                "rollback": lambda act: self._h_rollback(act.payload, act.context),
-                "simulate": self._h_simulate,
-                "plan": self._h_plan,
-                "simulate_dialogue": self._h_simulate_dialogue,
-                "search_counterexample": self._h_search_counterexample,
-                "ask_clarifying": lambda act: self._h_ask(act.payload, act.context),
-                "ask": lambda act: self._h_ask(act.payload, act.context),
-                "scan_inbox": lambda act: self._h_scan_inbox(act.payload, act.context),
-                "code_evolve": lambda act: self._h_code_evolve(act.payload, act.context),
-                "promote_code": lambda act: self._h_promote_code(act.payload, act.context),
-                "rollback_code": lambda act: self._h_rollback_code(act.payload, act.context),
-                "rotate_curriculum": lambda act: self._h_rotate_curriculum(act.payload, act.context),
-                "regulate_resources": self._h_regulate_resources,
-            }
+            handlers = self._builtin_handlers()
             handler = handlers.get(act.type, self._h_simulate)
 
             # offload si possible
@@ -693,6 +689,41 @@ class ActionInterface:
         self._update_learning_signals(act, reward)
         self._log(act, reward=reward)
         self._memorize_action(act, reward=reward)
+
+    def _builtin_handlers(self) -> Dict[str, Callable[[Action], Dict[str, Any]]]:
+        return {
+            "message_user": self._h_message_user,
+            "write_memory": self._h_write_memory,
+            "save_file": self._h_save_file,
+            "reflect": self._h_reflect,
+            "habit_reflection": self._h_habit_reflection,
+            "learn_concept": self._h_learn_concept,
+            "search_memory": self._h_search_memory,
+            "communicate": self._h_communicate,
+            "log": self._h_log,
+            "plan_step": self._h_plan_step,
+            "update_belief": lambda act: self._h_update_belief(act.payload, act.context),
+            "assert_fact": lambda act: self._h_assert_fact(act.payload, act.context),
+            "link_entity": lambda act: self._h_link_entity(act.payload, act.context),
+            "abduce": lambda act: self._h_abduce(act.payload, act.context),
+            "set_user_pref": lambda act: self._h_set_user_pref(act.payload, act.context),
+            "self_improve": lambda act: self._h_self_improve(act.payload, act.context),
+            "promote": lambda act: self._h_promote(act.payload, act.context),
+            "rollback": lambda act: self._h_rollback(act.payload, act.context),
+            "simulate": self._h_simulate,
+            "plan": self._h_plan,
+            "simulate_dialogue": self._h_simulate_dialogue,
+            "search_counterexample": self._h_search_counterexample,
+            "ask_clarifying": lambda act: self._h_ask(act.payload, act.context),
+            "ask": lambda act: self._h_ask(act.payload, act.context),
+            "scan_inbox": lambda act: self._h_scan_inbox(act.payload, act.context),
+            "code_evolve": lambda act: self._h_code_evolve(act.payload, act.context),
+            "promote_code": lambda act: self._h_promote_code(act.payload, act.context),
+            "rollback_code": lambda act: self._h_rollback_code(act.payload, act.context),
+            "rotate_curriculum": lambda act: self._h_rotate_curriculum(act.payload, act.context),
+            "review_skill_candidate": lambda act: self._h_review_skill(act.payload, act.context),
+            "regulate_resources": self._h_regulate_resources,
+        }
 
     # ------------------------------------------------------------------
     # Handlers
@@ -1283,6 +1314,14 @@ class ActionInterface:
         simulator = self.bound.get("simulator")
         if simulator is None and arch is not None:
             simulator = getattr(arch, "simulator", None)
+        skills = self.bound.get("skills")
+        if skills and hasattr(skills, "handle_simulation"):
+            try:
+                managed = skills.handle_simulation(act, self)
+            except Exception:
+                managed = None
+            if isinstance(managed, dict):
+                return managed
         if not simulator or not hasattr(simulator, "run"):
             self._remember_simulation_fallback("simulator_unavailable", query)
             return {
@@ -1666,6 +1705,31 @@ class ActionInterface:
         level = str((payload or {}).get("level", "base"))
         cid = improver.rotate_curriculum(level)
         return {"ok": True, "candidate_id": cid, "level": level}
+
+    def _h_review_skill(self, payload: Dict[str, Any], context: Dict[str, Any]):
+        skills = self.bound.get("skills")
+        if not (skills and hasattr(skills, "review")):
+            return {"ok": False, "reason": "skill_manager_unavailable"}
+        payload = payload or {}
+        action_type = payload.get("action_type")
+        decision = payload.get("decision", "approve")
+        reviewer = (
+            payload.get("reviewer")
+            or context.get("reviewer")
+            or context.get("user")
+            or payload.get("user")
+        )
+        notes = payload.get("notes")
+        try:
+            return skills.review(
+                action_type=action_type,
+                decision=decision,
+                reviewer=reviewer,
+                notes=notes,
+                interface=self,
+            )
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
 
     # ------------------------------------------------------------------
     # Logging & memory
