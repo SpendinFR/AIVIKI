@@ -30,10 +30,11 @@ _DEFAULT_CFG = {
         "recency":  -0.15,        # pénalité si réutilisation récente
     },
     "utility_weights": {          # pondération des effets dans expected_utility()
-        "reduce_uncertainty": 0.35,
-        "continue_dialogue":  0.25,
-        "positive_valence":   0.25,
-        "acceptance_marker":  0.15
+        "reduce_uncertainty": 0.30,
+        "continue_dialogue":  0.22,
+        "positive_valence":   0.22,
+        "acceptance_marker":  0.12,
+        "relationship_growth": 0.14,
     },
     "bandit": {
         "alpha": 0.6,             # intensité de l'exploration UCB

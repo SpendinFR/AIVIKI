@@ -329,7 +329,16 @@ class InteractionRule:
               effects_names: Optional[List[str]] = None,
               provenance: Optional[Dict[str, Any]] = None) -> "InteractionRule":
         effects = {}
-        for name in (effects_names or ["reduce_uncertainty", "continue_dialogue", "positive_valence", "acceptance_marker"]):
+        for name in (
+            effects_names
+            or [
+                "reduce_uncertainty",
+                "continue_dialogue",
+                "positive_valence",
+                "acceptance_marker",
+                "relationship_growth",
+            ]
+        ):
             effects[name] = EffectPosterior()
         rid = _hash(tactic.key() + "|" + "|".join(f"{p.key}:{p.op}:{p.value}" for p in predicates))
         return InteractionRule(
@@ -358,10 +367,11 @@ class InteractionRule:
 
     def _default_effect_weights(self) -> Dict[str, float]:
         return {
-            "reduce_uncertainty": 0.35,
-            "continue_dialogue":  0.25,
-            "positive_valence":   0.25,
-            "acceptance_marker":  0.15
+            "reduce_uncertainty": 0.30,
+            "continue_dialogue":  0.22,
+            "positive_valence":   0.22,
+            "acceptance_marker":  0.12,
+            "relationship_growth": 0.14,
         }
 
     def _get_ema_adapter(self) -> AdaptiveEMA:
@@ -440,6 +450,7 @@ class InteractionRule:
             "continued": bool,
             "valence": float (-1..+1),
             "accepted": bool,
+            "relationship_growth": float (0..1),
             "reward": float (0..1),   # Social Critic agrégé
         }
         """
@@ -456,6 +467,14 @@ class InteractionRule:
         # acceptance_marker (ex: “ok, merci”, “d’accord”)
         if "accepted" in outcome:
             self.effects.setdefault("acceptance_marker", EffectPosterior()).observe(bool(outcome["accepted"]))
+
+        if "relationship_growth" in outcome:
+            try:
+                rel_value = float(outcome["relationship_growth"])
+            except (TypeError, ValueError):
+                rel_value = 0.5
+            threshold = 0.55
+            self.effects.setdefault("relationship_growth", EffectPosterior()).observe(rel_value >= threshold)
 
         # reward agrégé (si fourni)
         if "reward" in outcome:

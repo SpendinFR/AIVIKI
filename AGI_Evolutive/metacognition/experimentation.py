@@ -63,6 +63,7 @@ class MetacognitionExperimenter:
         Pour chaque métrique clé, si sous un seuil → proposer un test.
         """
         created = 0
+        last_metric: Optional[str] = None
         for metric, baseline in performance_metrics.items():
             if metric not in PLAN_LIBRARY:
                 continue
@@ -103,14 +104,13 @@ class MetacognitionExperimenter:
             self._append_jsonl(EXPERIMENTS_LOG, exp.to_jsonl())
             self.active.append(exp)
             created += 1
+            last_metric = metric
 
         if created and self.system:
             try:
                 self.system._record_metacognitive_event(
                     event_type="experiment_planned",
-                    domain=self.system.CognitiveDomain.LEARNING
-                    if hasattr(self.system, "CognitiveDomain")
-                    else None,
+                    domain=self._metric_domain(last_metric) if last_metric else None,
                     description=f"{created} test(s) planifié(s) pour optimisation métriques.",
                     significance=min(0.3 + 0.1 * created, 0.7),
                     confidence=0.6,
@@ -156,9 +156,7 @@ class MetacognitionExperimenter:
             try:
                 self.system._record_metacognitive_event(
                     event_type="experiment_result",
-                    domain=self.system.CognitiveDomain.LEARNING
-                    if hasattr(self.system, "CognitiveDomain")
-                    else None,
+                    domain=self._metric_domain(metric),
                     description=(
                         f"Résultat test {metric}: {'OK' if success else 'KO'} "
                         f"(observé={new_value:.2f}, cible={goal:.2f})"
@@ -263,6 +261,21 @@ class MetacognitionExperimenter:
         else:
             stats["failure_count"] += 1
 
+    def _metric_domain(self, metric: str) -> Any:
+        if not self.system or not hasattr(self.system, "CognitiveDomain"):
+            return None
+        domain_enum = self.system.CognitiveDomain
+        try:
+            if metric == "relationship_depth":
+                return getattr(domain_enum, "SOCIAL")
+            if metric in {"recall_accuracy", "memory_capacity"}:
+                return getattr(domain_enum, "MEMORY")
+            if metric in {"reasoning_speed"}:
+                return getattr(domain_enum, "REASONING")
+        except AttributeError:
+            return getattr(domain_enum, "LEARNING", None)
+        return getattr(domain_enum, "LEARNING", None)
+
     def _dynamic_threshold(self, metric: str) -> float:
         stats = self.metric_stats.get(metric, {})
         baselines: Iterable[float] = list(stats.get("baselines", []))
@@ -342,6 +355,7 @@ ABILITY_TO_METRIC = {
     "reasoning_speed": "reasoning_speed",
     "learning_efficiency": "learning_rate",
     "memory_capacity": "memory_capacity",
+    "relationship_management": "relationship_depth",
 }
 
 
@@ -457,6 +471,30 @@ PLAN_LIBRARY: Dict[str, list] = {
             "duration": 4,
             "base_improve": 0.09,
             "aggressiveness": 1.1,
+        },
+    ],
+    "relationship_depth": [
+        {
+            "id": "personal_checkins",
+            "plan": {
+                "strategy": "relationship_checkin",
+                "details": "1 question personnelle ciblée + 1 partage sincère",
+            },
+            "parameters": {"checkins": 1, "share_detail": True},
+            "duration": 3,
+            "base_improve": 0.07,
+            "aggressiveness": 1.0,
+        },
+        {
+            "id": "memory_refresh",
+            "plan": {
+                "strategy": "relationship_memory_refresh",
+                "details": "relire 2 souvenirs relationnels et préparer un suivi",
+            },
+            "parameters": {"refresh_count": 2},
+            "duration": 4,
+            "base_improve": 0.06,
+            "aggressiveness": 0.9,
         },
     ],
 }
