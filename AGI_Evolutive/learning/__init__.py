@@ -19,7 +19,7 @@ Points clés :
 from __future__ import annotations
 import time, math, random, hashlib
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 
 # ============================================================
@@ -276,6 +276,7 @@ class ExperientialLearning:
             bounds=(0.0, 1.0),
         )
         self._recent_prediction_error: List[float] = []
+        self.auto_curriculum: Dict[str, Dict[str, Any]] = {}
 
         # auto-wiring (lecture uniquement, pas d'import croisé)
         ca = self.cognitive_architecture
@@ -586,6 +587,49 @@ class ExperientialLearning:
             return result
         except Exception:
             return {'confidence': 0.0, 'coverage': coverage, 'evidence': evidence}
+
+
+# ============================================================
+# 🧠 1 bis) Boucle d'auto-évolution
+# ============================================================
+
+    def on_auto_intention_promoted(
+        self,
+        event: Mapping[str, Any],
+        evaluation: Optional[Mapping[str, Any]] = None,
+        self_assessment: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        if not isinstance(event, Mapping):
+            return
+        action_type = str(event.get("action_type") or "").strip()
+        if not action_type:
+            return
+        significance = float((evaluation or {}).get("significance", 0.5) or 0.5)
+        self.learning_competencies[action_type] = max(
+            0.3, min(1.0, 0.4 + 0.5 * significance)
+        )
+        self.learning_states[action_type] = max(0.2, min(1.0, 0.45 + 0.4 * significance))
+        self.metrics["skills_compiled"] += 1
+        self.auto_curriculum[action_type] = {
+            "description": event.get("description"),
+            "signals": list(event.get("signals", [])),
+            "requirements": list(event.get("requirements", [])),
+            "score": (evaluation or {}).get("score"),
+        }
+        if self_assessment and isinstance(self_assessment, Mapping):
+            self.auto_curriculum[action_type]["checkpoints"] = list(
+                self_assessment.get("checkpoints", [])
+            )
+        if self.reasoning and hasattr(self.reasoning, "reasoning_history"):
+            trajectory = self.reasoning.reasoning_history.setdefault("learning_trajectory", [])
+            trajectory.append(
+                {
+                    "ts": _now(),
+                    "source": "auto_evolution",
+                    "action_type": action_type,
+                    "integration_target": self.auto_curriculum[action_type].get("checkpoints"),
+                }
+            )
 
 
 # ============================================================

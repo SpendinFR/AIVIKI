@@ -8,7 +8,7 @@ import numpy as np
 import time
 from collections import deque
 from datetime import datetime
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Mapping, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
 import math
@@ -412,6 +412,7 @@ class PerceptionSystem:
             "perceptual_expertise": {},
             "adaptation_mechanisms": {}
         }
+        self.auto_signal_registry: Dict[str, Dict[str, Any]] = {}
         
         # === PARAMÈTRES PERCEPTIFS ===
         self.perceptual_parameters = {
@@ -1276,6 +1277,50 @@ class PerceptionSystem:
             "current_attention": self.attention_system["attention_spotlight"],
             "recent_scenes_count": len(self.perceptual_history["recent_scenes"])
         }
+
+    def on_auto_intention_promoted(
+        self,
+        event: Mapping[str, Any],
+        evaluation: Optional[Mapping[str, Any]] = None,
+        self_assessment: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        if not isinstance(event, Mapping):
+            return
+        signals = event.get("signals")
+        if isinstance(signals, list):
+            for signal in signals:
+                if not isinstance(signal, Mapping):
+                    continue
+                name = str(signal.get("name") or "").strip()
+                if not name:
+                    continue
+                metric = str(signal.get("metric") or name)
+                detector = {
+                    "type": "auto_signal",
+                    "metric": metric,
+                    "target": float(signal.get("target", 0.6) or 0.6),
+                    "source": event.get("action_type"),
+                    "description": event.get("description"),
+                }
+                self.auto_signal_registry[name] = detector
+                feature_bank = self.perceptual_learning.setdefault("feature_detectors", {})
+                feature_bank.setdefault(
+                    name,
+                    {
+                        "type": "auto_feature",
+                        "modality": Modality.TEMPORAL,
+                        "sensitivity": max(0.2, min(0.95, float((evaluation or {}).get("alignment", 0.5)) + 0.2)),
+                        "specificity": 0.6,
+                    },
+                )
+        trace = {
+            "ts": time.time(),
+            "action_type": event.get("action_type"),
+            "score": (evaluation or {}).get("score"),
+            "signals": len(self.auto_signal_registry),
+        }
+        history = self.perceptual_history.setdefault("auto_intentions", deque(maxlen=120))
+        history.append(trace)
 
 # Classes auxiliaires pour les processeurs de modalité
 class VisualProcessor:

@@ -5,7 +5,7 @@ import random
 import time
 import unicodedata
 from collections import deque
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .structures import Evidence, Hypothesis, Test, episode_record
 
@@ -115,9 +115,49 @@ class ReasoningSystem:
                     "analogy": 0.33,
                 },
             },
+            "auto_intentions": deque(maxlen=120),
         }
 
     # ------------------- API publique -------------------
+    def on_auto_intention_promoted(
+        self,
+        event: Mapping[str, Any],
+        evaluation: Optional[Mapping[str, Any]] = None,
+        self_assessment: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        if not isinstance(event, Mapping):
+            return
+        record = {
+            "ts": time.time(),
+            "action_type": event.get("action_type"),
+            "score": (evaluation or {}).get("score"),
+            "keywords": list(event.get("keywords", [])),
+        }
+        history: deque = self.reasoning_history.setdefault("auto_intentions", deque(maxlen=120))
+        history.append(record)
+        prefs = self.reasoning_history.get("stats", {}).get("strategy_preferences", {})
+        if isinstance(prefs, dict):
+            keywords = {str(k).lower() for k in record.get("keywords", []) if k}
+            if keywords.intersection({"relation", "relationship", "empathy", "social"}):
+                prefs["analogy"] = min(1.0, prefs.get("analogy", 0.33) + 0.05)
+            if keywords.intersection({"plan", "strategy", "predict"}):
+                prefs["deduction"] = min(1.0, prefs.get("deduction", 0.34) + 0.05)
+            if keywords.intersection({"hypothesis", "uncertain", "explore"}):
+                prefs["abduction"] = min(1.0, prefs.get("abduction", 0.33) + 0.05)
+            total = sum(max(0.0, v) for v in prefs.values()) or 1.0
+            for key in list(prefs.keys()):
+                prefs[key] = max(0.0, min(1.0, prefs.get(key, 0.0) / total))
+        if self_assessment and isinstance(self_assessment, Mapping):
+            checkpoints = self_assessment.get("checkpoints")
+            if isinstance(checkpoints, list) and checkpoints:
+                self.reasoning_history.setdefault("learning_trajectory", []).append(
+                    {
+                        "ts": time.time(),
+                        "action_type": event.get("action_type"),
+                        "targets": checkpoints,
+                    }
+                )
+
     def reason_about(self, prompt: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Réalise un raisonnement structuré sur *prompt* et retourne un épisode détaillé."""
         t0 = time.time()

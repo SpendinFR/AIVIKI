@@ -7,9 +7,10 @@ Language v2: NLU à cadres + état de dialogue + self-ask
 import math
 import random
 import re
+import time
 import unicodedata
 from collections import Counter, defaultdict, deque
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from AGI_Evolutive.models.intent import IntentModel
 from .dialogue_state import DialogueState
@@ -247,6 +248,7 @@ class SemanticUnderstanding:
         self.intent_model = intent_model
         # Mini-lexique interne pour "mémoriser" des termes
         self.lexicon: Dict[str, Dict[str, Any]] = {}
+        self._auto_patterns: deque = deque(maxlen=60)
         # Seuils
         self.min_intent_conf = 0.45
         self.self_ask_uncertainty = 0.35  # plus c'est grand, plus l'IA posera des questions
@@ -351,6 +353,43 @@ class SemanticUnderstanding:
             pass
 
         return "\n".join(parts)
+
+    def on_auto_intention_promoted(
+        self,
+        event: Mapping[str, Any],
+        evaluation: Optional[Mapping[str, Any]] = None,
+        self_assessment: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        if not isinstance(event, Mapping):
+            return
+        requirements = event.get("requirements") or []
+        for term in requirements:
+            canonical = _canonicalize(str(term))
+            if not canonical:
+                continue
+            self.lexicon.setdefault(
+                canonical,
+                {
+                    "definition": event.get("description", ""),
+                    "source": "auto_evolution",
+                    "signals": event.get("signals", []),
+                },
+            )
+        pattern = {
+            "ts": time.time(),
+            "action_type": event.get("action_type"),
+            "score": (evaluation or {}).get("score"),
+            "keywords": list(event.get("keywords", [])),
+        }
+        self._auto_patterns.append(pattern)
+        auto_registry = getattr(self.state, "auto_intentions", None)
+        if not isinstance(auto_registry, deque):
+            auto_registry = deque(maxlen=50)
+            setattr(self.state, "auto_intentions", auto_registry)
+        auto_registry.append(pattern)
+        if self_assessment and isinstance(self_assessment, Mapping):
+            confidence_target = float(self_assessment.get("composite_target", 0.6) or 0.6)
+            self.min_intent_conf = max(0.25, min(0.9, self.min_intent_conf - 0.05 * (confidence_target - 0.5)))
 
     # ---------- INTENT & ACTS ----------
     def _classify_intent(self, text: str, norm: Optional[str] = None, canonical: Optional[str] = None) -> Tuple[str, float]:

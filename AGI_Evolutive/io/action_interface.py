@@ -8,10 +8,15 @@ import os
 import random
 import time
 import uuid
+from collections import deque
 from dataclasses import asdict, dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from AGI_Evolutive.autonomy.auto_signals import (
+    AutoSignalRegistry,
+    derive_signals_for_description,
+)
 from AGI_Evolutive.beliefs.graph import Evidence
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
 
@@ -251,6 +256,10 @@ class ActionInterface:
         self._priority_learner = PriorityLearner()
         self._action_stats: Dict[str, ActionStats] = {}
         self._last_emotion_modulators: Dict[str, float] = {}
+        self._auto_microactions: Dict[str, Dict[str, Any]] = {}
+        self._auto_signal_cache: Dict[str, Dict[str, float]] = {}
+        self._auto_microaction_history: deque = deque(maxlen=120)
+        self.auto_signal_registry: Optional[AutoSignalRegistry] = None
 
     # ------------------------------------------------------------------
     # Binding helpers
@@ -268,6 +277,7 @@ class ActionInterface:
         perception: Any = None,
         skills: Any = None,
         job_bases: Optional[Dict[str, int]] = None,
+        auto_signals: Optional[AutoSignalRegistry] = None,
     ) -> None:
         if memory is not None:
             self.bound["memory"] = memory
@@ -286,6 +296,9 @@ class ActionInterface:
             self.bound["simulator"] = simulator
         if skills is not None:
             self.bound["skills"] = skills
+        if auto_signals is not None:
+            self.bound["auto_signals"] = auto_signals
+            self.auto_signal_registry = auto_signals
         skill_manager = self.bound.get("skills")
         if skill_manager is not None and hasattr(skill_manager, "bind"):
             try:
@@ -426,6 +439,192 @@ class ActionInterface:
         if load > 0.0:
             base_context *= max(0.2, 1.0 - 0.5 * load)
         return max(0.0, min(1.0, base_context))
+
+    # ------------------------------------------------------------------
+    def on_auto_intention_promoted(
+        self,
+        event: Mapping[str, Any],
+        evaluation: Optional[Mapping[str, Any]] = None,
+        self_assessment: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        if not isinstance(event, Mapping):
+            return
+        action_type = str(event.get("action_type") or "").strip()
+        if not action_type:
+            return
+        description = str(event.get("description") or action_type).strip()
+        score = float((evaluation or {}).get("score", (evaluation or {}).get("significance", 0.6) or 0.6))
+        alignment = float((evaluation or {}).get("alignment", 0.5) or 0.5)
+        priority = max(0.35, min(0.95, 0.45 + 0.35 * score + 0.15 * alignment))
+        cooldown = 60.0 + 90.0 * (1.0 - score)
+
+        entry = self._auto_microactions.get(action_type, {})
+        raw_signals: List[Mapping[str, Any]] = []
+        event_signals = event.get("signals")
+        if isinstance(event_signals, list):
+            raw_signals = list(event_signals)
+        elif isinstance(event_signals, tuple):
+            raw_signals = list(event_signals)
+        elif isinstance(event_signals, Mapping):
+            raw_signals = [dict(event_signals)]
+        requirements = list(event.get("requirements", []))
+        metadata = dict(event.get("metadata") or {})
+
+        entry.update(
+            {
+                "action_type": action_type,
+                "description": description,
+                "signals": raw_signals,
+                "requirements": requirements,
+                "metadata": metadata,
+                "priority": priority,
+                "score": score,
+                "alignment": alignment,
+                "cooldown": cooldown,
+                "payload": dict(entry.get("payload") or {}),
+            }
+        )
+        intent_payload = entry["payload"]
+        intent_payload.setdefault("origin", "auto_evolution")
+        intent_payload["description"] = description
+        intent_payload["signals"] = entry["signals"]
+        intent_payload["requirements"] = entry["requirements"]
+        if self_assessment:
+            entry["self_assessment"] = self_assessment
+            intent_payload["self_assessment"] = self_assessment
+        if event.get("skill_request"):
+            intent_payload["skill_request"] = event.get("skill_request")
+
+        entry.setdefault("last_enqueued", 0.0)
+        cache = self._auto_signal_cache.setdefault(action_type, {})
+        registry = self.auto_signal_registry or self.bound.get("auto_signals")
+        hints = metadata.get("keywords")
+
+        def _coalesce_signals(
+            seed: Sequence[Mapping[str, Any]],
+            derived: Sequence[Mapping[str, Any]],
+        ) -> List[Dict[str, Any]]:
+            merged: Dict[str, Dict[str, Any]] = {}
+
+            def add(candidate: Mapping[str, Any]) -> None:
+                if not isinstance(candidate, Mapping):
+                    return
+                name = str(candidate.get("name") or "").strip()
+                metric = str(candidate.get("metric") or name or "").strip()
+                if not metric:
+                    return
+                payload = dict(candidate)
+                if not name:
+                    payload.setdefault("name", f"{action_type}__{metric}")
+                payload.setdefault("metric", metric)
+                existing = merged.get(metric)
+                if existing is None:
+                    merged[metric] = payload
+                else:
+                    for key, value in payload.items():
+                        existing.setdefault(key, value)
+
+            for signal in seed:
+                add(signal)
+            for signal in derived:
+                add(signal)
+            return list(merged.values())
+
+        derived_signals: List[Mapping[str, Any]] = []
+        if registry is not None:
+            derived_signals = registry.derive(
+                action_type,
+                description,
+                requirements=requirements,
+                hints=hints,
+            )
+        else:
+            derived_signals = derive_signals_for_description(
+                action_type,
+                description,
+                requirements=requirements,
+                hints=hints,
+            )
+
+        entry["signals"] = _coalesce_signals(entry["signals"], derived_signals)
+
+        if registry is not None:
+            definitions = registry.register(
+                action_type,
+                entry.get("signals", []),
+                evaluation=evaluation,
+                blueprint=self_assessment,
+                description=description,
+                requirements=requirements,
+                hints=hints,
+            )
+            for definition in definitions:
+                observed = definition.to_observation()
+                if observed is not None:
+                    cache[definition.metric] = observed
+        entry["weight"] = entry.get("weight", 1.0 + 0.5 * len(entry["signals"]))
+        self._auto_microactions[action_type] = entry
+        self._auto_microaction_history.append(
+            {
+                "ts": _now(),
+                "action_type": action_type,
+                "score": score,
+                "priority": priority,
+            }
+        )
+
+    def record_signal_observation(
+        self, action_type: str, metrics: Mapping[str, Any]
+    ) -> None:
+        """Record observed metrics for an autonomous intention.
+
+        Modules that compute long-horizon signals (perception, reasoning,
+        emotions, etc.) can call this helper to update the latest values the
+        action interface should consider when shaping rewards.
+        """
+
+        if not action_type or not isinstance(metrics, Mapping):
+            return
+        cache = self._auto_signal_cache.setdefault(str(action_type), {})
+        registry = self.auto_signal_registry or self.bound.get("auto_signals")
+        if registry is not None:
+            observations = registry.bulk_record(
+                action_type,
+                metrics,
+                source="module",
+            )
+            for observation in observations:
+                value = observation.to_observation()
+                if value is not None:
+                    cache[observation.metric] = value
+            return
+
+        for key, value in metrics.items():
+            if not key:
+                continue
+            try:
+                cache[str(key)] = float(value)
+            except (TypeError, ValueError):
+                continue
+
+    def _select_auto_microaction(self, curiosity: float) -> Optional[Dict[str, Any]]:
+        if not self._auto_microactions:
+            return None
+        now = _now()
+        best_score = -1.0
+        best_entry: Optional[Dict[str, Any]] = None
+        for entry in self._auto_microactions.values():
+            cooldown = float(entry.get("cooldown", 120.0) or 120.0)
+            last = float(entry.get("last_enqueued", 0.0) or 0.0)
+            if now - last < cooldown:
+                continue
+            base = float(entry.get("score", 0.5))
+            weight = float(entry.get("weight", 1.0))
+            candidate_score = base * (1.0 + 0.3 * curiosity) + 0.05 * weight
+            if candidate_score > best_score:
+                best_score = candidate_score
+                best_entry = entry
+        return best_entry
 
     def _update_learning_signals(self, act: Action, reward: float) -> None:
         stats = self._get_action_stats(act.type)
@@ -1765,7 +1964,152 @@ class ActionInterface:
     def _shape_reward(self, act: Action) -> float:
         base = 0.6 if act.status == "done" else -0.5
         util = 0.2 if act.type in ("learn_concept", "reflect", "write_memory") else 0.0
-        return float(max(-1.0, min(1.0, base + util)))
+        reward = base + util
+
+        auto_bonus = self._auto_reward_bonus(act)
+        reward += auto_bonus
+
+        return float(max(-1.0, min(1.0, reward)))
+
+    # ------------------------------------------------------------------
+    def _auto_reward_bonus(self, act: Action) -> float:
+        entry = self._auto_microactions.get(act.type)
+        if not entry:
+            return 0.0
+        blueprint = entry.get("self_assessment")
+        if not blueprint:
+            signals = entry.get("signals")
+            if not signals:
+                return 0.0
+            checkpoints = []
+            for signal in signals:
+                if not isinstance(signal, Mapping):
+                    continue
+                metric = signal.get("metric")
+                name = signal.get("name") or metric
+                if not metric or not name:
+                    continue
+                checkpoints.append(
+                    {
+                        "signal": str(name),
+                        "metric": str(metric),
+                        "target": float(signal.get("target", 0.6) or 0.6),
+                        "direction": str(signal.get("direction", "above") or "above"),
+                        "weight": float(signal.get("weight", 1.0) or 1.0),
+                    }
+                )
+            if not checkpoints:
+                return 0.0
+            blueprint = {"checkpoints": checkpoints}
+
+        checkpoints = [cp for cp in blueprint.get("checkpoints", []) if isinstance(cp, Mapping)]
+        if not checkpoints:
+            return 0.0
+
+        observed = self._collect_signal_observations(act)
+        total_weight = 0.0
+        observed_weight = 0.0
+        weighted_delta = 0.0
+        for checkpoint in checkpoints:
+            try:
+                weight = max(0.1, float(checkpoint.get("weight", 1.0)))
+            except (TypeError, ValueError):
+                weight = 1.0
+            total_weight += weight
+            metric = str(checkpoint.get("metric") or checkpoint.get("signal") or "").strip()
+            if not metric:
+                continue
+            value = observed.get(metric)
+            if value is None:
+                # try fallback on raw signal name if metric differs
+                signal_key = str(checkpoint.get("signal") or "").strip()
+                if signal_key:
+                    value = observed.get(signal_key)
+            if value is None:
+                continue
+            observed_weight += weight
+            target = float(checkpoint.get("target", 0.6) or 0.6)
+            direction = str(checkpoint.get("direction", "above") or "above")
+            progress = self._progress_against_target(value, target, direction)
+            weighted_delta += weight * (progress - 0.5)
+
+        if total_weight <= 0.0:
+            return 0.0
+
+        if observed_weight <= 0.0:
+            # Penalise absence of instrumentation so the agent seeks signals
+            return -0.12
+
+        coverage = observed_weight / total_weight
+        normalized = weighted_delta / total_weight
+        bonus = max(-0.35, min(0.35, normalized * 0.7))
+        if coverage < 1.0:
+            bonus -= 0.05 * (1.0 - coverage)
+        return bonus
+
+    def _collect_signal_observations(self, act: Action) -> Dict[str, float]:
+        observed: Dict[str, float] = {}
+
+        def ingest(obj: Any) -> None:
+            if isinstance(obj, Mapping):
+                for key, value in obj.items():
+                    if key in {"signals", "metrics", "observations"}:
+                        ingest(value)
+                        continue
+                    if isinstance(value, Mapping):
+                        ingest(value)
+                    elif isinstance(value, (list, tuple, set)):
+                        ingest(value)
+                    else:
+                        try:
+                            observed[str(key)] = float(value)
+                        except (TypeError, ValueError):
+                            continue
+            elif isinstance(obj, (list, tuple, set)):
+                for item in obj:
+                    ingest(item)
+
+        if act.result:
+            ingest(act.result)
+        if act.payload:
+            ingest(act.payload)
+        if act.context:
+            ingest(act.context)
+
+        cached = self._auto_signal_cache.get(act.type)
+        if cached:
+            observed.update(cached)
+        registry = self.auto_signal_registry or self.bound.get("auto_signals")
+        if registry is not None:
+            observed.update(registry.get_observations(act.type))
+        return observed
+
+    def _progress_against_target(self, value: float, target: float, direction: str) -> float:
+        try:
+            val = float(value)
+        except (TypeError, ValueError):
+            return 0.5
+        try:
+            tgt = float(target)
+        except (TypeError, ValueError):
+            tgt = 0.6
+        direction = direction.lower()
+        if direction == "below":
+            if val <= tgt:
+                return 1.0
+            spread = max(1e-3, 1.0 - min(tgt, 0.99))
+            return max(0.0, min(1.0, 1.0 - (val - tgt) / spread))
+        if direction == "between":
+            lower = min(tgt, val)
+            upper = max(tgt, val)
+            midpoint = 0.5 * (lower + upper)
+            if midpoint == 0.0:
+                return 1.0
+            return max(0.0, min(1.0, 1.0 - abs(val - tgt) / max(midpoint, 1e-3)))
+        # default: value should be above target
+        if tgt <= 0:
+            return 1.0
+        return max(0.0, min(1.0, val / tgt))
 
     def _maybe_autonomous_microaction(self) -> None:
         emo = self.bound.get("emotions")
@@ -1773,6 +2117,18 @@ class ActionInterface:
         if emo and hasattr(emo, "get_emotional_modulators"):
             mods = emo.get_emotional_modulators() or {}
             curiosity = float(mods.get("curiosity_gain", 0.2)) + float(mods.get("exploration_rate", 0.15))
+        candidate = self._select_auto_microaction(curiosity)
+        if candidate is not None:
+            payload = dict(candidate.get("payload", {}))
+            context = {
+                "auto": True,
+                "source": "auto_evolution",
+                "intention": candidate.get("action_type"),
+            }
+            priority = float(candidate.get("priority", 0.55))
+            self.enqueue(candidate["action_type"], payload, priority=priority, context=context)
+            candidate["last_enqueued"] = _now()
+            return
         if curiosity > 0.25:
             if int(time.time()) % 2 == 0:
                 self.enqueue("reflect", {"trigger": "idle_reflection"}, priority=0.55, context={"auto": True})
