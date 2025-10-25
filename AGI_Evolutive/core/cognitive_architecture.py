@@ -1,6 +1,7 @@
 import json
 import datetime as dt
 import logging
+import os
 import re
 import time
 import unicodedata
@@ -52,6 +53,7 @@ from AGI_Evolutive.world_model import PhysicsEngine
 from AGI_Evolutive.self_improver import SelfImprover
 from AGI_Evolutive.self_improver.code_evolver import CodeEvolver
 from AGI_Evolutive.self_improver.promote import PromotionManager
+from AGI_Evolutive.self_improver.skill_acquisition import SkillSandboxManager
 from AGI_Evolutive.planning.htn import HTNPlanner
 from AGI_Evolutive.core.persistence import PersistenceManager
 from AGI_Evolutive.core.self_model import SelfModel
@@ -352,6 +354,21 @@ class CognitiveArchitecture:
             data_dir = "data"
         self.jobs = JobManager(self, data_dir=data_dir)
 
+        skill_storage = os.path.join(data_dir, "skills")
+        self.skill_sandbox = SkillSandboxManager(
+            storage_dir=skill_storage,
+            min_trials=3,
+            success_threshold=0.75,
+            approval_required=True,
+        )
+        self.skill_sandbox.bind(
+            memory=self.memory,
+            language=self.language,
+            simulator=self.simulator,
+            jobs=self.jobs,
+            arch=self,
+        )
+
         # Bind helper components
         self._bind_interfaces()
         self._bind_extractors()
@@ -400,6 +417,7 @@ class CognitiveArchitecture:
             language=self.language,
             simulator=self.simulator,
             jobs=self.jobs,
+            skills=self.skill_sandbox,
             perception=self.perception_interface,
         )
         self.perception_interface.bind(

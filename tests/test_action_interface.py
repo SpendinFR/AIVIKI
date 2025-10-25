@@ -8,6 +8,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from AGI_Evolutive.io.action_interface import Action, ActionInterface, CognitiveDomain
+from AGI_Evolutive.self_improver.skill_acquisition import SkillSandboxManager
 
 
 class _DummyMetacog:
@@ -102,3 +103,77 @@ def test_plan_step_handler_creates_record(tmp_path):
     assert record_path.exists()
     entries = [json.loads(line) for line in record_path.read_text(encoding="utf-8").splitlines()]
     assert entries[-1]["description"] == "Lister les ressources"
+
+
+class _MemoryStub:
+    def __init__(self):
+        self.records = []
+
+    def search(self, query, top_k=8):
+        return [
+            {"kind": "knowledge", "content": f"Info sur {query}", "importance": 0.8},
+            {"kind": "example", "content": f"Exemple pratique {query}"},
+        ]
+
+    def add_memory(self, payload):
+        self.records.append(payload)
+        return f"mem-{len(self.records)}"
+
+
+class _LanguageStub:
+    def reply(self, intent, data, pragmatic):
+        topic = data.get("topic", "action")
+        return f"Plan validé pour {topic}."
+
+
+def test_unknown_action_goes_through_skill_sandbox(tmp_path):
+    out_dir = tmp_path / "out"
+    interface = ActionInterface(
+        path_log=str(tmp_path / "actions.jsonl"),
+        output_dir=str(out_dir),
+    )
+
+    memory = _MemoryStub()
+    language = _LanguageStub()
+    skills = SkillSandboxManager(
+        storage_dir=str(tmp_path / "skills"),
+        min_trials=2,
+        success_threshold=0.4,
+        run_async=False,
+        approval_required=True,
+        training_interval=0.0,
+    )
+    skills.bind(memory=memory, language=language)
+
+    interface.bind(memory=memory, language=language, skills=skills)
+
+    act = Action(
+        id="skill-1",
+        type="perform_magic",
+        payload={"description": "Créer un tour de magie", "requirements": ["magie", "présentation"]},
+        priority=0.5,
+    )
+
+    first = skills.handle_simulation(act, interface)
+
+    assert first["ok"] is False
+    assert first["reason"] in {"skill_waiting_user_approval", "skill_training_in_progress"}
+
+    approve = interface.execute(
+        {
+            "type": "review_skill_candidate",
+            "payload": {
+                "action_type": "perform_magic",
+                "decision": "approve",
+                "reviewer": "tester",
+            },
+        }
+    )
+
+    assert approve["ok"] is True
+    assert approve["skill"]["status"] == "active"
+
+    second = interface.execute({"type": "perform_magic", "payload": {"audience": "demo"}})
+
+    assert second["ok"] is True
+    assert "summary" in second

@@ -1095,6 +1095,8 @@ class Orchestrator:
                 bind_kwargs["simulator"] = getattr(self.arch, "simulator", None)
             if bound.get("memory") is None and self._memory_store is not None:
                 bind_kwargs["memory"] = self._memory_store
+            if bound.get("skills") is None:
+                bind_kwargs["skills"] = getattr(self.arch, "skill_sandbox", None)
             if bound.get("jobs") is None and job_manager is not None:
                 bind_kwargs["jobs"] = job_manager
             if bind_kwargs.get("jobs") is job_manager or "jobs" not in bind_kwargs:
@@ -1111,6 +1113,7 @@ class Orchestrator:
                 language=getattr(self.arch, "language", None),
                 simulator=getattr(self.arch, "simulator", None),
                 jobs=job_manager,
+                skills=getattr(self.arch, "skill_sandbox", None),
                 job_bases=self._job_base_budgets,
             )
         self._perception_interface = PerceptionInterface(self._memory_store)

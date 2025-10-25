@@ -114,6 +114,7 @@ Commandes disponibles :
   /inbox       → liste les fichiers déposés dans ./inbox
   /save        → force une sauvegarde immédiate
   /state       → montre les infos d'état globales
+  /skillacquis [statut|oui/non <action>] → gère les compétences du bac à sable
   /quit        → quitte proprement
   q [channel]  → affiche toutes les questions en attente (channel=primary|immediate)
 Astuce : déposez vos fichiers (.txt, .md, .json, etc.) dans ./inbox/
@@ -578,6 +579,163 @@ def run_cli():
                 blocked = list(blocked_fn())
                 if blocked:
                     print("⛔ Blocage actif sur : " + ", ".join(blocked))
+            continue
+
+        elif msg_lower.startswith("/skillacquis"):
+            skills = getattr(arch, "skill_sandbox", None)
+            if not (skills and hasattr(skills, "list_skills")):
+                print("⚠️  Bac à sable de compétences indisponible.")
+                continue
+
+            parts = msg.strip().split()
+            yes_tokens = {"oui", "yes", "y", "approve", "ok", "daccord", "d'accord"}
+            no_tokens = {"non", "no", "n", "reject", "refus", "refuser"}
+
+            if len(parts) >= 3 and parts[1].lower() in yes_tokens.union(no_tokens):
+                decision_word = parts[1].lower()
+                decision = "approve" if decision_word in yes_tokens else "reject"
+                action_type = parts[2]
+                notes = " ".join(parts[3:]).strip()
+                interface = getattr(arch, "action_interface", None)
+                if not (interface and hasattr(interface, "execute")):
+                    print("⚠️  Interface d'action indisponible pour enregistrer la décision.")
+                    continue
+                payload = {
+                    "type": "review_skill_candidate",
+                    "payload": {
+                        "action_type": action_type,
+                        "decision": decision,
+                        "reviewer": "cli",
+                    },
+                    "context": {"user": "cli"},
+                }
+                if notes:
+                    payload["payload"]["notes"] = notes
+                result = interface.execute(payload)
+                if result.get("ok"):
+                    skill_payload = result.get("skill") or {}
+                    status = skill_payload.get("status") or result.get("status") or decision
+                    print(f"✅ Décision enregistrée pour {action_type} → {status}")
+                else:
+                    reason = result.get("reason") or result.get("error") or "erreur inconnue"
+                    print(f"⚠️  Impossible de traiter la décision : {reason}")
+                continue
+
+            if len(parts) == 2 and parts[1].lower() in yes_tokens.union(no_tokens):
+                print("ℹ️  Syntaxe : /skillacquis oui|non <action_type> [notes]")
+                continue
+
+            status_aliases = {
+                "attente": "awaiting_approval",
+                "approval": "awaiting_approval",
+                "awaiting": "awaiting_approval",
+                "pending": "pending",
+                "entrainement": "training",
+                "entraînement": "training",
+                "training": "training",
+                "active": "active",
+                "actives": "active",
+                "actif": "active",
+                "acquises": "active",
+                "échec": "failed",
+                "echec": "failed",
+                "failed": "failed",
+                "rejetées": "rejected",
+                "rejetee": "rejected",
+                "rejete": "rejected",
+                "rejected": "rejected",
+            }
+
+            label_map = {
+                "awaiting_approval": "🕒 Compétences en attente d'approbation",
+                "training": "🔁 Compétences en entraînement",
+                "pending": "📝 Compétences nouvellement demandées",
+                "failed": "⚠️  Compétences en échec",
+                "rejected": "🚫 Compétences rejetées",
+                "active": "✅ Compétences actives",
+            }
+
+            status_filter = None
+            if len(parts) >= 2:
+                token = parts[1].lower()
+                if token in status_aliases:
+                    status_filter = status_aliases[token]
+                elif token in {"all", "tout", "toutes", "*"}:
+                    status_filter = None
+                else:
+                    print("ℹ️  Utilise /skillacquis [attente|active|failed|all] ou /skillacquis oui/non <action>.")
+                    continue
+
+            def _print_entries(entries, header, show_trials=False):
+                if not entries:
+                    return False
+                print(f"\n{header} ({len(entries)}) :")
+                for item in entries:
+                    action_type = item.get("action_type")
+                    status = item.get("status")
+                    success_rate = item.get("success_rate") or 0.0
+                    attempts = item.get("attempts", 0)
+                    requirements = ", ".join(item.get("requirements", [])[:4]) or "(aucune)"
+                    created_ts = item.get("created_at") or 0.0
+                    try:
+                        created_dt = datetime.fromtimestamp(created_ts)
+                        created_text = created_dt.strftime("%Y-%m-%d %H:%M")
+                    except Exception:
+                        created_text = "n/a"
+                    line = (
+                        f"  - {action_type} · statut={status} · succès={success_rate:.2f} · "
+                        f"essais={attempts} · créé={created_text}"
+                    )
+                    print(line)
+                    print(f"      exigences: {requirements}")
+                    if show_trials:
+                        trials = item.get("trials", [])
+                        if trials:
+                            best_cov = max(float(t.get("coverage", 0.0)) for t in trials)
+                            successes = sum(1 for t in trials if t.get("success"))
+                            print(
+                                f"      essais réussis: {successes}/{len(trials)} (couverture max {best_cov:.2f})"
+                            )
+                            for trial in trials:
+                                summary = (trial.get("summary") or "").strip()
+                                if not summary:
+                                    continue
+                                first_line = summary.splitlines()[0].strip()
+                                if len(first_line) > 110:
+                                    first_line = first_line[:107] + "..."
+                                mode = trial.get("mode") or "essai"
+                                print(
+                                    f"        • essai {trial.get('index', '?')} [{mode}] → {first_line}"
+                                )
+                return True
+
+            if status_filter is not None:
+                entries = skills.list_skills(status=status_filter, include_trials=True)
+                header = label_map.get(status_filter, status_filter)
+                if not _print_entries(entries, header, show_trials=True):
+                    print(f"ℹ️  Aucune compétence pour le statut '{header}'.")
+                elif status_filter == "awaiting_approval":
+                    print("\n🤖 Utilise /skillacquis oui|non <action_type> pour décider.")
+                continue
+
+            shown = False
+            for code in [
+                "awaiting_approval",
+                "training",
+                "pending",
+                "failed",
+                "rejected",
+                "active",
+            ]:
+                entries = skills.list_skills(status=code, include_trials=(code == "awaiting_approval"))
+                header = label_map.get(code, code)
+                printed = _print_entries(entries, header, show_trials=(code == "awaiting_approval"))
+                shown = shown or printed
+
+            if not shown:
+                print("ℹ️  Aucune compétence suivie pour le moment.")
+            else:
+                print("\n🤖 Utilise /skillacquis oui|non <action_type> pour approuver ou refuser une compétence.")
             continue
 
         elif msg == "/inbox":
