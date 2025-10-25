@@ -3,11 +3,12 @@
 # Aucune dépendance externe (stdlib uniquement). Logs lisibles dans ./logs/autonomy.log
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 from collections import deque, defaultdict
 import os, time, uuid, json, threading, random, math
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.autonomy.auto_signals import AutoSignalRegistry, AutoSignal
 
 # --------- Structures ---------
 
@@ -253,6 +254,7 @@ class AutonomyManager:
         self._lock = threading.Lock()
         self.metric_states: Dict[str, MetricLearningState] = {}
         self.weight_learner = OnlineWeightLearner()
+        self.auto_evolution_stream: deque[Dict[str, Any]] = deque(maxlen=120)
 
         # Journal
         self.log_dir = "./logs"
@@ -449,6 +451,48 @@ class AutonomyManager:
             self._log(f"📌 Objectif poussé vers GoalSystem: {item.title}")
 
     # ---------- Utilitaires d'agenda ----------
+
+    def on_auto_intention_promoted(
+        self,
+        event: Mapping[str, Any],
+        evaluation: Optional[Mapping[str, Any]] = None,
+        self_assessment: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        if not isinstance(event, Mapping):
+            return
+        action_type = str(event.get("action_type") or "").strip()
+        if not action_type:
+            return
+        description = str(event.get("description") or action_type)
+        score = float((evaluation or {}).get("score", (evaluation or {}).get("significance", 0.6) or 0.6))
+        priority = min(0.98, 0.55 + 0.35 * score)
+        payload = {
+            "action": "auto_evolution_followup",
+            "action_type": action_type,
+            "signals": list(event.get("signals", [])),
+            "requirements": list(event.get("requirements", [])),
+            "metadata": dict(event.get("metadata") or {}),
+        }
+        if self_assessment:
+            payload["checkpoints"] = list(self_assessment.get("checkpoints", []))
+        plan = {
+            "title": f"Orchestrer l'intention « {description[:60]} »",
+            "kind": "alignment",
+            "priority": priority,
+            "rationale": "Auto-évolution: coordination inter-modules et suivi des signaux.",
+            "payload": payload,
+            "dedupe_key": f"auto::{action_type}",
+        }
+        if self._push_if_new(plan):
+            self.auto_evolution_stream.append(
+                {
+                    "ts": time.time(),
+                    "action_type": action_type,
+                    "priority": priority,
+                    "score": score,
+                }
+            )
+            self._log(f"🧠 Auto-évolution: ajout de la tâche '{description[:60]}' dans l'agenda")
 
     def _push_if_new(self, p: Dict[str, Any]) -> bool:
         """Ajoute un item si pas de doublon récent (dedupe_key)."""
@@ -656,4 +700,4 @@ class AutonomyManager:
 
 from .core import AutonomyCore
 
-__all__ = ["AutonomyCore"]
+__all__ = ["AutonomyCore", "AutoSignalRegistry", "AutoSignal"]

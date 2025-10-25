@@ -7,7 +7,7 @@ import time
 import uuid
 import weakref
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
 
@@ -234,6 +234,93 @@ class SkillSandboxManager:
             self.arch_ref = weakref.ref(arch)
         if interface is not None:
             self.interface_ref = weakref.ref(interface)
+
+    # ------------------------------------------------------------------
+    def register_intention(
+        self,
+        *,
+        action_type: str,
+        description: str,
+        payload: Optional[Dict[str, Any]] = None,
+        requirements: Optional[Sequence[str]] = None,
+        knowledge: Optional[Sequence[Mapping[str, Any]]] = None,
+        approval_required: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """Expose an explicit way to register a new autonomous skill intention.
+
+        This mirrors :meth:`_ensure_request` but allows other modules (meta-
+        cognition, evolution manager, etc.) to declaratively seed new skills
+        without going through the ActionInterface first.  The method is fully
+        idempotent: calling it repeatedly with the same ``action_type`` updates
+        the stored request with merged requirements/payload.
+        """
+
+        if not action_type:
+            raise ValueError("action_type must be provided")
+        action_key = str(action_type).strip()
+        if not action_key:
+            raise ValueError("action_type must not be empty")
+
+        description_text = description.strip() if description else action_key.replace("_", " ")
+        payload_map = dict(payload or {})
+
+        with self._lock:
+            request = self._requests.get(action_key)
+            if request is None:
+                request = SkillRequest(
+                    identifier=str(uuid.uuid4()),
+                    action_type=action_key,
+                    description=description_text,
+                    payload=dict(payload_map),
+                    created_at=_now(),
+                    status="pending",
+                    approval_required=self.approval_required_default
+                    if approval_required is None
+                    else bool(approval_required),
+                )
+                request.requirements = self._extract_requirements(request)
+                self._requests[action_key] = request
+                self._memorise_event(
+                    "skill_intention_registered",
+                    {
+                        "action_type": action_key,
+                        "description": description_text,
+                        "requirements": list(request.requirements),
+                    },
+                )
+            else:
+                if description_text and description_text != request.description:
+                    request.description = description_text
+                if approval_required is not None:
+                    request.approval_required = bool(approval_required)
+                if payload_map:
+                    try:
+                        request.payload.update(payload_map)
+                    except Exception:
+                        request.payload = dict(payload_map)
+
+            if requirements:
+                merged = list(dict.fromkeys(list(request.requirements) + [str(r) for r in requirements if r]))
+                request.requirements = merged[:20]
+            else:
+                request.requirements = self._extract_requirements(request)
+
+            if knowledge:
+                existing = list(request.knowledge)
+                for item in knowledge:
+                    try:
+                        existing.append(dict(item))
+                    except Exception:
+                        continue
+                request.knowledge = existing[:20]
+
+            self._save_state_locked()
+
+        # Trigger training asynchronously if needed
+        if request.status in {"pending", "failed"}:
+            self._ensure_training(action_key)
+
+        return request.public_view()
 
     # ------------------------------------------------------------------
     # Public API used by ActionInterface

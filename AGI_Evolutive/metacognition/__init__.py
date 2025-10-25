@@ -7,7 +7,7 @@ Capacité à réfléchir sur ses propres processus de pensée, à se comprendre 
 import numpy as np
 import time
 from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional, Tuple, Set, Callable
+from typing import Dict, List, Any, Optional, Tuple, Set, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 import threading
@@ -15,6 +15,7 @@ from collections import defaultdict, deque
 import math
 import json
 import inspect
+import re
 
 from AGI_Evolutive.cognition.meta_cognition import OnlineLinear
 
@@ -1562,7 +1563,205 @@ class MetacognitiveSystem:
         reflection_thread = threading.Thread(target=periodic_reflection_loop, daemon=True)
         reflection_thread.start()
         self.monitoring_threads["periodic_reflection"] = reflection_thread
-    
+
+    # ------------------------------------------------------------------
+    # Auto-intention & auto-évolution hooks
+    def evaluate_auto_intention(self, intention: Mapping[str, Any]) -> Dict[str, Any]:
+        """Score et décide si une intention autonome doit être promue."""
+
+        if not isinstance(intention, Mapping):
+            return {"accepted": False, "reason": "invalid_intention"}
+
+        description = str(intention.get("description") or intention.get("label") or "").strip()
+        if not description:
+            return {"accepted": False, "reason": "empty_description"}
+
+        signals = intention.get("signals") if isinstance(intention.get("signals"), list) else []
+        requirements = intention.get("requirements") if isinstance(intention.get("requirements"), (list, tuple, set)) else []
+        metadata = intention.get("metadata") if isinstance(intention.get("metadata"), Mapping) else {}
+        tags = metadata.get("tags") if isinstance(metadata.get("tags"), (list, tuple, set)) else []
+
+        significance = self._score_auto_intention_significance(description, signals, requirements)
+        alignment = self._estimate_intention_alignment(description, tags)
+        emotional_drive = self._estimate_emotional_drive(intention.get("source_emotion"))
+
+        combined = 0.4 * significance + 0.4 * alignment + 0.2 * emotional_drive
+        combined = _clip(combined)
+        accepted = combined >= 0.45
+
+        result = {
+            "accepted": accepted,
+            "significance": significance,
+            "alignment": alignment,
+            "emotional_drive": emotional_drive,
+            "score": combined,
+        }
+
+        if accepted:
+            timestamp = time.time()
+            history_entry = {
+                "ts": timestamp,
+                "description": description,
+                "score": combined,
+                "significance": significance,
+                "alignment": alignment,
+                "emotional_drive": emotional_drive,
+                "action_type": intention.get("action_type"),
+            }
+            self.metacognitive_history["self_improvements"].append(history_entry)
+
+            domain = CognitiveDomain.SOCIAL if "social" in str(intention.get("source", "")).lower() else CognitiveDomain.REASONING
+            event = MetacognitiveEvent(
+                timestamp=timestamp,
+                event_type="auto_intention",
+                domain=domain,
+                description=description[:280],
+                significance=combined,
+                confidence=alignment,
+                emotional_valence=emotional_drive,
+                cognitive_load=0.4,
+            )
+            self.metacognitive_history["events"].append(event)
+
+            if self.logger:
+                try:
+                    self.logger.write(
+                        "metacog.auto_intention",
+                        intention=intention,
+                        evaluation=result,
+                    )
+                except Exception:
+                    pass
+
+        return result
+
+    def plan_auto_intention_followup(
+        self,
+        intention: Mapping[str, Any],
+        evaluation: Mapping[str, Any],
+        signals: Sequence[Mapping[str, Any]],
+        self_assessment: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        """Planifie le suivi métacognitif et les checkpoints de mesure."""
+
+        if not isinstance(intention, Mapping):
+            return
+
+        scheduled = self.reflection_engine.setdefault("scheduled_reflections", [])
+        if isinstance(scheduled, list):
+            plan = {
+                "ts": time.time(),
+                "type": "auto_intention_followup",
+                "action_type": intention.get("action_type"),
+                "description": intention.get("description"),
+                "evaluation": dict(evaluation),
+                "signals": list(signals),
+            }
+            if self_assessment:
+                plan["self_assessment"] = self_assessment
+            scheduled.append(plan)
+
+        tracking = self.cognitive_monitoring.get("performance_tracking")
+        if isinstance(tracking, dict):
+            for signal in signals:
+                if not isinstance(signal, Mapping):
+                    continue
+                name = signal.get("name")
+                if not name:
+                    continue
+                metric_log = tracking.setdefault(name, [])
+                metric_log.append(
+                    {
+                        "timestamp": time.time(),
+                        "metric": signal.get("metric"),
+                        "target": signal.get("target"),
+                        "direction": signal.get("direction", "above"),
+                        "score": float(evaluation.get("score", evaluation.get("significance", 0.6))),
+                    }
+                )
+                if len(metric_log) > 30:
+                    del metric_log[0 : len(metric_log) - 30]
+
+    def _extract_keywords(self, *chunks: Any) -> Set[str]:
+        words: Set[str] = set()
+        for chunk in chunks:
+            if chunk is None:
+                continue
+            if isinstance(chunk, (list, tuple, set)):
+                for item in chunk:
+                    words.update(self._extract_keywords(item))
+                continue
+            text = str(chunk).lower()
+            for token in re.findall(r"[\w']+", text):
+                if len(token) >= 4:
+                    words.add(token)
+        return words
+
+    def _score_auto_intention_significance(
+        self,
+        description: str,
+        signals: Sequence[Any],
+        requirements: Sequence[Any],
+    ) -> float:
+        length_bonus = min(0.3, 0.01 * len(description.split()))
+        signal_bonus = 0.06 * min(len(signals), 5)
+        requirement_bonus = 0.03 * min(len(requirements), 10)
+        base = 0.35 + length_bonus + signal_bonus + requirement_bonus
+        return _clip(base)
+
+    def _estimate_intention_alignment(self, description: str, tags: Sequence[Any]) -> float:
+        keywords = self._extract_keywords(description, tags)
+        score = 0.4
+
+        # Alignment with persistent self model if available
+        identity = {}
+        core_self = getattr(self.cognitive_architecture, "self_model", None)
+        if core_self is not None:
+            try:
+                identity = getattr(core_self, "identity", {}) or getattr(core_self, "state", {}).get("identity", {})
+            except Exception:
+                identity = {}
+
+        values: List[str] = []
+        if isinstance(identity, dict):
+            values_section = identity.get("values")
+            if isinstance(values_section, list):
+                values.extend([str(v) for v in values_section])
+            elif isinstance(values_section, dict):
+                values.extend([str(k) for k in values_section.keys()])
+            purpose = identity.get("purpose")
+            if isinstance(purpose, dict):
+                for key in ("near_term_goals", "ultimate"):
+                    val = purpose.get(key)
+                    if isinstance(val, list):
+                        values.extend([str(v) for v in val])
+                    elif isinstance(val, str):
+                        values.append(val)
+
+        matches = 0
+        for value in values:
+            if keywords.intersection(self._extract_keywords(value)):
+                matches += 1
+        score += 0.1 * min(matches, 4)
+
+        if isinstance(getattr(self.self_model, "cognitive_styles", None), dict):
+            styles = " ".join(self.self_model.cognitive_styles.keys())
+            if keywords.intersection(self._extract_keywords(styles)):
+                score += 0.05
+
+        return _clip(score)
+
+    def _estimate_emotional_drive(self, signal: Optional[Mapping[str, Any]]) -> float:
+        if not isinstance(signal, Mapping):
+            return 0.4
+        intensity = float(signal.get("intensity", 0.0) or 0.0)
+        valence = float(signal.get("valence", 0.0) or 0.0)
+        tension = float(signal.get("tension", 0.0) or 0.0)
+        score = 0.4 + 0.4 * max(0.0, intensity) + 0.2 * max(0.0, valence)
+        if tension > 0.6:
+            score *= 0.85
+        return _clip(score)
+
     def stop_metacognitive_system(self):
         """Arrête le système métacognitif"""
         self.running = False

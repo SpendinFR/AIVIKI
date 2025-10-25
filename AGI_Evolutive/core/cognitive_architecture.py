@@ -7,9 +7,11 @@ import time
 import unicodedata
 from collections import deque
 from copy import deepcopy
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Tuple
 
 from AGI_Evolutive.autonomy import AutonomyManager
+from AGI_Evolutive.autonomy.auto_evolution import AutoEvolutionCoordinator
+from AGI_Evolutive.autonomy.auto_signals import AutoSignalRegistry
 from AGI_Evolutive.beliefs.graph import BeliefGraph, Evidence
 from AGI_Evolutive.knowledge.ontology_facade import EntityLinker, Ontology
 from AGI_Evolutive.cognition.evolution_manager import EvolutionManager
@@ -231,6 +233,7 @@ class CognitiveArchitecture:
         self.episodic_linker = EpisodicLinker(self.memory)
 
         self.action_interface = ActionInterface()
+        self.auto_signals = AutoSignalRegistry()
         self.perception_interface = PerceptionInterface()
 
         # Advanced subsystems
@@ -391,6 +394,26 @@ class CognitiveArchitecture:
             self.scheduler = Scheduler(self, data_dir="data")
             self.scheduler.start()
 
+        # Auto evolution orchestrator (runs even if scheduler disabled)
+        mechanism_store = getattr(self, "mechanism_store", None)
+        auto_modules = self._auto_evolution_targets()
+        self.auto_evolution = AutoEvolutionCoordinator(
+            memory=self.memory,
+            metacog=self.metacognition,
+            skill_sandbox=self.skill_sandbox,
+            evolution_manager=self.evolution,
+            mechanism_store=mechanism_store,
+            self_improver=self.self_improver,
+            goals=self.goals,
+            emotions=self.emotions,
+            modules=auto_modules,
+            signal_registry=self.auto_signals,
+        )
+        try:
+            self.auto_evolution.install()
+        except Exception:
+            logger.exception("Échec du démarrage de l'AutoEvolutionCoordinator")
+
         self.telemetry.log("ready", "core", {"status": "initialized"})
         self._cycle_counter = 0
         self._decay_period = 8
@@ -402,6 +425,44 @@ class CognitiveArchitecture:
                 "scheduler_actif": bool(self.scheduler),
             },
         )
+
+    # ------------------------------------------------------------------
+    def _auto_evolution_targets(self) -> List[Any]:
+        candidates: List[Any] = [
+            self,
+            getattr(self, "autonomy", None),
+            getattr(self, "action_interface", None),
+            getattr(self, "perception", None),
+            getattr(self, "perception_interface", None),
+            getattr(self, "reasoning", None),
+            getattr(self, "language", None),
+            getattr(self, "learning", None),
+            getattr(self, "emotions", None),
+            getattr(self, "creativity", None),
+            getattr(self, "goals", None),
+            getattr(self, "memory", None),
+            getattr(self, "metacognition", None),
+            getattr(self, "evolution", None),
+            getattr(self, "reward_engine", None),
+            getattr(self, "planner", None),
+            getattr(self, "simulator", None),
+            getattr(self, "self_improver", None),
+            getattr(self, "world_model", None),
+        ]
+        extras = getattr(self, "auto_evolution_receivers", None)
+        if isinstance(extras, (list, tuple, set)):
+            candidates.extend(extras)
+        seen: Set[int] = set()
+        filtered: List[Any] = []
+        for module in candidates:
+            if module is None:
+                continue
+            identity = id(module)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            filtered.append(module)
+        return filtered
 
     # ------------------------------------------------------------------
     # Helpers
@@ -419,14 +480,38 @@ class CognitiveArchitecture:
             jobs=self.jobs,
             skills=self.skill_sandbox,
             perception=self.perception_interface,
+            auto_signals=self.auto_signals,
         )
-        self.perception_interface.bind(
-            arch=self,
-            memory=self.memory,
-            metacog=self.metacognition,
-            emotions=self.emotions,
-            language=self.language,
-        )
+
+    # ------------------------------------------------------------------
+    def on_auto_intention_promoted(
+        self,
+        event: Mapping[str, Any],
+        evaluation: Optional[Mapping[str, Any]] = None,
+        self_assessment: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        if not isinstance(event, Mapping):
+            return
+        summary = {
+            "action_type": event.get("action_type"),
+            "score": (evaluation or {}).get("score"),
+            "significance": (evaluation or {}).get("significance"),
+            "alignment": (evaluation or {}).get("alignment"),
+        }
+        try:
+            self.telemetry.log("auto_evolution", "intent_promoted", summary)
+        except Exception:
+            pass
+        try:
+            if self.logger:
+                self.logger.write(
+                    "auto_evolution.intent",
+                    event=event,
+                    evaluation=evaluation,
+                    self_assessment=self_assessment,
+                )
+        except Exception:
+            pass
 
     def _bind_extractors(self) -> None:
         self.concept_extractor.bind(

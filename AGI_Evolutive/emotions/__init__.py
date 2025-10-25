@@ -7,7 +7,7 @@ Système Émotionnel Avancé de l'AGI Évolutive
 import numpy as np
 import time
 from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional, Tuple, Set, Callable
+from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 import threading
@@ -449,6 +449,7 @@ class EmotionalSystem:
             "learning_episodes": deque(maxlen=300),
             "drift_events": deque(maxlen=200)
         }
+        self.auto_affective_traces: deque = deque(maxlen=150)
 
         # === PARAMÈTRES DE FONCTIONNEMENT ===
         self.operational_parameters = {
@@ -496,7 +497,41 @@ class EmotionalSystem:
 
     def register_emotion_event(self, kind, **kw):
         self.engine.register_event(kind, **kw)
-    
+
+    def on_auto_intention_promoted(
+        self,
+        event: Mapping[str, Any],
+        evaluation: Optional[Mapping[str, Any]] = None,
+        self_assessment: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        if not isinstance(event, Mapping):
+            return
+        keywords = {str(k).lower() for k in event.get("keywords", []) if k}
+        significance = float((evaluation or {}).get("significance", 0.5) or 0.5)
+        if keywords.intersection({"empathy", "relation", "relationship", "care"}):
+            self.emotional_learning["empathy_capacity"] = min(
+                1.0, self.emotional_learning.get("empathy_capacity", 0.4) + 0.05 * significance
+            )
+        if keywords.intersection({"trust", "bond", "connection"}):
+            self.emotional_repertoire.setdefault("emotional_triggers", {})
+            self.emotional_repertoire["emotional_triggers"]["auto_relation"] = {
+                "keywords": list(keywords),
+                "weight": 0.3 + 0.4 * significance,
+            }
+        trace = {
+            "ts": time.time(),
+            "action_type": event.get("action_type"),
+            "valence": self.affective_dimensions["valence_energy"].get("valence", 0.0),
+            "score": (evaluation or {}).get("score"),
+        }
+        self.auto_affective_traces.append(trace)
+        if self_assessment and isinstance(self_assessment, Mapping):
+            reward_hint = float(self_assessment.get("composite_target", 0.6) or 0.6)
+            self.affective_dimensions["valence_energy"]["valence"] = max(
+                -1.0,
+                min(1.0, self.affective_dimensions["valence_energy"].get("valence", 0.0) + 0.1 * (reward_hint - 0.5)),
+            )
+
     def _initialize_emotional_system(self):
         """Initialise le système émotionnel avec des capacités de base"""
 
