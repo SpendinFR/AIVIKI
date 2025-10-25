@@ -2050,6 +2050,19 @@ class ActionInterface:
     def _collect_signal_observations(self, act: Action) -> Dict[str, float]:
         observed: Dict[str, float] = {}
 
+        cached = self._auto_signal_cache.get(act.type)
+        if isinstance(cached, Mapping):
+            observed.update(cached)
+
+        registry = self.auto_signal_registry or self.bound.get("auto_signals")
+        if registry is not None:
+            try:
+                registry_observed = registry.get_observations(act.type)
+            except AttributeError:
+                registry_observed = None
+            if isinstance(registry_observed, Mapping):
+                observed.update(registry_observed)
+
         def ingest(obj: Any) -> None:
             if isinstance(obj, Mapping):
                 for key, value in obj.items():
@@ -2075,13 +2088,6 @@ class ActionInterface:
             ingest(act.payload)
         if act.context:
             ingest(act.context)
-
-        cached = self._auto_signal_cache.get(act.type)
-        if cached:
-            observed.update(cached)
-        registry = self.auto_signal_registry or self.bound.get("auto_signals")
-        if registry is not None:
-            observed.update(registry.get_observations(act.type))
         return observed
 
     def _progress_against_target(self, value: float, target: float, direction: str) -> float:
