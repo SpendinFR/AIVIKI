@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import random
@@ -9,9 +10,15 @@ from dataclasses import dataclass, field
 from statistics import mean, pstdev
 from typing import Any, Callable, Dict, List, Tuple
 
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
 from .metrics import aggregate_metrics
 
 ArchFactory = Callable[[Dict[str, Any]], Any]
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -517,6 +524,34 @@ class SandboxRunner:
         })
         return report
 
+    def _llm_eval_analysis(
+        self,
+        *,
+        overall_metrics: Dict[str, float],
+        curriculum: List[Dict[str, Any]],
+        mutation: Dict[str, Any],
+        security: Dict[str, Any],
+        sample_count: int,
+    ) -> Dict[str, Any]:
+        payload = {
+            "sample_count": sample_count,
+            "overall_metrics": overall_metrics,
+            "curriculum_report": curriculum,
+            "mutation_testing": mutation,
+            "security_audit": security,
+        }
+        response = try_call_llm_dict(
+            "sandbox_eval_insights",
+            input_payload=json_sanitize(payload),
+            logger=logger,
+        )
+        if not response:
+            return {}
+        try:
+            return json_sanitize(dict(response))
+        except Exception:
+            return json_sanitize(response)
+
     def run_all(self, overrides: Dict[str, Any]) -> Dict[str, Any]:
         arch = self.arch_factory(overrides)
         try:
@@ -544,12 +579,23 @@ class SandboxRunner:
         mutation = self._run_mutation_tests(arch, abduct_scores)
         security = self._run_security_suite(arch)
 
+        overall_metrics = aggregate_metrics(acc_samples)
+        llm_analysis = self._llm_eval_analysis(
+            overall_metrics=overall_metrics,
+            curriculum=curriculum,
+            mutation=mutation,
+            security=security,
+            sample_count=len(acc_samples),
+        )
+
         return {
             "samples": acc_samples,
             "scores": acc_scores,
+            "overall_metrics": overall_metrics,
             "curriculum": curriculum,
             "mutation_testing": mutation,
             "security": security,
+            "analysis": llm_analysis,
         }
 
     def run_canary(

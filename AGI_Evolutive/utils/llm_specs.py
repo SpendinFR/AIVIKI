@@ -447,6 +447,26 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         },
     ),
     _spec(
+        "sandbox_eval_insights",
+        "AGI_Evolutive/self_improver/sandbox.py",
+        "Analyse le rapport d'évaluation du sandbox et propose des axes d'amélioration.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Signale les risques critiques et des actions concrètes.",
+            "Si aucune action urgente n'est nécessaire, indique-le explicitement.",
+        ),
+        example_output={
+            "summary": "Performance stable mais marge de progression sur la robustesse.",
+            "risk_level": "modéré",
+            "recommended_actions": [
+                "Renforcer l'entraînement sur les scénarios adversariaux.",
+                "Ajuster la surveillance sécurité suite au score de 0.3.",
+            ],
+            "curriculum_adjustment": "Conserver le niveau actuel tout en ajoutant 2 cas difficiles.",
+            "notes": "",
+        },
+    ),
+    _spec(
         "runtime_analytics",
         "AGI_Evolutive/runtime/analytics.py",
         "Interprète un lot d'événements runtime et produit un diagnostic.",
