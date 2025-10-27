@@ -21,6 +21,8 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
 
 class Stage(Enum):
     PERCEIVE = auto()
@@ -194,14 +196,18 @@ class PolicySelection:
     family: str
     reason: str
     descriptor: PipelineDescriptor
+    llm_meta: Optional[Dict[str, Any]] = None
 
     def as_dict(self) -> Dict[str, Any]:
-        return {
+        payload = {
             "pipeline": self.name,
             "family": self.family,
             "reason": self.reason,
             "metadata": dict(self.descriptor.metadata),
         }
+        if self.llm_meta:
+            payload["llm"] = self.llm_meta
+        return payload
 
 
 class PipelinePolicy:
@@ -214,11 +220,68 @@ class PipelinePolicy:
         for family in self._families.values():
             family.sort(key=lambda d: d.priority)
 
+    def _llm_refine_selection(self, selection: PolicySelection, ctx: Dict[str, Any]) -> PolicySelection:
+        payload = {
+            "family": selection.family,
+            "candidate": {
+                "name": selection.name,
+                "reason": selection.reason,
+                "metadata": selection.descriptor.metadata,
+            },
+            "context": ctx,
+            "candidates": [
+                {
+                    "name": desc.name,
+                    "priority": desc.priority,
+                    "condition": desc.condition,
+                    "description": desc.description,
+                }
+                for desc in self._families.get(selection.family, [])
+            ],
+        }
+        response = try_call_llm_dict(
+            "cognition_pipelines_registry",
+            input_payload=payload,
+            logger=getattr(self, "_logger", None),
+        )
+        if not isinstance(response, dict):
+            return selection
+
+        descriptor = selection.descriptor
+        reason = selection.reason
+        target_name = response.get("pipeline")
+        if isinstance(target_name, str):
+            for desc in self._families.get(selection.family, []):
+                if desc.name == target_name:
+                    descriptor = desc
+                    reason = response.get("reason", desc.description or reason)
+                    break
+        elif isinstance(response.get("reason"), str) and response["reason"].strip():
+            reason = response["reason"].strip()
+
+        meta: Dict[str, Any] = {"llm": response}
+        if isinstance(response.get("notes"), str) and response["notes"].strip():
+            meta["notes"] = response["notes"].strip()
+        if "confidence" in response:
+            try:
+                meta["confidence"] = max(0.0, min(1.0, float(response["confidence"])))
+            except (TypeError, ValueError):
+                pass
+        if isinstance(response.get("actions"), list):
+            meta["actions"] = [str(a) for a in response["actions"] if str(a).strip()][:5]
+
+        return PolicySelection(
+            name=descriptor.name,
+            family=selection.family,
+            reason=reason,
+            descriptor=descriptor,
+            llm_meta=meta,
+        )
+
     def select(self, family_name: str, ctx: Dict[str, Any]) -> PolicySelection:
         candidates = self._families.get(family_name)
         fallback: Optional[PipelineDescriptor] = None
         if not candidates:
-            # Unknown family: fallback to whatever pipeline matches the name
             desc = PipelineDescriptor(
                 name=family_name,
                 family=family_name,
@@ -226,7 +289,13 @@ class PipelinePolicy:
                 priority=100,
                 description="direct",
             )
-            return PolicySelection(name=family_name, family=family_name, reason="direct", descriptor=desc)
+            selection = PolicySelection(
+                name=family_name,
+                family=family_name,
+                reason="direct",
+                descriptor=desc,
+            )
+            return self._llm_refine_selection(selection, ctx)
 
         for desc in candidates:
             if desc.condition is None and fallback is None:
@@ -235,12 +304,24 @@ class PipelinePolicy:
                 continue
             if evaluate_condition(desc.condition, ctx):
                 reason = desc.description or "condition_matched"
-                return PolicySelection(name=desc.name, family=desc.family, reason=reason, descriptor=desc)
+                selection = PolicySelection(
+                    name=desc.name,
+                    family=desc.family,
+                    reason=reason,
+                    descriptor=desc,
+                )
+                return self._llm_refine_selection(selection, ctx)
 
         if fallback is None:
             fallback = candidates[0]
         reason = fallback.description or "default"
-        return PolicySelection(name=fallback.name, family=fallback.family, reason=reason, descriptor=fallback)
+        selection = PolicySelection(
+            name=fallback.name,
+            family=fallback.family,
+            reason=reason,
+            descriptor=fallback,
+        )
+        return self._llm_refine_selection(selection, ctx)
 
 
 # --- default pipelines ----------------------------------------------------

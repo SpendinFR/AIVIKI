@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import random
@@ -8,7 +9,9 @@ import re
 import time
 import unicodedata
 from collections import defaultdict, deque
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Tuple
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 Number = float
 
@@ -249,6 +252,7 @@ class GoalPrioritizer:
 
     def __init__(self, arch):
         self.arch = arch
+        self._logger = getattr(arch, "logger", logging.getLogger(__name__))
         self.cfg = self._load_cfg()
         # petite mémoire interne pour anti-famine et “dernier tick”
         self._last_seen: Dict[str, float] = {}
@@ -832,7 +836,7 @@ class GoalPrioritizer:
         return (0.0, "")
 
     # ---------- SCORING GLOBAL ----------
-    def score_goal(self, goal_id: str, plan: Dict[str, Any]) -> Dict[str, Any]:
+    def _compute_heuristic_score(self, goal_id: str, plan: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         base_weights = self.cfg.setdefault("weights", {})
         feats: Dict[str, Tuple[float, str]] = {}
 
@@ -886,7 +890,181 @@ class GoalPrioritizer:
 
         self._cache_features(goal_id, feature_values)
 
-        return {"priority": pr, "tags": list(tags), "explain": reasons[:6]}
+        breakdown = {
+            name: {
+                "value": float(feature_values.get(name, 0.0)),
+                "weight": float(weights.get(name, 0.0)),
+                "reason": str(feats[name][1] or ""),
+            }
+            for name in feature_values
+        }
+
+        heuristic_result = {"priority": pr, "tags": list(tags), "explain": reasons[:6]}
+        context = {
+            "features": breakdown,
+            "thresholds": {
+                "urgent_pr": float(self._lane_thresholds.get("urgent_pr", 0.92)),
+                "background_pr": float(self._lane_thresholds.get("background_pr", 0.60)),
+            },
+            "base_weights": {k: float(v) for k, v in base_weights.items()},
+        }
+        return heuristic_result, context
+
+    def _summarize_plan(self, plan: Mapping[str, Any]) -> Dict[str, Any]:
+        summary: Dict[str, Any] = {}
+        text_fields = [
+            "title",
+            "name",
+            "summary",
+            "description",
+            "goal",
+            "user_text",
+        ]
+        for field in text_fields:
+            value = plan.get(field)
+            if isinstance(value, str) and value.strip():
+                summary[field] = value.strip()[:600]
+
+        for field in ("kind", "lane", "category", "status", "parent", "owner"):
+            value = plan.get(field)
+            if isinstance(value, str) and value.strip():
+                summary[field] = value.strip()
+
+        for field in ("deadline", "deadline_ts", "due", "due_ts"):
+            if field in plan and plan.get(field) is not None:
+                summary[field] = plan.get(field)
+
+        priority_hint = plan.get("priority")
+        if isinstance(priority_hint, (int, float)):
+            summary["reported_priority"] = float(priority_hint)
+
+        tags = plan.get("tags")
+        if isinstance(tags, (list, tuple, set)):
+            summary["tags"] = [str(t) for t in list(tags)[:8]]
+
+        metrics = plan.get("metrics")
+        if isinstance(metrics, Mapping):
+            cleaned_metrics: Dict[str, Any] = {}
+            for key, value in metrics.items():
+                if isinstance(value, (int, float, str)):
+                    cleaned_metrics[str(key)] = value
+            if cleaned_metrics:
+                summary["metrics"] = cleaned_metrics
+
+        dependencies = plan.get("dependencies") or plan.get("depends_on")
+        if isinstance(dependencies, (list, tuple, set)):
+            summary["dependencies"] = [str(dep) for dep in list(dependencies)[:6]]
+
+        steps = plan.get("steps")
+        if isinstance(steps, list) and steps:
+            summary["steps"] = self._summarize_steps(steps)
+
+        return summary
+
+    def _summarize_steps(self, steps: List[Any]) -> List[Any]:
+        summarized: List[Any] = []
+        for step in steps[:5]:
+            if isinstance(step, Mapping):
+                entry = {}
+                for field in ("id", "kind", "op", "summary", "description"):
+                    value = step.get(field)
+                    if isinstance(value, str) and value.strip():
+                        entry[field] = value.strip()[:240]
+                status = step.get("status")
+                if isinstance(status, str) and status.strip():
+                    entry["status"] = status.strip()
+                if entry:
+                    summarized.append(entry)
+            elif isinstance(step, str):
+                summarized.append(step.strip()[:240])
+        return summarized
+
+    def _build_llm_payload(
+        self,
+        goal_id: str,
+        plan: Mapping[str, Any],
+        heuristic_result: Mapping[str, Any],
+        context: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "goal_id": goal_id,
+            "plan_summary": self._summarize_plan(plan),
+            "heuristics": {
+                "priority": float(heuristic_result.get("priority", 0.0)),
+                "tags": list(heuristic_result.get("tags", [])),
+                "explain": list(heuristic_result.get("explain", [])),
+                "features": context.get("features", {}),
+                "thresholds": context.get("thresholds", {}),
+            },
+        }
+        base_weights = context.get("base_weights")
+        if isinstance(base_weights, Mapping):
+            payload["heuristics"]["base_weights"] = dict(base_weights)
+        return payload
+
+    def _merge_llm_result(
+        self, heuristic_result: Dict[str, Any], llm_response: Mapping[str, Any]
+    ) -> Dict[str, Any]:
+        result = dict(heuristic_result)
+
+        priority = llm_response.get("priority")
+        try:
+            if priority is not None:
+                priority_f = float(priority)
+                if math.isfinite(priority_f):
+                    result["priority"] = max(0.0, min(1.0, priority_f))
+        except (TypeError, ValueError):
+            pass
+
+        tags = llm_response.get("tags")
+        if isinstance(tags, (list, tuple, set)):
+            cleaned_tags = [str(tag).strip() for tag in tags if str(tag).strip()]
+            if cleaned_tags:
+                result["tags"] = list(dict.fromkeys(cleaned_tags))
+
+        explain = llm_response.get("explain")
+        if isinstance(explain, (list, tuple)):
+            cleaned_explain = [str(item) for item in explain if str(item).strip()]
+            if cleaned_explain:
+                result["explain"] = cleaned_explain[:6]
+
+        confidence = llm_response.get("confidence")
+        try:
+            if confidence is not None:
+                conf_f = float(confidence)
+                if math.isfinite(conf_f):
+                    result["confidence"] = max(0.0, min(1.0, conf_f))
+        except (TypeError, ValueError):
+            pass
+
+        notes = llm_response.get("notes")
+        if isinstance(notes, str) and notes.strip():
+            result["notes"] = notes.strip()
+
+        return result
+
+    def score_goal(self, goal_id: str, plan: Dict[str, Any]) -> Dict[str, Any]:
+        heuristic_result, context = self._compute_heuristic_score(goal_id, plan)
+
+        llm_payload = self._build_llm_payload(goal_id, plan, heuristic_result, context)
+        llm_response = try_call_llm_dict(
+            "cognition_goal_prioritizer",
+            input_payload=llm_payload,
+            logger=self._logger,
+        )
+
+        if llm_response:
+            try:
+                return self._merge_llm_result(heuristic_result, llm_response)
+            except Exception:  # pragma: no cover - defensive safety net
+                if self._logger:
+                    try:
+                        self._logger.debug(
+                            "Failed to merge LLM result for goal %s", goal_id, exc_info=True
+                        )
+                    except Exception:
+                        pass
+        return heuristic_result
 
     def reprioritize_all(self):
         planner = getattr(self.arch, "planner", None)
