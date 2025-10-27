@@ -91,62 +91,81 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         },
     ),
     _spec(
-        "io_overview",
-        "AGI_Evolutive/io/__init__.py",
-        "Évalue l'état des interfaces d'entrée/sortie et suggère des optimisations concrètes.",
+        "reasoning_episode",
+        "AGI_Evolutive/reasoning/__init__.py",
+        "Analyse un épisode de raisonnement et propose une réponse structurée prête à l'exécution.",
         AVAILABLE_MODELS["reasoning"],
         extra_instructions=(
-            "Part de baseline['interfaces'] comme source fiable et enrichis sans supprimer d'informations factuelles sauf incohérence manifeste.",
-            "Chaque interface doit comporter les champs name, module, status, summary, responsibilities (2 à 5 éléments).",
-            "Mentionne les champs entrypoints, llm_hooks et fallback_capabilities si présents dans la baseline.",
-            "Limite recommended_actions à trois entrées concises et orientées action.",
-            "Les risques doivent être un tableau de dictionnaires avec label et severity.",
+            "Fixe le champ 'confidence' entre 0 et 1 en cohérence avec l'hypothèse retenue.",
+            "Décris chaque test avec les champs description/goal/priority (1 = priorité la plus haute).",
+            "Ajoute des 'actions' concrètes avec label, utility et notes si pertinent.",
         ),
         example_output={
-            "summary": "Les interfaces d'E/S relient perception, intention et action avec supervision LLM optionnelle.",
-            "interfaces": [
+            "summary": "Stratégie déduction: prioriser l'explication A avec validation terrain.",
+            "confidence": 0.72,
+            "hypothesis": {
+                "label": "L'utilisateur veut une procédure détaillée", 
+                "confidence": 0.72,
+                "rationale": "Le prompt insiste sur des étapes numérotées et un besoin de traçabilité."
+            },
+            "tests": [
                 {
-                    "name": "perception",
-                    "module": "AGI_Evolutive.io.perception_interface",
-                    "status": "stable",
-                    "summary": "Ingestion inbox et pré-analyse utilisateur.",
-                    "responsibilities": [
-                        "Surveiller le dossier inbox",
-                        "Lier les sous-systèmes mémoire/émotions",
-                        "Pré-analyser les entrées via perception_preprocess",
-                    ],
-                    "entrypoints": ["PerceptionInterface"],
-                    "llm_hooks": ["perception_preprocess"],
-                    "fallback_capabilities": [
-                        "Scan heuristique des fichiers",
-                        "Journalisation JSONL",
-                    ],
-                },
+                    "description": "Vérifier les journaux récents du module QA",
+                    "goal": "Identifier un cas similaire pour valider la démarche",
+                    "priority": 1,
+                    "expected_gain": 0.6,
+                }
+            ],
+            "actions": [
                 {
-                    "name": "action",
-                    "module": "AGI_Evolutive.io.action_interface",
-                    "status": "stable",
-                    "summary": "Priorise les actions et gère la boucle d'exécution.",
-                    "responsibilities": [
-                        "Normaliser les candidats",
-                        "Évaluer impact/effort/risque",
-                        "Mettre à jour les micro-actions",
-                    ],
-                    "entrypoints": ["ActionInterface"],
-                    "llm_hooks": ["action_interface"],
-                    "fallback_capabilities": [
-                        "Thompson sampling et GLM adaptatif",
-                    ],
-                },
+                    "label": "Scanner la mémoire récente",
+                    "utility": 0.58,
+                    "notes": "Permet d'ancrer la recommandation dans les retours d'expérience."
+                }
             ],
-            "risks": [
-                {"label": "Intent_classifier dépend majoritairement des heuristiques", "severity": "medium"}
+            "learning": [
+                "Documenter explicitement le lien hypothèse→test pour faciliter l'audit."
             ],
-            "recommended_actions": [
-                "Renforcer la télémétrie LLM pour la perception",
-                "Documenter les conditions de bascule heuristique",
+            "notes": "Prévoir une relance utilisateur si la confiance reste <0.75.",
+        },
+    ),
+    _spec(
+        "counterfactual_analysis",
+        "AGI_Evolutive/reasoning/causal.py",
+        "Analyse une simulation contrefactuelle et propose des validations/actions prioritaires.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Résume la plausibilité de la relation cause→effet en français clair.",
+            "Renseigne le champ 'confidence' entre 0 et 1.",
+            "Liste les hypothèses clés dans 'assumptions'.",
+            "Suggère des 'checks' (description/goal/priority) pour valider le scénario.",
+            "Fournis des 'actions' concrètes avec label/priority/utility/notes si pertinent.",
+            "Ajoute 'alerts' si un risque, une donnée manquante ou une incohérence est détecté.",
+        ),
+        example_output={
+            "summary": "La relation semble plausible mais dépend d'une température stable.",
+            "confidence": 0.64,
+            "assumptions": [
+                "La température ambiante reste comprise entre 20 et 25°C.",
+                "Les capteurs de vibration sont calibrés.",
             ],
-            "notes": "Confidence basée sur l'analyse structurée du module.",
+            "checks": [
+                {
+                    "description": "Vérifier le journal thermique des dernières 24h",
+                    "goal": "Confirmer l'absence de pic de chaleur",
+                    "priority": 1,
+                }
+            ],
+            "actions": [
+                {
+                    "label": "Déployer un capteur redondant",
+                    "priority": 1,
+                    "utility": 0.55,
+                    "notes": "Sécurise la mesure principale avant l'intervention.",
+                }
+            ],
+            "alerts": ["La confiance reste limitée faute de simulations réussies."],
+            "notes": "Prévoir un re-test si de nouvelles données arrivent.",
         },
     ),
     _spec(

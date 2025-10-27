@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Deque, Dict, Iterable, List, Mapping, Optional, Tuple, Union
 
+from ..utils.llm_service import try_call_llm_dict
 from .structures import CausalStore, DomainSimulator, SimulationResult
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -19,6 +24,101 @@ class CounterfactualReport:
     evidence: Dict[str, Any]
     simulations: List[Dict[str, Any]]
     generated_at: float
+    heuristic_summary: Optional[str] = None
+    summary: Optional[str] = None
+    confidence: Optional[float] = None
+    assumptions: Optional[List[str]] = None
+    checks: Optional[List[Dict[str, Any]]] = None
+    actions: Optional[List[Dict[str, Any]]] = None
+    alerts: Optional[List[str]] = None
+    notes: Optional[str] = None
+    llm_guidance: Optional[Dict[str, Any]] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return a serialisable representation of the report."""
+
+        payload = {
+            "query": self.query,
+            "supported": self.supported,
+            "intervention": self.intervention,
+            "evidence": self.evidence,
+            "simulations": self.simulations,
+            "generated_at": self.generated_at,
+        }
+        if self.heuristic_summary is not None:
+            payload["heuristic_summary"] = self.heuristic_summary
+        if self.summary is not None:
+            payload["summary"] = self.summary
+        if self.confidence is not None:
+            payload["confidence"] = self.confidence
+        if self.assumptions is not None:
+            payload["assumptions"] = list(self.assumptions)
+        if self.checks is not None:
+            payload["checks"] = list(self.checks)
+        if self.actions is not None:
+            payload["actions"] = list(self.actions)
+        if self.alerts is not None:
+            payload["alerts"] = list(self.alerts)
+        if self.notes is not None:
+            payload["notes"] = self.notes
+        if self.llm_guidance is not None:
+            payload["llm_guidance"] = self.llm_guidance
+        return payload
+
+
+_MAX_TEXT_LENGTH = 600
+_MAX_LIST_ITEMS = 10
+
+
+def _truncate_text(value: str, *, max_length: int = _MAX_TEXT_LENGTH) -> str:
+    text = str(value).strip()
+    if len(text) <= max_length:
+        return text
+    return text[: max_length - 1] + "…"
+
+
+def _sanitize_payload(value: Any, *, max_length: int = _MAX_TEXT_LENGTH, max_items: int = _MAX_LIST_ITEMS) -> Any:
+    if isinstance(value, Mapping):
+        sanitized: Dict[str, Any] = {}
+        for key, item in value.items():
+            if item is None:
+                continue
+            sanitized[str(key)] = _sanitize_payload(item, max_length=max_length, max_items=max_items)
+        return sanitized
+    if isinstance(value, list):
+        trimmed = value[:max_items]
+        return [
+            _sanitize_payload(item, max_length=max_length, max_items=max_items)
+            for item in trimmed
+        ]
+    if isinstance(value, tuple):
+        return tuple(
+            _sanitize_payload(item, max_length=max_length, max_items=max_items)
+            for item in list(value)[:max_items]
+        )
+    if isinstance(value, (str, bytes)):
+        return _truncate_text(value.decode() if isinstance(value, bytes) else value, max_length=max_length)
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return _truncate_text(str(value), max_length=max_length)
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_int(value: Any) -> Optional[int]:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class SCMStore(CausalStore):
@@ -419,12 +519,223 @@ class CounterfactualSimulator:
             else:
                 simulations.append({"success": bool(sim), "outcome": str(sim)})
 
-        return CounterfactualReport(
+        heuristic_summary = self._summarise_counterfactual(
+            cause,
+            effect,
+            evidence,
+            intervention,
+            simulations,
+        )
+        fallback_actions = self._fallback_actions(intervention)
+        baseline_confidence = self._baseline_confidence(evidence, simulations)
+
+        report = CounterfactualReport(
             query=query,
             supported=bool(evidence.get("supported")),
             intervention=intervention,
             evidence=evidence,
             simulations=simulations,
             generated_at=time.time(),
+            heuristic_summary=heuristic_summary,
+            summary=heuristic_summary,
+            confidence=baseline_confidence,
+            actions=fallback_actions if fallback_actions else None,
         )
+
+        llm_payload = {
+            "query": query,
+            "heuristics": {
+                "supported": report.supported,
+                "summary": heuristic_summary,
+                "intervention": intervention,
+                "evidence": evidence,
+                "simulations": simulations,
+                "baseline_confidence": baseline_confidence,
+                "fallback_actions": fallback_actions,
+            },
+        }
+        llm_response = try_call_llm_dict(
+            "counterfactual_analysis",
+            input_payload=_sanitize_payload(llm_payload),
+            logger=logger,
+        )
+
+        if isinstance(llm_response, Mapping):
+            guidance: Dict[str, Any] = {"raw": llm_response}
+
+            summary_text = str(llm_response.get("summary") or "").strip()
+            if summary_text:
+                report.summary = summary_text
+                guidance["summary"] = summary_text
+
+            confidence_value = _coerce_float(llm_response.get("confidence"))
+            if confidence_value is not None:
+                report.confidence = float(max(0.0, min(1.0, confidence_value)))
+                guidance["confidence"] = report.confidence
+
+            assumptions_payload = llm_response.get("assumptions")
+            if isinstance(assumptions_payload, Iterable) and not isinstance(assumptions_payload, (str, bytes)):
+                assumptions = [
+                    str(item).strip()
+                    for item in assumptions_payload
+                    if isinstance(item, (str, bytes)) and str(item).strip()
+                ]
+                if assumptions:
+                    report.assumptions = assumptions
+                    guidance["assumptions"] = assumptions
+
+            checks_payload = llm_response.get("checks")
+            if isinstance(checks_payload, Iterable) and not isinstance(checks_payload, (str, bytes)):
+                parsed_checks: List[Dict[str, Any]] = []
+                for item in checks_payload:
+                    if not isinstance(item, Mapping):
+                        continue
+                    description = str(item.get("description") or item.get("label") or "").strip()
+                    if not description:
+                        continue
+                    check_entry: Dict[str, Any] = {"description": description}
+                    goal = str(item.get("goal") or item.get("objectif") or "").strip()
+                    if goal:
+                        check_entry["goal"] = goal
+                    priority_val = _coerce_int(item.get("priority"))
+                    if priority_val is not None:
+                        check_entry["priority"] = priority_val
+                    parsed_checks.append(check_entry)
+                if parsed_checks:
+                    report.checks = parsed_checks
+                    guidance["checks"] = parsed_checks
+
+            actions_payload = llm_response.get("actions")
+            if isinstance(actions_payload, Iterable) and not isinstance(actions_payload, (str, bytes)):
+                parsed_actions: List[Dict[str, Any]] = []
+                for item in actions_payload:
+                    if not isinstance(item, Mapping):
+                        continue
+                    label = str(item.get("label") or item.get("action") or "").strip()
+                    if not label:
+                        continue
+                    action_entry: Dict[str, Any] = {"label": label}
+                    notes_val = str(item.get("notes") or item.get("why") or "").strip()
+                    if notes_val:
+                        action_entry["notes"] = notes_val
+                    priority_val = _coerce_int(item.get("priority"))
+                    if priority_val is not None:
+                        action_entry["priority"] = priority_val
+                    utility_val = _coerce_float(item.get("utility"))
+                    if utility_val is not None:
+                        action_entry["utility"] = float(max(0.0, min(1.0, utility_val)))
+                    parsed_actions.append(action_entry)
+                if parsed_actions:
+                    report.actions = parsed_actions
+                    guidance["actions"] = parsed_actions
+
+            alerts_payload = llm_response.get("alerts")
+            if isinstance(alerts_payload, Iterable) and not isinstance(alerts_payload, (str, bytes)):
+                alerts = [
+                    str(item).strip()
+                    for item in alerts_payload
+                    if isinstance(item, (str, bytes)) and str(item).strip()
+                ]
+                if alerts:
+                    report.alerts = alerts
+                    guidance["alerts"] = alerts
+
+            notes_text = str(llm_response.get("notes") or "").strip()
+            if notes_text:
+                report.notes = notes_text
+                guidance["notes"] = notes_text
+
+            report.llm_guidance = guidance
+
+        return report
+
+    # ------------------------------------------------------------------
+    def _summarise_counterfactual(
+        self,
+        cause: Optional[str],
+        effect: Optional[str],
+        evidence: Mapping[str, Any],
+        intervention: Mapping[str, Any],
+        simulations: List[Dict[str, Any]],
+    ) -> str:
+        cause_label = cause or "(inconnu)"
+        effect_label = effect or "(inconnu)"
+        supported = bool(evidence.get("supported"))
+        predicted = intervention.get("predicted_effects") or []
+        success_count = sum(1 for sim in simulations if isinstance(sim, Mapping) and sim.get("success"))
+        total_sims = len(simulations)
+        support_text = "semble soutenir" if supported else "reste incertain pour"
+        summary_parts = [
+            f"Intervention sur {cause_label} → {effect_label}: {support_text} la relation.",
+        ]
+        if predicted:
+            main_effect = predicted[0]
+            if isinstance(main_effect, Mapping):
+                effect_name = main_effect.get("effect") or effect_label
+                strength = main_effect.get("strength")
+                if strength is not None:
+                    summary_parts.append(
+                        f"Effet principal anticipé: {effect_name} (force≈{float(strength):.2f})."
+                    )
+                else:
+                    summary_parts.append(f"Effet principal anticipé: {effect_name}.")
+        if total_sims:
+            ratio = success_count / total_sims
+            summary_parts.append(
+                f"Simulations positives: {success_count}/{total_sims} (≈{ratio:.0%})."
+            )
+        return " ".join(summary_parts)
+
+    def _fallback_actions(self, intervention: Mapping[str, Any]) -> List[Dict[str, Any]]:
+        predicted = intervention.get("predicted_effects") or []
+        if not predicted:
+            return [
+                {
+                    "label": "Collecter une observation supplémentaire",
+                    "priority": 1,
+                    "notes": "Vérifier rapidement si un effet mesurable se manifeste.",
+                }
+            ]
+        actions: List[Dict[str, Any]] = []
+        top_effect = predicted[0]
+        if isinstance(top_effect, Mapping):
+            effect_name = top_effect.get("effect") or "effet clé"
+            actions.append(
+                {
+                    "label": f"Surveiller {effect_name}",
+                    "priority": 1,
+                    "notes": "Confirmer ou infirmer l'effet principal prédit par le modèle causal.",
+                }
+            )
+            if len(predicted) > 1:
+                secondary = predicted[1]
+                if isinstance(secondary, Mapping):
+                    secondary_effect = secondary.get("effect")
+                    if secondary_effect:
+                        actions.append(
+                            {
+                                "label": f"Comparer {effect_name} vs {secondary_effect}",
+                                "priority": 2,
+                                "notes": "Identifier quel effet domine réellement après l'intervention.",
+                            }
+                        )
+        return actions
+
+    def _baseline_confidence(
+        self,
+        evidence: Mapping[str, Any],
+        simulations: List[Dict[str, Any]],
+    ) -> float:
+        supported = bool(evidence.get("supported"))
+        total = len(simulations)
+        if total:
+            success_ratio = sum(
+                1.0 for sim in simulations if isinstance(sim, Mapping) and sim.get("success")
+            ) / total
+        else:
+            success_ratio = 0.0
+        base = 0.4 + 0.4 * success_ratio
+        if supported:
+            base += 0.1
+        return float(max(0.05, min(0.95, base)))
 
