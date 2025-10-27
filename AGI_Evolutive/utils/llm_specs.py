@@ -905,6 +905,39 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         },
     ),
     _spec(
+        "planning_overview",
+        "AGI_Evolutive/planning/__init__.py",
+        "Synthétise un plan d'action priorisé à partir d'un objectif et du contexte.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Liste des étapes ordonnées avec id unique et description courte.",
+            "Indique les dépendances via 'depends_on' (liste d'ids).",
+            "Renseigne 'fallback_used' à true si les heuristiques doivent être préférées.",
+            "Fournis un champ 'confidence' entre 0 et 1 et un champ 'notes'.",
+        ),
+        example_output={
+            "plan_name": "stabiliser_api",
+            "steps": [
+                {
+                    "id": "analyse",
+                    "description": "Collecter les logs de l'API",
+                    "depends_on": [],
+                    "priority": 1,
+                },
+                {
+                    "id": "mitigation",
+                    "description": "Redémarrer le proxy",
+                    "depends_on": ["analyse"],
+                    "priority": 2,
+                },
+            ],
+            "risks": ["logs incomplets"],
+            "fallback_used": False,
+            "confidence": 0.82,
+            "notes": "",
+        },
+    ),
+    _spec(
         "htn_planning",
         "AGI_Evolutive/planning/htn.py",
         "Décompose un objectif en sous-tâches HTN.",
