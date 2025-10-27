@@ -800,6 +800,7 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         extra_instructions=(
             "Retourne une liste 'proposals' (maximum 3) avec description, criteria, value, competence, curiosity, urgency entre 0 et 1.",
             "Ajoute 'confidence' (0-1) et 'notes' éventuelles par proposition.",
+            "Si le but parent parle de l'évolution ou de la survie de l'IA, pense à proposer selon le contexte un sous-but sur la compréhension de l'environnement, des relations humaines ou des ressources techniques essentielles.",
         ),
         example_output={
             "proposals": [
