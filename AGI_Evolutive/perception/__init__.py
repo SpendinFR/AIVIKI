@@ -4,15 +4,22 @@ Système de Perception Complet de l'AGI Évolutive
 Traitement multi-modal des entrées sensorielles et formation de représentations
 """
 
-import numpy as np
+import hashlib
+import logging
+import math
 import time
 from collections import deque
 from datetime import datetime
-from typing import Dict, List, Any, Mapping, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
-import math
-import hashlib
+from typing import Any, Dict, List, Mapping, Optional, Tuple
+
+import numpy as np
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class OnlineLinear:
@@ -429,6 +436,7 @@ class PerceptionSystem:
         # Evolution lente de la structure perceptive (niveau lent)
         self.structural_evolution = StructuralEvolutionManager()
         self._last_scene_metrics: Optional[Dict[str, float]] = None
+        self._last_llm_summary: Optional[Dict[str, Any]] = None
 
         # === HISTORIQUE PERCEPTIF ===
         self.perceptual_history = {
@@ -436,7 +444,8 @@ class PerceptionSystem:
             "object_tracking": {},
             "change_detection": {},
             "prediction_errors": [],
-            "parameter_drifts": []
+            "parameter_drifts": [],
+            "llm_annotations": [],
         }
         
         # === INNÉS PERCEPTIFS ===
@@ -529,6 +538,11 @@ class PerceptionSystem:
         # === PHASE 10: ADAPTATIONS META-PERCEPTIVES ===
         processing_time = time.time() - processing_start
         self._meta_adaptation_cycle(perceptual_scene, processing_time=processing_time)
+
+        metrics_snapshot = dict(self._last_scene_metrics or {})
+        llm_annotation = self._llm_review_scene(perceptual_scene, metrics_snapshot)
+        if llm_annotation:
+            perceptual_scene.background.setdefault("llm_analysis", llm_annotation)
 
         print(f"🔄 Scène perceptive formée en {processing_time:.3f}s - {len(integrated_objects)} objets")
 
@@ -1155,6 +1169,122 @@ class PerceptionSystem:
             self.perceptual_history["parameter_drifts"].pop(0)
 
         self._last_scene_metrics = metrics
+
+    def _llm_review_scene(
+        self,
+        scene: PerceptualScene,
+        metrics: Mapping[str, float],
+    ) -> Optional[Dict[str, Any]]:
+        """Demande au LLM une analyse synthétique de la scène."""
+
+        payload = self._build_llm_payload(scene, metrics)
+        if not payload:
+            return None
+
+        try:
+            response = try_call_llm_dict("perception_module", input_payload=payload)
+        except Exception:  # pragma: no cover - prudence
+            LOGGER.debug("Analyse LLM du module perception indisponible", exc_info=True)
+            return None
+
+        if not isinstance(response, Mapping):
+            return None
+
+        summary = dict(response)
+        applied = self._apply_llm_recommendations(summary.get("recommended_settings"))
+        if applied:
+            summary["applied_settings"] = applied
+
+        self._last_llm_summary = summary
+        history = self.perceptual_history.get("llm_annotations")
+        if isinstance(history, list):
+            history.append({"timestamp": scene.timestamp, "analysis": summary})
+            if len(history) > 20:
+                del history[0]
+
+        return summary
+
+    def _build_llm_payload(
+        self,
+        scene: PerceptualScene,
+        metrics: Mapping[str, float],
+    ) -> Dict[str, Any]:
+        objects: List[Dict[str, Any]] = []
+        for obj in scene.objects[:8]:
+            objects.append(
+                {
+                    "id": obj.id,
+                    "modality": obj.modality.value,
+                    "confidence": round(float(obj.confidence), 4),
+                    "salience": round(float(obj.salience), 4),
+                    "stability": round(float(obj.stability), 4),
+                    "features": sorted(ft.value for ft in obj.features.keys()),
+                }
+            )
+
+        metrics_payload = {
+            key: round(float(value), 4) for key, value in metrics.items()
+            if isinstance(value, (int, float))
+        }
+
+        parameters_payload = {
+            key: round(float(value), 4)
+            for key, value in self.perceptual_parameters.items()
+            if isinstance(value, (int, float))
+        }
+
+        payload = {
+            "timestamp": datetime.fromtimestamp(scene.timestamp).isoformat(),
+            "attention_focus": scene.attention_focus,
+            "gist": scene.gist,
+            "emotional_tone": round(float(scene.emotional_tone), 4),
+            "object_count": len(scene.objects),
+            "objects": objects,
+            "metrics": metrics_payload,
+            "parameters": parameters_payload,
+        }
+
+        drifts = self.perceptual_history.get("parameter_drifts") or []
+        if drifts:
+            payload["recent_drifts"] = drifts[-3:]
+
+        return payload
+
+    def _apply_llm_recommendations(self, settings: Any) -> Dict[str, float]:
+        """Applique les réglages proposés par le LLM tout en respectant les bornes locales."""
+
+        if not isinstance(settings, Mapping):
+            return {}
+
+        applied: Dict[str, float] = {}
+
+        sensitivity = settings.get("sensibility")
+        if isinstance(sensitivity, (int, float)):
+            param = self.adaptive_parameters.parameters.get("sensitivity_threshold")
+            if param:
+                bounded = float(np.clip(sensitivity, param.bounds[0], param.bounds[1]))
+                param.commit(bounded, reward=0.0)
+                self.perceptual_parameters["sensitivity_threshold"] = param.value
+                applied["sensitivity_threshold"] = param.value
+            else:
+                bounded = float(max(0.01, min(1.0, sensitivity)))
+                self.perceptual_parameters["sensitivity_threshold"] = bounded
+                applied["sensitivity_threshold"] = bounded
+
+        window_seconds = settings.get("window_seconds")
+        if isinstance(window_seconds, (int, float)):
+            param = self.adaptive_parameters.parameters.get("integration_window")
+            if param:
+                bounded = float(np.clip(window_seconds, param.bounds[0], param.bounds[1]))
+                param.commit(bounded, reward=0.0)
+                self.perceptual_parameters["integration_window"] = param.value
+                applied["integration_window"] = param.value
+            else:
+                bounded = float(max(0.01, window_seconds))
+                self.perceptual_parameters["integration_window"] = bounded
+                applied["integration_window"] = bounded
+
+        return applied
 
     def _collect_scene_metrics(self, scene: PerceptualScene, processing_time: float) -> Dict[str, float]:
         """Calcule les métriques nécessaires aux mécanismes d'adaptation."""

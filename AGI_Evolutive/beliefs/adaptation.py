@@ -9,12 +9,18 @@ graph can progressively adapt without breaking existing behaviour.
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
-from typing import Dict, Iterable, Iterator, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, Mapping, Optional, Tuple
 import json
+import logging
 import math
 import os
 import random
 import time
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -272,4 +278,91 @@ class FeedbackTracker:
 
     def iter_rule_stats(self) -> Iterable[Tuple[str, FeedbackStats]]:
         return list(self.rule_stats.items())
+
+    # ------------------------------------------------------------------
+    # LLM integration
+
+    def _llm_payload(
+        self,
+        belief_id: str,
+        belief: Mapping[str, Any] | None,
+        stats: FeedbackStats,
+        *,
+        suggested_delta: float,
+    ) -> Dict[str, Any]:
+        payload = {
+            "belief_id": belief_id,
+            "statistics": {
+                "success": stats.success,
+                "failure": stats.failure,
+                "evidence": stats.evidence,
+                "last_seen": stats.last_seen,
+                "last_success": stats.last_success,
+            },
+            "suggested_delta": suggested_delta,
+        }
+        if belief:
+            payload["belief"] = dict(belief)
+        return payload
+
+    def _fallback_adjustment(
+        self,
+        belief_id: str,
+        stats: FeedbackStats,
+        *,
+        context: Mapping[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        ratio = stats.ratio()
+        total = max(1.0, stats.total())
+        confidence = min(1.0, total / (total + 5.0))
+        delta = max(-0.45, min(0.45, (ratio - 0.5) * (0.8 + 0.2 * confidence)))
+        justification = (
+            "Renforcer" if delta > 0 else "Atténuer" if delta < 0 else "Stabiliser"
+        )
+        return {
+            "belief": belief_id,
+            "delta": float(delta),
+            "confidence": float(confidence),
+            "justification": f"{justification} la croyance (ratio succès={ratio:.2f}).",
+            "notes": "",
+            "context": dict(context or {}),
+        }
+
+    def suggest_adjustment(
+        self,
+        belief_id: str,
+        belief_snapshot: Mapping[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        """Return an adjustment proposal for ``belief_id`` using the shared LLM.
+
+        The method keeps the historical heuristic behaviour when the LLM is not
+        available.  When the integration succeeds, the returned mapping mirrors
+        :mod:`AGI_Evolutive.utils.llm_specs` expectations and is suitable for
+        direct persistence in the belief graph.
+        """
+
+        stats = self.get_belief_stats(belief_id)
+        fallback = self._fallback_adjustment(belief_id, stats, context=belief_snapshot)
+
+        response = try_call_llm_dict(
+            "belief_adaptation",
+            input_payload=self._llm_payload(
+                belief_id,
+                belief_snapshot,
+                stats,
+                suggested_delta=fallback["delta"],
+            ),
+            logger=LOGGER,
+        )
+
+        if isinstance(response, Mapping):
+            payload = dict(response)
+            payload.setdefault("belief", belief_id)
+            payload.setdefault("delta", fallback["delta"])
+            payload.setdefault("justification", fallback["justification"])
+            payload.setdefault("confidence", fallback.get("confidence", 0.5))
+            payload.setdefault("notes", fallback.get("notes", ""))
+            return payload
+
+        return fallback
 

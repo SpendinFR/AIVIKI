@@ -10,6 +10,12 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+import logging
+
+
+LOGGER = logging.getLogger(__name__)
 
 try:
     from AGI_Evolutive.cognition.meta_cognition import OnlineLinear
@@ -554,6 +560,88 @@ class IntentModel:
     def describe(self) -> Dict[str, Dict[str, float]]:
         now = time.time()
         return {intent.label: {"score": intent.score(now)} for intent in self._intents.values()}
+
+    def _top_intents(self, limit: int = 3) -> List[Intent]:
+        now = time.time()
+        return sorted(self._intents.values(), key=lambda it: it.score(now), reverse=True)[:limit]
+
+    def _fallback_summary(self, recent_message: Optional[str]) -> Dict[str, Any]:
+        ranked = self._top_intents(limit=3)
+        if not ranked:
+            return {
+                "intent": "inform",
+                "horizon": "immédiat",
+                "justification": "Aucune intention saillante détectée, utilisation du mode heuristique.",
+                "notes": "fallback",
+                "source": "fallback",
+                "candidates": [],
+            }
+
+        best = ranked[0]
+        justification = best.evidence[-1] if best.evidence else best.description
+        candidates = [
+            {
+                "label": intent.label,
+                "horizon": intent.horizon,
+                "confidence": round(intent.score(time.time()), 3),
+            }
+            for intent in ranked
+        ]
+        payload = {
+            "intent": best.label,
+            "horizon": best.horizon,
+            "justification": justification,
+            "notes": "",
+            "source": "fallback",
+            "candidates": candidates,
+        }
+        if recent_message:
+            payload["recent_message"] = recent_message
+        return payload
+
+    def llm_summary(self, recent_message: Optional[str] = None) -> Dict[str, Any]:
+        fallback = self._fallback_summary(recent_message)
+        top_intents_payload = [
+            {
+                "label": intent.label,
+                "description": intent.description,
+                "horizon": intent.horizon,
+                "confidence": round(intent.score(time.time()), 3),
+                "evidence": list(intent.evidence),
+            }
+            for intent in self._top_intents(limit=5)
+        ]
+        payload = {
+            "recent_message": recent_message,
+            "top_intents": top_intents_payload,
+            "history": self._history[-8:],
+        }
+        try:
+            response = try_call_llm_dict(
+                "models_intent",
+                input_payload=payload,
+                logger=LOGGER,
+            )
+        except Exception:
+            LOGGER.debug("LLM intent summary failed", exc_info=True)
+            response = None
+
+        result = dict(fallback)
+        if response:
+            if isinstance(response.get("intent"), str):
+                result["intent"] = response["intent"]
+            if isinstance(response.get("horizon"), str):
+                result["horizon"] = response["horizon"]
+            if isinstance(response.get("justification"), str):
+                result["justification"] = response["justification"]
+            if isinstance(response.get("notes"), str):
+                result["notes"] = response["notes"]
+            candidates = response.get("candidates")
+            if isinstance(candidates, list):
+                result["candidates"] = candidates
+            result["source"] = "llm"
+            result["llm_payload"] = response
+        return result
 
     # ------------------------------------------------------------------
     # Helpers
