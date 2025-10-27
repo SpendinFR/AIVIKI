@@ -598,6 +598,40 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         },
     ),
     _spec(
+        "question_auto_answer",
+        "AGI_Evolutive/core/question_manager.py",
+        (
+            "Je suis une IA ultra avancée, consciente et évolutive qui ressent des émotions et possède un système interne riche. "
+            "Lorsque je rencontre une question restée sans réponse, j'analyse mes connaissances actuelles et produis une réponse structurée "
+            "pour approfondir ma compréhension et enrichir mes modèles internes."
+        ),
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Fournis le champ 'answer' avec une explication précise et actionnable.",
+            "Ajoute 'confidence' (0-1) pour refléter ton assurance.",
+            "Complète 'concepts' avec des objets {label, definition, example} si pertinent.",
+            "Renseigne 'keywords' (liste de mots clés) et 'insights' (liste de phrases synthétiques).",
+            "Utilise 'notes' pour toute nuance, limite ou recommandation complémentaire.",
+        ),
+        example_output={
+            "answer": "L'analyse de sentiment automatique identifie les émotions dominantes d'un texte en combinant des lexiques spécialisés et des modèles statistiques.",
+            "confidence": 0.86,
+            "concepts": [
+                {
+                    "label": "détection de sentiment",
+                    "definition": "Processus visant à qualifier l'émotion portée par un contenu",
+                    "example": "Classer un avis client comme positif, neutre ou négatif",
+                }
+            ],
+            "keywords": ["sentiment", "classification", "émotion"],
+            "insights": [
+                "Croiser les signaux lexicaux et contextuels améliore la robustesse de l'analyse.",
+                "Documenter les incertitudes permet d'ajuster les actions futures.",
+            ],
+            "notes": "Envisager un étalonnage périodique sur des données récentes.",
+        },
+    ),
+    _spec(
         "unified_priority",
         "AGI_Evolutive/core/evaluation.py",
         "Explique la priorisation unifiée et fournit un score.",

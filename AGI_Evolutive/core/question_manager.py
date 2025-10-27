@@ -13,6 +13,7 @@ from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
 
 import logging
 
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
 from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 
@@ -215,6 +216,9 @@ class QuestionManager:
         self._bandit = LinearBanditScorer(self._feature_hasher.dim)
         self._novelty_tracker: Dict[str, int] = {}
         self._asked_features: Dict[str, Tuple[float, Tuple[float, ...]]] = {}
+        self._llm_stale_threshold = 2 * 3600.0  # seconds (2h)
+        self._llm_retry_cooldown = 3600.0
+        self._auto_retry_cooldown = 900.0
 
     # ------------------------------------------------------------------
     # Public API
@@ -652,21 +656,177 @@ class QuestionManager:
         else:
             target_channels = set(self._channel_limits)
         attempts: List[Dict[str, Any]] = []
-        for question in self.pending_questions:
+        now = time.time()
+        for question in list(self.pending_questions):
             meta = question.setdefault("meta", {})
             channel = self._channel_for_entry(question)
             if channel not in target_channels:
                 continue
             if meta.get("state") == "answered":
                 continue
-            if meta.get("auto_attempted"):
+            last_auto_attempt = self._as_timestamp(meta.get("auto_attempted"))
+            if last_auto_attempt and now - last_auto_attempt < self._auto_retry_cooldown:
                 continue
-            meta["auto_attempted"] = time.time()
+            meta["auto_attempted"] = now
             suggestion = self._attempt_auto_answer_for(question)
+            if not suggestion and self._should_attempt_llm(meta):
+                suggestion = self._attempt_llm_answer_for(question)
             if suggestion:
                 meta.setdefault("auto_suggestions", []).append(suggestion)
                 attempts.append({"question": question, "suggestion": suggestion})
+                if suggestion.get("source") == "llm":
+                    meta["auto_resolution"] = "llm"
+                    meta["resolved_by"] = "llm"
+                    qid = question.get("id") or meta.get("id")
+                    answer_text = str(suggestion.get("text") or "").strip()
+                    if answer_text:
+                        meta["answer"] = answer_text
+                    meta["answered_at"] = time.time()
+                    self._record_llm_answer(question, suggestion)
+                    if qid:
+                        try:
+                            self.resolve_question(qid, answer=answer_text)
+                        except Exception:
+                            pass
         return attempts
+
+    def _should_attempt_llm(self, meta: Dict[str, Any]) -> bool:
+        if not isinstance(meta, dict):
+            return False
+        if meta.get("state") == "answered":
+            return False
+        suggestions = meta.get("auto_suggestions")
+        if suggestions and any((s or {}).get("source") == "llm" for s in suggestions if isinstance(s, dict)):
+            return False
+        now = time.time()
+        last_attempt_val = self._as_timestamp(meta.get("llm_auto_attempted"))
+        if last_attempt_val and now - last_attempt_val < self._llm_retry_cooldown:
+            return False
+        base_ts_val = self._as_timestamp(meta.get("served_at") or meta.get("queued_at") or meta.get("ts"))
+        if not base_ts_val:
+            return False
+        if now - base_ts_val < self._llm_stale_threshold:
+            return False
+        return True
+
+    def _attempt_llm_answer_for(self, question: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        text = (question.get("text") or "").strip()
+        if not text:
+            return None
+        meta = question.setdefault("meta", {})
+        meta["llm_auto_attempted"] = time.time()
+        base_ts_val = self._as_timestamp(meta.get("queued_at") or meta.get("ts"))
+        payload: Dict[str, Any] = {
+            "question": text,
+            "type": question.get("type"),
+            "metadata": json_sanitize(meta),
+            "elapsed_seconds": float(max(0.0, time.time() - (base_ts_val or time.time()))),
+        }
+        focus = meta.get("focus") or meta.get("topic")
+        if focus:
+            payload["focus"] = focus
+        active_goal = self._active_goal_description()
+        if active_goal:
+            payload["active_goal"] = active_goal
+        recent_history = list(self.question_history)[-5:]
+        if recent_history:
+            payload["recent_questions"] = [
+                {
+                    "question": item.get("question"),
+                    "answer": (item.get("meta") or {}).get("answer"),
+                    "ts": item.get("ts"),
+                }
+                for item in recent_history
+            ]
+        response = try_call_llm_dict(
+            "question_auto_answer",
+            input_payload=json_sanitize(payload),
+            logger=LOGGER,
+            max_retries=1,
+        )
+        if not response:
+            return None
+        answer_text = str(response.get("answer") or response.get("text") or "").strip()
+        if not answer_text:
+            return None
+        suggestion: Dict[str, Any] = {
+            "text": answer_text,
+            "source": "llm",
+            "created_at": time.time(),
+            "payload": json_sanitize(response),
+        }
+        confidence = response.get("confidence")
+        try:
+            confidence_val = float(confidence) if confidence is not None else None
+        except (TypeError, ValueError):
+            confidence_val = None
+        if confidence_val is not None:
+            suggestion["confidence"] = _clip(confidence_val)
+        for key in ("concepts", "keywords", "insights"):
+            value = response.get(key)
+            if isinstance(value, list):
+                cleaned: List[Any] = []
+                for item in value:
+                    sanitized = json_sanitize(item)
+                    if sanitized:
+                        cleaned.append(sanitized)
+                if cleaned:
+                    suggestion[key] = cleaned
+        notes = response.get("notes")
+        if isinstance(notes, str) and notes.strip():
+            suggestion["notes"] = notes.strip()
+        return suggestion
+
+    def _active_goal_description(self) -> Optional[str]:
+        goals = getattr(self.arch, "goals", None)
+        if not goals or not hasattr(goals, "get_active_goal"):
+            return None
+        try:
+            active = goals.get_active_goal()
+        except Exception:
+            return None
+        if not active:
+            return None
+        if isinstance(active, dict):
+            for key in ("description", "title", "name"):
+                value = active.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        if isinstance(active, str):
+            return active.strip()
+        return None
+
+    def _record_llm_answer(self, question: Dict[str, Any], suggestion: Dict[str, Any]) -> None:
+        memory = getattr(self.arch, "memory", None)
+        if not memory or not hasattr(memory, "add_memory"):
+            return
+        entry = {
+            "kind": "question_auto_answer",
+            "question": question.get("text"),
+            "answer": suggestion.get("text"),
+            "confidence": suggestion.get("confidence"),
+            "source": suggestion.get("source"),
+            "concepts": suggestion.get("concepts"),
+            "keywords": suggestion.get("keywords"),
+            "insights": suggestion.get("insights"),
+            "metadata": {
+                "question_id": question.get("id") or (question.get("meta") or {}).get("id"),
+                "topic": (question.get("meta") or {}).get("topic"),
+                "type": question.get("type"),
+            },
+            "notes": suggestion.get("notes", ""),
+            "ts": time.time(),
+        }
+        try:
+            memory.add_memory(json_sanitize(entry))
+        except Exception:
+            pass
+
+    def _as_timestamp(self, value: Any) -> float:
+        try:
+            return float(value) if value is not None else 0.0
+        except (TypeError, ValueError):
+            return 0.0
 
     def _attempt_auto_answer_for(self, question: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         text = (question.get("text") or "").strip()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -27,6 +28,9 @@ class _MemoryStoreStub:
 class _MemoryStub:
     def __init__(self, items: Optional[List[Dict[str, Any]]] = None) -> None:
         self.store = _MemoryStoreStub(items)
+
+    def add_memory(self, entry: Dict[str, Any]) -> None:
+        self.store.add(entry)
 
 
 class _DummyGoals:
@@ -153,3 +157,48 @@ def test_attempt_auto_answers_uses_recent_memory():
     suggestions = meta.get("auto_suggestions")
     assert suggestions, "Une suggestion automatique doit être enregistrée"
     assert "phoenix" in suggestions[0]["text"].lower()
+
+
+def test_llm_auto_answer_resolves_stale_question(monkeypatch):
+    from AGI_Evolutive.core import question_manager as qm_module
+
+    arch = _DummyArch("Comprendre l'empathie humaine")
+    qm = QuestionManager(arch)
+    qm.add_question("Qu'est-ce que l'empathie ?")
+
+    assert qm.pending_questions, "La question doit être enregistrée"
+    question = qm.pending_questions[0]
+    meta = question.setdefault("meta", {})
+    meta["queued_at"] = time.time() - (3 * 3600)
+    meta.pop("auto_attempted", None)
+
+    captured: Dict[str, Any] = {}
+
+    def fake_try_call_llm_dict(spec_key: str, **kwargs):
+        captured["spec_key"] = spec_key
+        captured["payload"] = kwargs.get("input_payload")
+        return {
+            "answer": "L'empathie est la capacité à comprendre et partager les émotions d'autrui.",
+            "confidence": 0.82,
+            "concepts": [
+                {
+                    "label": "empathie émotionnelle",
+                    "definition": "Résonance avec l'état affectif d'une autre personne",
+                    "example": "Ressentir la tristesse d'un ami et l'accompagner avec bienveillance",
+                }
+            ],
+            "keywords": ["empathie", "émotions"],
+            "insights": ["L'empathie combine perception émotionnelle et cognition."],
+            "notes": "Réponse générée automatiquement",
+        }
+
+    monkeypatch.setattr(qm_module, "try_call_llm_dict", fake_try_call_llm_dict)
+
+    attempts = qm.attempt_auto_answers()
+
+    assert captured.get("spec_key") == "question_auto_answer"
+    assert not qm.pending_questions, "La question doit être résolue après la réponse LLM"
+    assert attempts and attempts[0]["suggestion"]["source"] == "llm"
+
+    stored = arch.memory.store.get_recent_memories()
+    assert any(item.get("kind") == "question_auto_answer" for item in stored)
