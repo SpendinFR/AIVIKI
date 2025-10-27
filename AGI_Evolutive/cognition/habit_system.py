@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, time as dtime
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
 __all__ = ["HabitSystem", "HabitRoutine"]
 
 
@@ -220,6 +222,66 @@ class HabitSystem:
             self._load_config(config_path)
 
     # ------------------------------------------------------------------
+    # LLM integration helpers
+    def _llm_refine_cue(
+        self,
+        name: str,
+        payload: Dict[str, Any],
+        state_snapshot: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        llm_payload = {
+            "routine": {
+                "name": name,
+                "schedule": payload.get("schedule"),
+                "tags": payload.get("tags", []),
+                "evaluation": {
+                    "status": payload.get("status"),
+                    "strength": payload.get("strength"),
+                    "due_ts": payload.get("due_ts"),
+                    "period": payload.get("period"),
+                },
+                "steps": payload.get("steps"),
+            },
+            "state": {
+                "created_at": state_snapshot.get("created_at"),
+                "last_triggered": state_snapshot.get("last_triggered"),
+                "last_completed": state_snapshot.get("last_completed"),
+                "completed_ts": state_snapshot.get("completed_ts"),
+            },
+            "now": payload.get("triggered_at"),
+        }
+        logger = getattr(self, "_logger", None)
+        llm_response = try_call_llm_dict(
+            "cognition_habit_system",
+            input_payload=llm_payload,
+            logger=logger,
+        )
+        if not isinstance(llm_response, dict):
+            return payload
+
+        refined = dict(payload)
+        if "strength" in llm_response:
+            try:
+                refined["strength"] = _clamp(float(llm_response["strength"]))
+            except (TypeError, ValueError):
+                pass
+        if isinstance(llm_response.get("status"), str) and llm_response["status"].strip():
+            refined["status"] = llm_response["status"].strip()
+        if isinstance(llm_response.get("message"), str) and llm_response["message"].strip():
+            refined["llm_message"] = llm_response["message"].strip()
+        if isinstance(llm_response.get("notes"), str) and llm_response["notes"].strip():
+            refined["llm_notes"] = llm_response["notes"].strip()
+        if "confidence" in llm_response:
+            try:
+                refined["llm_confidence"] = _clamp(float(llm_response["confidence"]))
+            except (TypeError, ValueError):
+                pass
+        if isinstance(llm_response.get("tags"), list):
+            refined["tags"] = list({*refined.get("tags", []), *llm_response["tags"]})
+        refined["llm"] = llm_response
+        return refined
+
+    # ------------------------------------------------------------------
     # Public API
     def register_routine(
         self,
@@ -280,9 +342,11 @@ class HabitSystem:
             entry = self._state.setdefault(
                 best_name, {"created_at": self._routines[best_name].metadata.get("created_at", now)}
             )
+            snapshot = dict(entry)
             entry["last_triggered"] = now
             if "period" in best_payload:
                 entry["last_period"] = best_payload["period"]
+            best_payload = self._llm_refine_cue(best_name, best_payload, snapshot)
             self._persist_state()
             return best_payload
         return None

@@ -12,6 +12,7 @@ from AGI_Evolutive.core.evaluation import (
     record_priority_feedback,
     unified_priority,
 )
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 
 Collector = Callable[[], List[Trigger]]
@@ -22,6 +23,7 @@ class ScoredTrigger:
     trigger: Trigger
     priority: float
     feedback_token: Optional[str] = None
+    llm_meta: Optional[Dict[str, Any]] = None
 
 
 class OnlineLinear:
@@ -186,6 +188,7 @@ class TriggerBus:
                 Optional[str],
             ],
         ] = {}
+        self._logger = None
 
     def register(self, fn: Collector):
         self.collectors.append(fn)
@@ -308,6 +311,72 @@ class TriggerBus:
             return 0.0
         return 0.0
 
+    def _llm_adjust_priorities(self, scored: List[ScoredTrigger]) -> List[ScoredTrigger]:
+        if not scored:
+            return scored
+        payload = {
+            "total": len(scored),
+            "top": [
+                {
+                    "token": item.feedback_token,
+                    "type": item.trigger.type.name,
+                    "source": item.trigger.meta.get("source"),
+                    "priority": item.priority,
+                    "meta": {
+                        "importance": item.trigger.meta.get("importance"),
+                        "probability": item.trigger.meta.get("probability"),
+                        "immediacy": item.trigger.meta.get("immediacy"),
+                        "habit_strength": item.trigger.meta.get("habit_strength"),
+                    },
+                }
+                for item in scored[:6]
+            ],
+        }
+        response = try_call_llm_dict(
+            "cognition_trigger_bus",
+            input_payload=payload,
+            logger=getattr(self, "_logger", None),
+        )
+        if not isinstance(response, dict):
+            return scored
+
+        updates: Dict[str, Any] = {}
+        if isinstance(response.get("priorities"), dict):
+            updates = {str(k): v for k, v in response["priorities"].items()}
+        elif isinstance(response.get("priorities"), list):
+            for entry in response["priorities"]:
+                if isinstance(entry, dict) and entry.get("token") is not None:
+                    updates[str(entry["token"])] = entry.get("priority")
+
+        for item in scored:
+            token = item.feedback_token
+            if token and token in updates:
+                try:
+                    item.priority = max(0.0, min(1.0, float(updates[token])))
+                except (TypeError, ValueError):
+                    continue
+
+        if isinstance(response.get("order"), list):
+            order_map = {str(tok): idx for idx, tok in enumerate(response["order"])}
+            scored.sort(key=lambda it: (order_map.get(it.feedback_token, len(order_map)), -it.priority))
+
+        meta: Dict[str, Any] = {"llm": response}
+        if isinstance(response.get("notes"), str) and response["notes"].strip():
+            meta["notes"] = response["notes"].strip()
+        if "confidence" in response:
+            try:
+                meta["confidence"] = max(0.0, min(1.0, float(response["confidence"])))
+            except (TypeError, ValueError):
+                pass
+        if meta:
+            for item in scored[: len(scored)]:
+                existing = item.llm_meta or {}
+                merged = dict(existing)
+                merged.update(meta)
+                item.llm_meta = merged
+
+        return scored
+
     def collect_and_score(self, valence: float = 0.0) -> List[ScoredTrigger]:
         now = time.time()
         scored: List[ScoredTrigger] = []
@@ -375,4 +444,4 @@ class TriggerBus:
                 continue
         # preemption rules
         scored.sort(key=lambda s: s.priority, reverse=True)
-        return scored
+        return self._llm_adjust_priorities(scored)

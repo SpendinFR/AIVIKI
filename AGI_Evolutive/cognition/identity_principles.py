@@ -1,6 +1,8 @@
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
 
 def _bounded_append(buffer: List[Dict[str, Any]], entry: Dict[str, Any], max_len: int) -> None:
     if max_len <= 0:
@@ -435,6 +437,81 @@ def propose_commitments(
     return props
 
 
+def _llm_refine_principles(
+    *,
+    identity: Dict[str, Any],
+    effective: List[Dict[str, Any]],
+    principles: List[Dict[str, Any]],
+    commitments: List[Dict[str, Any]],
+    stats: Dict[str, Any],
+    logger: Any,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
+    payload = {
+        "identity": {
+            "values": (identity.get("preferences", {}) or {}).get("values", []),
+            "history": identity.get("principles_history"),
+            "commitments": identity.get("commitments"),
+        },
+        "effective_rules": effective,
+        "principles": principles,
+        "commitments": commitments,
+        "stats": stats,
+    }
+    response = try_call_llm_dict(
+        "cognition_identity_principles",
+        input_payload=payload,
+        logger=logger,
+    )
+    if not isinstance(response, dict):
+        return principles, commitments, {}
+
+    def _sanitize_principles(items: Any) -> List[Dict[str, Any]]:
+        sanitized: List[Dict[str, Any]] = []
+        if not isinstance(items, list):
+            return sanitized
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key", "")).strip()
+            desc = str(item.get("desc", "")).strip()
+            if not key:
+                continue
+            sanitized.append({"key": key, "desc": desc})
+        return sanitized
+
+    def _sanitize_commitments(items: Any) -> List[Dict[str, Any]]:
+        sanitized: List[Dict[str, Any]] = []
+        if not isinstance(items, list):
+            return sanitized
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key", "")).strip()
+            if not key:
+                continue
+            entry = {"key": key}
+            if "active" in item:
+                entry["active"] = bool(item["active"])
+            if isinstance(item.get("note"), str) and item["note"].strip():
+                entry["note"] = item["note"].strip()
+            sanitized.append(entry)
+        return sanitized
+
+    updated_principles = _sanitize_principles(response.get("principles")) or principles
+    updated_commitments = _sanitize_commitments(response.get("commitments")) or commitments
+
+    meta: Dict[str, Any] = {"llm": response}
+    if "notes" in response and isinstance(response["notes"], str):
+        meta["notes"] = response["notes"].strip()
+    if "confidence" in response:
+        try:
+            meta["confidence"] = max(0.0, min(1.0, float(response["confidence"])))
+        except (TypeError, ValueError):
+            pass
+
+    return updated_principles, updated_commitments, meta
+
+
 def run_and_apply_principles(arch, require_confirmation: bool = True) -> Dict[str, Any]:
     """
     Chaîne complète:
@@ -460,6 +537,16 @@ def run_and_apply_principles(arch, require_confirmation: bool = True) -> Dict[st
 
     policy = _resolve_policy(arch)
     success, fail = _collect_policy_stats(policy)
+    stats = {"success": success, "fail": fail, "success_rate": _success_rate(success, fail)}
+
+    prin, commits, llm_meta = _llm_refine_principles(
+        identity=identity,
+        effective=eff,
+        principles=prin,
+        commitments=commits,
+        stats=stats,
+        logger=getattr(arch, "logger", None),
+    )
 
     if prin:
         current_principles = identity.get("principles", []) if isinstance(identity, dict) else []
@@ -504,4 +591,12 @@ def run_and_apply_principles(arch, require_confirmation: bool = True) -> Dict[st
     if prin or commits:
         _record_principles_application(self_model, prin, commits, success, fail)
 
-    return {"applied": applied, "pending": pending, "principles": prin, "commitments": commits}
+    result = {
+        "applied": applied,
+        "pending": pending,
+        "principles": prin,
+        "commitments": commits,
+    }
+    if llm_meta:
+        result["llm"] = llm_meta
+    return result

@@ -2,6 +2,8 @@ from collections import Counter
 from math import exp
 from typing import Any, Dict, Iterable, Tuple
 
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
 
 def _memory_recent(arch, limit: int):
     store = None
@@ -197,9 +199,48 @@ def infer_preferences(arch, window: int = 100) -> Dict[str, Any]:
     if style:
         patch["preferences"]["style"] = style
 
-    if not patch["preferences"]:
-        return {"patch": {"preferences": {}}, "score": score}
-    return {"patch": patch, "score": score}
+    heuristics = {
+        "feature_counts": {key: float(value) for key, value in feature_counts.items()},
+        "likes": sorted(likes),
+        "dislikes": sorted(dislikes),
+        "values": sorted(values),
+        "style": style,
+    }
+    result = {"patch": patch if patch["preferences"] else {"preferences": {}}, "score": score, "heuristics": heuristics}
+
+    llm_payload = {
+        "heuristics": heuristics,
+        "score": score,
+        "patch": patch,
+    }
+    llm_response = try_call_llm_dict(
+        "cognition_preferences_inference",
+        input_payload=llm_payload,
+        logger=getattr(arch, "logger", None),
+    )
+    if isinstance(llm_response, dict):
+        if "patch" in llm_response and isinstance(llm_response["patch"], dict):
+            llm_patch = llm_response["patch"]
+            preferences = llm_patch.get("preferences") if isinstance(llm_patch, dict) else None
+            if isinstance(preferences, dict):
+                result["patch"] = {"preferences": dict(preferences)}
+            else:
+                result["patch"] = llm_patch
+        if "score" in llm_response:
+            try:
+                result["score"] = max(0.0, min(1.0, float(llm_response["score"])))
+            except (TypeError, ValueError):
+                pass
+        if isinstance(llm_response.get("notes"), str) and llm_response["notes"].strip():
+            result["notes"] = llm_response["notes"].strip()
+        if "confidence" in llm_response:
+            try:
+                result["confidence"] = max(0.0, min(1.0, float(llm_response["confidence"])))
+            except (TypeError, ValueError):
+                pass
+        result["llm"] = llm_response
+
+    return result
 
 
 def apply_preferences_if_confident(arch, threshold: float = 0.75) -> Dict[str, Any]:

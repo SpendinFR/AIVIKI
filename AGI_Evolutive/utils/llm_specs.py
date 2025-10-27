@@ -253,6 +253,175 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         },
     ),
     _spec(
+        "cognition_goal_prioritizer",
+        "AGI_Evolutive/cognition/prioritizer.py",
+        "Réévalue la priorité d'un plan à partir des signaux heuristiques fournis.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Retourne 'priority' ∈ [0,1], 'tags' (liste) et 'explain' (liste de raisons).",
+            "Ne modifie la priorité que si les justifications le nécessitent et explique les ajustements.",
+            "Ajoute 'confidence' (0-1) et 'notes' si pertinent.",
+        ),
+        example_output={
+            "priority": 0.78,
+            "tags": ["urgent"],
+            "explain": [
+                "user_urgency:demande explicite(+0.30)",
+                "deadline:échéance proche(+0.22)",
+            ],
+            "confidence": 0.74,
+            "notes": "Boost léger validé par signal utilisateur et deadline rapprochée.",
+        },
+    ),
+    _spec(
+        "cognition_overview",
+        "AGI_Evolutive/cognition/__init__.py",
+        "Synthétise l'état courant des sous-systèmes de cognition et priorise les axes d'attention.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Retourne 'summary', 'recommended_focus' (liste) et 'alerts' (liste optionnelle).",
+            "Ajoute 'confidence' ∈ [0,1] et 'notes' pour contextualiser la recommandation.",
+        ),
+        example_output={
+            "summary": "Planner stable, backlog modéré et proposer saturé par 4 éléments prioritaires.",
+            "recommended_focus": [
+                "Réduire backlog proposer sous 3 éléments",
+                "Analyser feedback négatifs récents",
+            ],
+            "alerts": ["Télémetrie incomplète côté homeostasis"],
+            "confidence": 0.7,
+            "notes": "Données planner cohérentes mais feedback limité sur 24h.",
+        },
+    ),
+    _spec(
+        "cognition_context_inference",
+        "AGI_Evolutive/cognition/context_inference.py",
+        "Valide ou ajuste la décision 'where' à partir des scores heuristiques et de l'historique.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Ne change 'threshold' qu'en justifiant le risque d'erreur.",
+            "Ajoute 'actions' (liste de suivis) si un complément manuel est requis.",
+        ),
+        example_output={
+            "status": "applied",
+            "score": 0.81,
+            "threshold": 0.72,
+            "summary": "Contexte stable depuis 3 cycles, cohérence langues confirmée.",
+            "confidence": 0.76,
+            "actions": ["Vérifier workspace/git car delta récent"],
+            "notes": "Seuil abaissé car drift détecté sur workspace, reste prudent.",
+        },
+    ),
+    _spec(
+        "cognition_habit_system",
+        "AGI_Evolutive/cognition/habit_system.py",
+        "Hiérarchise la routine proposée, ajuste la force du rappel et génère un message contextualisé.",
+        AVAILABLE_MODELS["fast"],
+        extra_instructions=(
+            "Retourne éventuellement 'message' et ajuste 'strength' entre 0 et 1.",
+            "Ajoute 'confidence' pour indiquer la fiabilité de l'ajustement.",
+        ),
+        example_output={
+            "status": "due",
+            "strength": 0.68,
+            "message": "Pense à relancer le rapport hebdomadaire (retard de 2h).",
+            "confidence": 0.62,
+            "notes": "Fenêtre de grâce encore ouverte 40 min.",
+        },
+    ),
+    _spec(
+        "cognition_identity_principles",
+        "AGI_Evolutive/cognition/identity_principles.py",
+        "Affûte la liste de principes/engagements à partir des règles effectives et de l'historique.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Retourne 'principles' et 'commitments' (listes d'objets {key,...}).",
+            "Explique les ajustements dans 'notes' et fournis 'confidence'.",
+        ),
+        example_output={
+            "principles": [
+                {"key": "respect_privacy", "desc": "Renforcer le cloisonnement des données sensibles."},
+                {"key": "resilience", "desc": "Analyser systématiquement les échecs récents."},
+            ],
+            "commitments": [
+                {"key": "disclose_uncertainty", "active": True},
+                {"key": "postmortem_reviews", "active": False, "note": "Réactiver après analyse incidents."},
+            ],
+            "confidence": 0.73,
+            "notes": "Baisse du taux de succès → priorité à la résilience.",
+        },
+    ),
+    _spec(
+        "cognition_pipelines_registry",
+        "AGI_Evolutive/cognition/pipelines_registry.py",
+        "Valide le pipeline sélectionné et propose un éventuel reroutage selon le contexte.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Peut renvoyer 'pipeline' différent si une variante est mieux adaptée.",
+            "Inclut 'reason', 'confidence' et éventuellement 'order' (liste de tokens) pour re-prioriser.",
+        ),
+        example_output={
+            "pipeline": "GOAL_FAST_TRACK",
+            "reason": "Immediacy=0.82 nécessite voie rapide",
+            "confidence": 0.8,
+            "notes": "Conserver étape de feedback pour suivi utilisateur.",
+        },
+    ),
+    _spec(
+        "cognition_preferences_inference",
+        "AGI_Evolutive/cognition/preferences_inference.py",
+        "Consolide le patch de préférences utilisateur et ajuste le score de confiance.",
+        AVAILABLE_MODELS["fast"],
+        extra_instructions=(
+            "Respecte la structure {patch:{preferences:{...}}, score}.",
+            "Explique les modifications clés dans 'notes' et ajoute 'confidence' si utile.",
+        ),
+        example_output={
+            "patch": {
+                "preferences": {
+                    "values": ["traceability", "care"],
+                    "likes": ["gratitude"],
+                    "style": {"lang": "fr", "conciseness": "balanced"},
+                }
+            },
+            "score": 0.69,
+            "confidence": 0.64,
+            "notes": "Signal concision contrebalancé par demandes de détails → équilibre recommandé.",
+        },
+    ),
+    _spec(
+        "cognition_principle_inducer",
+        "AGI_Evolutive/cognition/principle_inducer.py",
+        "Résume le cycle d'induction et suggère les prochaines vérifications ou promotions.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Retourne 'actions' prioritaires si des suivis humains sont requis.",
+            "Fournis 'confidence' et 'notes' synthétiques.",
+        ),
+        example_output={
+            "summary": "3 MAI candidats générés, 1 retenu pour sandbox.",
+            "actions": ["Revue manuelle du MAI confidences_partagees"],
+            "confidence": 0.71,
+            "notes": "Faible historique de feedback → confirmer avec policy team.",
+        },
+    ),
+    _spec(
+        "cognition_trigger_bus",
+        "AGI_Evolutive/cognition/trigger_bus.py",
+        "Réordonne les triggers prioritaires et ajuste finement leurs scores.",
+        AVAILABLE_MODELS["fast"],
+        extra_instructions=(
+            "Retourne 'priorities' (dict token->score) ou 'order' (liste de tokens).",
+            "Ajoute 'notes'/'confidence' pour contextualiser les arbitrages.",
+        ),
+        example_output={
+            "priorities": {"trigger:THREAT:alpha": 0.95, "trigger:GOAL:beta": 0.62},
+            "order": ["trigger:THREAT:alpha", "trigger:GOAL:beta"],
+            "confidence": 0.67,
+            "notes": "Prioriser menace immédiate, conserver GOAL beta pour suivi après mitigation.",
+        },
+    ),
+    _spec(
         "meta_cognition",
         "AGI_Evolutive/cognition/meta_cognition.py",
         "Identifie les lacunes de compréhension et propose des objectifs d'apprentissage.",
