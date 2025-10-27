@@ -1,9 +1,10 @@
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict
-from typing import List, Dict, Any, Optional, Iterable, Tuple, TYPE_CHECKING
-import os, json, time, uuid, math
+from typing import List, Dict, Any, Optional, Iterable, Tuple, TYPE_CHECKING, Mapping
+import os, json, time, uuid, math, logging
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 from .adaptation import FeedbackTracker
 
@@ -11,6 +12,9 @@ from .ontology import Ontology
 from .entity_linker import EntityLinker
 if TYPE_CHECKING:  # pragma: no cover
     from .summarizer import BeliefSummarizer
+
+LOGGER = logging.getLogger(__name__)
+
 
 @dataclass
 class Evidence:
@@ -905,25 +909,150 @@ class BeliefGraph:
         return event
 
     def summarize(self, subject: Optional[str]=None) -> Dict[str, Any]:
-        bs = self.query(subject=subject) if subject else self.all()
-        rels: Dict[str, List[Belief]] = {}
-        for b in bs:
-            rels.setdefault(b.relation, []).append(b)
-        summary = {}
-        for rel, items in rels.items():
-            top = sorted(items, key=lambda x: x.confidence, reverse=True)[:5]
-            summary[rel] = [
+        beliefs = self.query(subject=subject) if subject else self.all()
+        relation_summary: Dict[str, List[Dict[str, Any]]] = {}
+        for belief in beliefs:
+            relation_summary.setdefault(belief.relation, []).append(
                 {
-                    "value": i.value_label,
-                    "value_id": i.value,
-                    "conf": i.confidence,
-                    "pol": i.polarity,
-                    "stability": i.stability,
-                    "temporal": [seg.to_dict() for seg in i.temporal_segments],
+                    "value": belief.value_label,
+                    "value_id": belief.value,
+                    "conf": float(belief.confidence),
+                    "pol": belief.polarity,
+                    "stability": belief.stability,
+                    "temporal": [seg.to_dict() for seg in belief.temporal_segments],
                 }
-                for i in top
+            )
+        for relation, items in list(relation_summary.items()):
+            relation_summary[relation] = sorted(
+                items, key=lambda item: item["conf"], reverse=True
+            )[:5]
+
+        subject_canonical: Optional[str] = None
+        if subject:
+            try:
+                subject_canonical = self.entity_linker.canonical_form(subject)
+            except Exception:
+                subject_canonical = subject
+
+        contradictions_raw = self.find_contradictions()
+        if subject_canonical:
+            contradictions_raw = [
+                pair
+                for pair in contradictions_raw
+                if pair[0].subject == subject_canonical or pair[0].subject_label == subject
             ]
-        return summary
+        contradictions = [
+            {
+                "subject": positive.subject_label,
+                "relation": positive.relation,
+                "value": positive.value_label,
+                "positive_confidence": round(positive.confidence, 3),
+                "negative_confidence": round(negative.confidence, 3),
+            }
+            for positive, negative in contradictions_raw[:5]
+        ]
+
+        last_updated = max((b.updated_at for b in beliefs), default=None)
+        stats = {
+            "subject": subject or "global",
+            "subject_canonical": subject_canonical,
+            "total_beliefs": len(beliefs),
+            "active_relations": len(relation_summary),
+            "contradiction_pairs": len(contradictions_raw),
+            "last_updated": last_updated,
+        }
+
+        if not beliefs:
+            return {
+                "source": "heuristic",
+                "relations": relation_summary,
+                "stats": stats,
+                "contradictions": contradictions,
+            }
+
+        recent_beliefs = sorted(beliefs, key=lambda b: b.updated_at, reverse=True)[:10]
+        payload = {
+            "subject": subject,
+            "subject_canonical": subject_canonical,
+            "relations": relation_summary,
+            "recent_beliefs": [
+                {
+                    "subject": belief.subject_label,
+                    "relation": belief.relation,
+                    "value": belief.value_label,
+                    "confidence": round(belief.confidence, 3),
+                    "polarity": belief.polarity,
+                    "stability": belief.stability,
+                    "updated_at": belief.updated_at,
+                }
+                for belief in recent_beliefs
+            ],
+            "contradictions": contradictions,
+            "stats": stats,
+        }
+
+        response = try_call_llm_dict(
+            "belief_graph_summary",
+            input_payload=payload,
+            logger=LOGGER,
+        )
+
+        if response:
+            narrative = response.get("narrative")
+            highlights_payload = response.get("highlights")
+            confidence = response.get("confidence")
+            alerts_payload = response.get("alerts")
+            notes = response.get("notes") if isinstance(response.get("notes"), str) else ""
+
+            if isinstance(narrative, str):
+                highlights: List[Dict[str, Any]] = []
+                if isinstance(highlights_payload, list):
+                    for item in highlights_payload:
+                        if isinstance(item, str):
+                            highlights.append({"fact": item})
+                        elif isinstance(item, Mapping):
+                            fact = item.get("fact") or item.get("summary") or item.get("item")
+                            if not isinstance(fact, str):
+                                continue
+                            highlight_entry: Dict[str, Any] = {"fact": fact}
+                            support = item.get("support")
+                            if isinstance(support, str) and support:
+                                highlight_entry["support"] = support
+                            confidence_hint = item.get("confidence")
+                            if isinstance(confidence_hint, (int, float)):
+                                highlight_entry["confidence"] = float(confidence_hint)
+                            highlights.append(highlight_entry)
+
+                alerts: List[str] = []
+                if isinstance(alerts_payload, list):
+                    for alert in alerts_payload:
+                        if isinstance(alert, str) and alert.strip():
+                            alerts.append(alert)
+
+                llm_confidence = (
+                    float(confidence)
+                    if isinstance(confidence, (int, float))
+                    else None
+                )
+
+                return {
+                    "source": "llm",
+                    "narrative": narrative,
+                    "highlights": highlights,
+                    "alerts": alerts,
+                    "confidence": llm_confidence,
+                    "notes": notes,
+                    "relations": relation_summary,
+                    "stats": stats,
+                    "contradictions": contradictions,
+                }
+
+        return {
+            "source": "heuristic",
+            "relations": relation_summary,
+            "stats": stats,
+            "contradictions": contradictions,
+        }
 
     def latest_summary(self) -> Dict[str, Any]:
         if not self._last_summary:

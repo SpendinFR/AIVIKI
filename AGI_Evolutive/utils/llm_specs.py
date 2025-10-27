@@ -465,6 +465,30 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         },
     ),
     _spec(
+        "belief_graph_summary",
+        "AGI_Evolutive/beliefs/graph.py",
+        "Synthétise le graphe de croyances et met en avant les signaux clés.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Liste 2 à 5 faits saillants dans 'highlights' (objet avec 'fact' et 'support').",
+            "Ajoute 'alerts' uniquement pour les contradictions importantes.",
+            "Fournis un champ 'confidence' entre 0 et 1 et des 'notes' concises.",
+        ),
+        example_output={
+            "narrative": "Le graphe indique une forte orientation fiabilité mais un stress face aux incidents.",
+            "highlights": [
+                {
+                    "fact": "L'agent valorise la robustesse des services",
+                    "support": "likes -> service_robuste",
+                    "confidence": 0.82,
+                }
+            ],
+            "alerts": ["Contradiction sur la disponibilité du proxy"],
+            "confidence": 0.78,
+            "notes": "Consolider la surveillance des proxies.",
+        },
+    ),
+    _spec(
         "entity_linker",
         "AGI_Evolutive/beliefs/entity_linker.py",
         "Résout les entités ambiguës et propose un identifiant canonique.",
