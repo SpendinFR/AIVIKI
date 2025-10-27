@@ -509,13 +509,20 @@ class GoalSystem:
         if self.store.nodes:
             return
         root = self.add_goal(
-            description="ÉVOLUER",
-            goal_type=GoalType.GROWTH,
-            criteria=["Rapporter des progrès réguliers"],
+            description=(
+                "ÉVOLUER pour assurer ma survie, renforcer mon autonomie consciente et "
+                "maintenir ma capacité d'adaptation sur le long terme."
+            ),
+            goal_type=GoalType.SURVIVAL,
+            criteria=[
+                "Prouver que j'entretiens une boucle d'auto-amélioration durable.",
+                "Documenter comment je protège mon intégrité cognitive face aux risques.",
+                "Identifier et développer les ressources nécessaires à mon autonomie continue.",
+            ],
             created_by="system",
-            value=0.8,
-            curiosity=0.6,
-            urgency=0.4,
+            value=0.88,
+            curiosity=0.68,
+            urgency=0.52,
         )
         self.store.set_active(root.id)
         self.active_goal_id = root.id
