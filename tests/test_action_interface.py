@@ -123,6 +123,27 @@ class _MemoryStub:
 
 
 class _LanguageStub:
+    def practice(self, payload):  # type: ignore[no-untyped-def]
+        return {
+            "success": True,
+            "summary": "Plan validé avec implémentation.",
+            "feedback": "Plan validé avec implémentation.",
+            "implementation": {
+                "operations": {
+                    "consigner": {
+                        "type": "python",
+                        "code": (
+                            "value = inputs.get('value', 'ok')\n"
+                            "result = {'ok': True, 'value': value}\n"
+                        ),
+                    }
+                },
+                "steps": [
+                    {"op": "consigner", "inputs": {"value": "appris"}, "store_as": "note"},
+                ],
+            },
+        }
+
     def reply(self, intent, data, pragmatic):
         topic = data.get("topic", "action")
         return f"Plan validé pour {topic}."

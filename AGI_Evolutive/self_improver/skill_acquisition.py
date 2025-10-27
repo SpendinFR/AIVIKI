@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import glob
 import json
 import os
 import threading
 import time
 import uuid
 import weakref
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from pathlib import Path
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
 
@@ -116,6 +119,8 @@ class SkillRequest:
     approved_by: Optional[str] = None
     approval_notes: Optional[str] = None
     last_error: Optional[str] = None
+    implementation: Optional[Dict[str, Any]] = None
+    last_execution: Optional[Dict[str, Any]] = None
 
     def public_view(self) -> Dict[str, Any]:
         return {
@@ -132,7 +137,48 @@ class SkillRequest:
             "last_error": self.last_error,
             "created_at": self.created_at,
             "knowledge_items": len(self.knowledge),
+            "has_implementation": self.implementation is not None,
+            "last_execution": self.last_execution,
         }
+
+
+@dataclass
+class SkillExecutionContext:
+    """Context passed to concrete skill operations during execution."""
+
+    manager: "SkillSandboxManager"
+    request: SkillRequest
+    payload: Mapping[str, Any]
+    knowledge: Sequence[Mapping[str, Any]]
+    results: Dict[str, Any]
+
+    @property
+    def memory(self) -> Optional[Any]:
+        return self.manager.memory
+
+    @property
+    def interface(self) -> Optional[Any]:
+        ref = self.manager.interface_ref
+        return ref() if ref else None
+
+    def resolve_value(self, spec: Any) -> Any:
+        return self.manager._resolve_implementation_value(
+            spec,
+            payload=self.payload,
+            knowledge=self.knowledge,
+            results=self.results,
+        )
+
+    def resolve_structure(self, spec: Any) -> Any:
+        return self.manager._resolve_implementation_structure(
+            spec,
+            payload=self.payload,
+            knowledge=self.knowledge,
+            results=self.results,
+        )
+
+
+OperationFunc = Callable[[SkillExecutionContext, Mapping[str, Any]], Dict[str, Any]]
 
 
 class SkillSandboxManager:
@@ -163,6 +209,7 @@ class SkillSandboxManager:
         self._requests: Dict[str, SkillRequest] = {}
         self._threads: Dict[str, threading.Thread] = {}
         self._active_handlers: Dict[str, Any] = {}
+        self._operations: Dict[str, OperationFunc] = {}
 
         self._positive_markers: Tuple[str, ...] = (
             "succès",
@@ -207,6 +254,13 @@ class SkillSandboxManager:
         self.jobs: Optional[Any] = None
         self.arch_ref: Optional[weakref.ReferenceType] = None
         self.interface_ref: Optional[weakref.ReferenceType] = None
+        self.question_manager_ref: Optional[weakref.ReferenceType] = None
+        self.perception_ref: Optional[weakref.ReferenceType] = None
+        self._inbox_dir_override: Optional[str] = None
+
+        # Track recently issued clarification requests to avoid spamming the
+        # QuestionManager when information is missing.
+        self._information_requests: Dict[str, float] = {}
 
         self._load_state()
 
@@ -221,6 +275,9 @@ class SkillSandboxManager:
         jobs: Optional[Any] = None,
         arch: Optional[Any] = None,
         interface: Optional[Any] = None,
+        question_manager: Optional[Any] = None,
+        perception: Optional[Any] = None,
+        inbox_dir: Optional[str] = None,
     ) -> None:
         if memory is not None:
             self.memory = memory
@@ -234,6 +291,12 @@ class SkillSandboxManager:
             self.arch_ref = weakref.ref(arch)
         if interface is not None:
             self.interface_ref = weakref.ref(interface)
+        if question_manager is not None:
+            self.question_manager_ref = weakref.ref(question_manager)
+        if perception is not None:
+            self.perception_ref = weakref.ref(perception)
+        if inbox_dir is not None:
+            self._inbox_dir_override = inbox_dir
 
     # ------------------------------------------------------------------
     def register_intention(
@@ -321,6 +384,17 @@ class SkillSandboxManager:
             self._ensure_training(action_key)
 
         return request.public_view()
+
+    # ------------------------------------------------------------------
+    def register_operation(self, name: str, handler: OperationFunc) -> None:
+        """Register or override a concrete primitive usable by skill steps."""
+
+        key = str(name or "").strip()
+        if not key:
+            raise ValueError("operation name must be provided")
+        if not callable(handler):
+            raise ValueError("operation handler must be callable")
+        self._operations[key] = handler
 
     # ------------------------------------------------------------------
     # Public API used by ActionInterface
@@ -466,6 +540,26 @@ class SkillSandboxManager:
 
         return {"ok": True, "status": "active", "skill": self.status(action_type)}
 
+    def update_implementation(
+        self, action_type: str, implementation: Mapping[str, Any]
+    ) -> Dict[str, Any]:
+        if not action_type:
+            return {"ok": False, "reason": "missing_action_type"}
+        try:
+            normalised = self._normalise_implementation(implementation)
+        except Exception as exc:
+            return {"ok": False, "reason": "invalid_implementation", "error": str(exc)}
+
+        with self._lock:
+            request = self._requests.get(action_type)
+            if request is None:
+                return {"ok": False, "reason": "unknown_skill"}
+            request.implementation = normalised
+            self._save_state_locked()
+            public = request.public_view()
+
+        return {"ok": True, "implementation": normalised, "skill": public}
+
     def status(self, action_type: str) -> Dict[str, Any]:
         with self._lock:
             request = self._requests.get(action_type)
@@ -488,6 +582,8 @@ class SkillSandboxManager:
                 {
                     "trials": trials,
                     "success_rate": self._success_rate(request),
+                    "implementation": request.implementation,
+                    "last_execution": request.last_execution,
                 }
             )
             return payload
@@ -528,6 +624,9 @@ class SkillSandboxManager:
             else:
                 payload["trial_count"] = len(request.trials)
 
+            payload["implementation"] = request.implementation
+            payload["last_execution"] = request.last_execution
+
             snapshot.append(payload)
 
         return snapshot
@@ -546,9 +645,17 @@ class SkillSandboxManager:
                     "skill": request.public_view(),
                 }
             knowledge = list(request.knowledge)
+            implementation = request.implementation
 
-        summary = self._render_execution_summary(request, payload, knowledge)
-        return {
+        execution_result: Optional[Dict[str, Any]] = None
+        if implementation:
+            try:
+                execution_result = self._execute_implementation(request, payload, knowledge)
+            except Exception as exc:
+                execution_result = {"ok": False, "error": str(exc), "steps": [], "outputs": {}}
+
+        summary = self._render_execution_summary(request, payload, knowledge, execution_result)
+        response = {
             "ok": True,
             "skill": action_type,
             "summary": summary,
@@ -566,6 +673,20 @@ class SkillSandboxManager:
                 for t in request.trials
             ],
         }
+        if execution_result is not None:
+            response["result"] = execution_result
+
+        with self._lock:
+            request = self._requests.get(action_type)
+            if request is not None:
+                request.last_execution = {
+                    "timestamp": _now(),
+                    "payload": json_sanitize(payload),
+                    "result": json_sanitize(execution_result),
+                }
+                self._save_state_locked()
+
+        return response
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -651,13 +772,17 @@ class SkillSandboxManager:
                 request.trials = trials
                 request.successes = successes
                 success_rate = self._success_rate(request)
-                if success_rate >= self.success_threshold:
+                has_impl = self._has_viable_implementation(request.implementation)
+                if success_rate >= self.success_threshold and has_impl:
                     request.status = "awaiting_approval" if request.approval_required else "active"
                     self._save_state_locked()
                     self._notify_ready(request)
                     return
                 request.status = "failed"
-                request.last_error = "insufficient_success_rate"
+                if not has_impl:
+                    request.last_error = "implementation_missing"
+                else:
+                    request.last_error = "insufficient_success_rate"
                 self._save_state_locked()
 
             if self.training_interval > 0:
@@ -669,7 +794,10 @@ class SkillSandboxManager:
                 return
             if request.status not in {"awaiting_approval", "active"}:
                 request.status = "failed"
-                request.last_error = "max_attempts_reached"
+                if not self._has_viable_implementation(request.implementation):
+                    request.last_error = "implementation_missing"
+                else:
+                    request.last_error = "max_attempts_reached"
                 self._save_state_locked()
 
     def _gather_knowledge(self, request: SkillRequest) -> List[Dict[str, Any]]:
@@ -689,6 +817,10 @@ class SkillSandboxManager:
             except Exception:
                 pass
 
+        inbox_items = self._collect_inbox_context(query)
+        if inbox_items:
+            knowledge.extend(inbox_items)
+
         if not knowledge and request.payload:
             knowledge.append({"source": "payload", "content": request.payload})
 
@@ -701,7 +833,155 @@ class SkillSandboxManager:
             except Exception:
                 pass
 
+        self._maybe_request_information(request, knowledge)
+
         return knowledge
+
+    def _resolve_question_manager(self) -> Optional[Any]:
+        if self.question_manager_ref is not None:
+            manager = self.question_manager_ref()
+            if manager is not None:
+                return manager
+
+        arch = self.arch_ref() if self.arch_ref else None
+        if arch is not None:
+            manager = getattr(arch, "question_manager", None)
+            if manager is not None:
+                self.question_manager_ref = weakref.ref(manager)
+                return manager
+        return None
+
+    def _resolve_perception_interface(self) -> Optional[Any]:
+        if self.perception_ref is not None:
+            perception = self.perception_ref()
+            if perception is not None:
+                return perception
+
+        arch = self.arch_ref() if self.arch_ref else None
+        if arch is not None:
+            perception = getattr(arch, "perception_interface", None)
+            if perception is not None:
+                self.perception_ref = weakref.ref(perception)
+                return perception
+        return None
+
+    def _resolve_inbox_dir(self) -> Optional[str]:
+        if self._inbox_dir_override and os.path.isdir(self._inbox_dir_override):
+            return self._inbox_dir_override
+
+        perception = self._resolve_perception_interface()
+        if perception is not None:
+            inbox_dir = getattr(perception, "inbox_dir", None)
+            if isinstance(inbox_dir, str) and os.path.isdir(inbox_dir):
+                self._inbox_dir_override = inbox_dir
+                return inbox_dir
+
+        arch = self.arch_ref() if self.arch_ref else None
+        if arch is not None:
+            candidate = getattr(arch, "inbox_dir", None)
+            if isinstance(candidate, str) and os.path.isdir(candidate):
+                self._inbox_dir_override = candidate
+                return candidate
+
+        fallbacks = [os.path.join("data", "inbox"), "inbox"]
+        for candidate in fallbacks:
+            abs_path = os.path.abspath(candidate)
+            if os.path.isdir(abs_path):
+                self._inbox_dir_override = abs_path
+                return abs_path
+        return None
+
+    def _collect_inbox_context(self, query: str) -> List[Dict[str, Any]]:
+        inbox_dir = self._resolve_inbox_dir()
+        if not inbox_dir:
+            return []
+
+        try:
+            files = sorted(glob.glob(os.path.join(inbox_dir, "*")))
+        except Exception:
+            return []
+
+        if not files:
+            return []
+
+        tokens = [token.lower() for token in _unique_keywords(query, 4)] if query else []
+        gathered: List[Dict[str, Any]] = []
+
+        for path in files:
+            if len(gathered) >= 4:
+                break
+            if not os.path.isfile(path):
+                continue
+            try:
+                text = Path(path).read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                continue
+
+            if tokens:
+                lowered = text.lower()
+                if not any(token in lowered for token in tokens):
+                    continue
+
+            snippet = text[:800]
+            gathered.append(
+                {
+                    "source": f"inbox:{os.path.basename(path)}",
+                    "path": path,
+                    "content": snippet,
+                    "snippet": snippet,
+                    "kind": "inbox",
+                }
+            )
+
+        return gathered
+
+    def _maybe_request_information(
+        self, request: SkillRequest, knowledge: Sequence[Mapping[str, Any]]
+    ) -> None:
+        manager = self._resolve_question_manager()
+        if manager is None:
+            return
+
+        meaningful_sources = {
+            str(item.get("source"))
+            for item in knowledge
+            if isinstance(item, Mapping) and item.get("source") not in {None, "", "payload"}
+        }
+        if meaningful_sources:
+            with self._lock:
+                self._information_requests.pop(request.action_type, None)
+            return
+
+        now = _now()
+        with self._lock:
+            last_request = self._information_requests.get(request.action_type)
+            if last_request is not None and now - last_request < 600.0:
+                return
+            self._information_requests[request.action_type] = now
+
+        description = request.description or request.action_type.replace("_", " ")
+        question = (
+            "Peux-tu me fournir les étapes concrètes ou les ressources nécessaires pour «"
+            f" {description} » ?"
+        )
+        metadata = {
+            "source": "skill_sandbox",
+            "action_type": request.action_type,
+            "skill_id": request.identifier,
+            "ts": now,
+        }
+        if request.payload:
+            metadata["payload_keys"] = sorted(str(key) for key in request.payload.keys())
+
+        try:
+            manager.add_question(
+                question,
+                qtype="skill_requirement",
+                metadata=metadata,
+                priority=0.8,
+            )
+        except Exception:
+            pass
 
     def _run_trials(
         self, request: SkillRequest, knowledge: List[Dict[str, Any]]
@@ -760,6 +1040,39 @@ class SkillSandboxManager:
         coverage = max(0.0, min(1.0, coverage))
         return coverage, evidence[:10]
 
+    def _practice_from_knowledge(
+        self,
+        request: SkillRequest,
+        knowledge: Sequence[Mapping[str, Any]],
+        requirements: Sequence[str],
+    ) -> Optional[Dict[str, Any]]:
+        if self._has_viable_implementation(request.implementation):
+            return None
+
+        extracted = self._extract_knowledge_implementation(knowledge)
+        if extracted is None:
+            return None
+
+        implementation, provenance = extracted
+        evidence: List[str] = []
+        if provenance:
+            evidence.append(provenance)
+        evidence.extend(str(item) for item in requirements if item)
+        summary = (
+            f"Implémentation dérivée de la mémoire ({provenance})."
+            if provenance
+            else "Implémentation dérivée de la mémoire disponible."
+        )
+
+        return {
+            "success": True,
+            "mode": "knowledge",
+            "summary": summary,
+            "feedback": summary,
+            "evidence": evidence[:10],
+            "implementation": implementation,
+        }
+
     def _simulate_practice(
         self,
         request: SkillRequest,
@@ -769,6 +1082,23 @@ class SkillSandboxManager:
         index: int,
         coverage: float,
     ) -> Dict[str, Any]:
+        knowledge_practice = self._practice_from_knowledge(
+            request, knowledge, requirements
+        )
+        if knowledge_practice is not None:
+            self._ensure_practice_implementation(knowledge_practice, origin="knowledge")
+            self._record_practice_attempt(
+                request,
+                index,
+                knowledge_practice,
+                coverage,
+                origin="knowledge",
+            )
+            self._update_implementation_from_practice(
+                request.action_type, knowledge_practice
+            )
+            return knowledge_practice
+
         payload_snapshot = {
             "action_type": request.action_type,
             "description": request.description,
@@ -777,6 +1107,8 @@ class SkillSandboxManager:
             "payload": request.payload,
             "attempt": index,
         }
+
+        self._inject_implementation_requirements(request, payload_snapshot)
 
         simulator = self.simulator
         if simulator is not None and hasattr(simulator, "run"):
@@ -787,25 +1119,144 @@ class SkillSandboxManager:
                 result = None
             practice = self._normalise_practice_result(result, coverage)
             if practice is not None:
+                self._ensure_practice_implementation(practice, origin="simulator")
                 self._record_practice_attempt(request, index, practice, coverage, origin="simulator")
+                self._update_implementation_from_practice(request.action_type, practice)
                 return practice
 
         language = self.language
         practice = self._language_practice(language, request, payload_snapshot, coverage)
         if practice is not None:
+            self._ensure_practice_implementation(practice, origin="language")
             self._record_practice_attempt(request, index, practice, coverage, origin="language")
+            self._update_implementation_from_practice(request.action_type, practice)
             return practice
 
-        success = coverage >= self.success_threshold or coverage >= 0.6
         fallback = {
-            "success": success,
-            "mode": "coverage",
-            "summary": "Validation basée sur la couverture des connaissances.",
+            "success": False,
+            "mode": "implementation_missing",
+            "summary": "Pratique insuffisante : fournir une implémentation complète (opérations + étapes).",
             "feedback": None,
             "evidence": [],
         }
+        self._ensure_practice_implementation(fallback, origin="coverage")
         self._record_practice_attempt(request, index, fallback, coverage, origin="coverage")
         return fallback
+
+    def _extract_knowledge_implementation(
+        self, knowledge: Sequence[Mapping[str, Any]]
+    ) -> Optional[Tuple[Dict[str, Any], Optional[str]]]:
+        for item in knowledge:
+            if not isinstance(item, Mapping):
+                continue
+
+            provenance = self._knowledge_provenance(item)
+            candidate = self._find_implementation_in_structure(item)
+            if candidate is None:
+                continue
+
+            return candidate, provenance
+
+        return None
+
+    def _knowledge_provenance(self, entry: Mapping[str, Any]) -> Optional[str]:
+        labels: List[str] = []
+        for key in ("title", "name", "label", "source", "origin", "description"):
+            value = entry.get(key)
+            if isinstance(value, str) and value.strip():
+                labels.append(value.strip())
+
+        content = entry.get("content")
+        if isinstance(content, Mapping):
+            for key in ("title", "name", "label", "source"):
+                value = content.get(key)
+                if isinstance(value, str) and value.strip():
+                    labels.append(value.strip())
+
+        if not labels:
+            return None
+
+        ordered = []
+        seen: Dict[str, bool] = {}
+        for label in labels:
+            if label not in seen:
+                seen[label] = True
+                ordered.append(label)
+        return ", ".join(ordered)
+
+    def _find_implementation_in_structure(
+        self, root: Mapping[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        queue: deque[Any] = deque([root])
+        seen: Dict[int, bool] = {}
+
+        while queue:
+            current = queue.popleft()
+            try:
+                current_id = id(current)
+            except Exception:
+                current_id = None
+
+            if current_id is not None:
+                if current_id in seen:
+                    continue
+                seen[current_id] = True
+
+            if isinstance(current, Mapping):
+                implementation_candidate = None
+
+                if "implementation" in current:
+                    implementation_candidate = current.get("implementation")
+                elif {
+                    "operations",
+                    "steps",
+                }.issubset(set(key for key in current.keys())):
+                    implementation_candidate = {
+                        "operations": current.get("operations"),
+                        "steps": current.get("steps"),
+                        **{k: current.get(k) for k in ("kind", "description") if k in current},
+                    }
+
+                if implementation_candidate is not None:
+                    try:
+                        normalised = self._normalise_implementation(implementation_candidate)
+                    except Exception:
+                        normalised = None
+                    if normalised and self._implementation_has_required_parts(normalised):
+                        return normalised
+
+                for value in current.values():
+                    if isinstance(value, str):
+                        stripped = value.strip()
+                        if stripped.startswith("{") or stripped.startswith("["):
+                            try:
+                                parsed = json.loads(stripped)
+                            except Exception:
+                                parsed = None
+                            if isinstance(parsed, (Mapping, list, tuple, set)):
+                                queue.append(parsed)
+                            continue
+                    queue.append(value)
+                continue
+
+            if isinstance(current, (list, tuple, set)):
+                for value in current:
+                    queue.append(value)
+                continue
+
+            if isinstance(current, str):
+                stripped = current.strip()
+                if not stripped:
+                    continue
+                if stripped.startswith("{") or stripped.startswith("["):
+                    try:
+                        parsed = json.loads(stripped)
+                    except Exception:
+                        parsed = None
+                    if isinstance(parsed, (Mapping, list, tuple, set)):
+                        queue.append(parsed)
+
+        return None
 
     def _normalise_practice_result(self, result: Any, coverage: float) -> Optional[Dict[str, Any]]:
         if result is None:
@@ -848,13 +1299,16 @@ class SkillSandboxManager:
         if success_value is None:
             success_value = coverage >= self.success_threshold or coverage >= 0.6
 
-        return {
+        payload: Dict[str, Any] = {
             "success": success_value,
             "mode": "simulator",
             "summary": summary,
             "feedback": feedback,
             "evidence": evidence,
         }
+        if isinstance(result, Mapping) and result.get("implementation"):
+            payload["implementation"] = result.get("implementation")
+        return payload
 
     def _language_practice(
         self,
@@ -867,7 +1321,7 @@ class SkillSandboxManager:
             return None
 
         attempt_summary = json_sanitize(payload_snapshot)
-        response: Optional[str] = None
+        response: Optional[Any] = None
 
         try:
             if hasattr(language, "evaluate_skill_attempt"):
@@ -899,16 +1353,66 @@ class SkillSandboxManager:
         except Exception:
             response = None
 
-        if not response:
+        if response is None:
             return None
 
-        success = self._interpret_text_success(response, coverage)
-        evidence = _unique_keywords(response)[:10]
+        parsed: Optional[Dict[str, Any]] = None
+        summary_text: Optional[str] = None
+        feedback_text: Optional[str] = None
+        implementation: Optional[Any] = None
+
+        if isinstance(response, Mapping):
+            parsed = dict(response)
+        elif isinstance(response, str):
+            summary_text = response
+            stripped = response.strip()
+            if stripped.startswith("{") and stripped.endswith("}"):
+                try:
+                    parsed_candidate = json.loads(stripped)
+                    if isinstance(parsed_candidate, Mapping):
+                        parsed = dict(parsed_candidate)
+                except Exception:
+                    parsed = None
+        else:
+            summary_text = _normalise_text(response)
+
+        if parsed is not None:
+            implementation = parsed.get("implementation")
+            summary_text = _first_text(parsed, "summary", "message", "description")
+            feedback_text = _first_text(parsed, "feedback", "notes", "comment")
+            success_value = parsed.get("success")
+            success = _coerce_bool(success_value)
+            if success is None:
+                score = parsed.get("score")
+                if isinstance(score, (int, float)):
+                    success = score >= self.success_threshold
+            if success is None:
+                success = self._interpret_text_success(summary_text or json.dumps(parsed), coverage)
+            evidence: List[str] = []
+            raw_evidence = parsed.get("evidence")
+            if isinstance(raw_evidence, (list, tuple, set)):
+                evidence = [_normalise_text(item) for item in raw_evidence][:10]
+            elif raw_evidence:
+                evidence = [_normalise_text(raw_evidence)]
+            if not summary_text:
+                summary_text = feedback_text or json.dumps(parsed, ensure_ascii=False)
+            return {
+                "success": bool(success),
+                "mode": "language",
+                "summary": summary_text,
+                "feedback": feedback_text or summary_text,
+                "evidence": evidence,
+                "implementation": implementation,
+            }
+
+        summary_text = summary_text or _normalise_text(response)
+        success = self._interpret_text_success(summary_text, coverage)
+        evidence = _unique_keywords(summary_text)[:10]
         return {
             "success": success,
             "mode": "language",
-            "summary": response,
-            "feedback": response,
+            "summary": summary_text,
+            "feedback": summary_text,
             "evidence": evidence,
         }
 
@@ -931,6 +1435,103 @@ class SkillSandboxManager:
             "summary": (result.get("summary") or "")[:240],
         }
         self._memorise_event("skill_practice_attempt", metadata)
+
+    def _update_implementation_from_practice(
+        self, action_type: str, practice: Mapping[str, Any]
+    ) -> None:
+        if not isinstance(practice, Mapping):
+            return
+        implementation = practice.get("implementation")
+        if not implementation:
+            return
+        try:
+            normalised = self._normalise_implementation(implementation)
+        except Exception:
+            return
+
+        with self._lock:
+            request = self._requests.get(action_type)
+            if request is None:
+                return
+            request.implementation = normalised
+            self._save_state_locked()
+
+    def _ensure_practice_implementation(
+        self, practice: Mapping[str, Any], *, origin: str
+    ) -> bool:
+        if not isinstance(practice, Mapping):
+            return False
+
+        implementation = practice.get("implementation")
+        if not implementation:
+            self._mark_practice_incomplete(practice, "implementation_missing", origin)
+            return False
+
+        try:
+            normalised = self._normalise_implementation(implementation)
+        except Exception as exc:
+            self._mark_practice_incomplete(
+                practice,
+                "implementation_invalid",
+                origin,
+                error=str(exc),
+            )
+            return False
+
+        if not self._implementation_has_required_parts(normalised):
+            self._mark_practice_incomplete(
+                practice,
+                "implementation_incomplete",
+                origin,
+                candidate=normalised,
+            )
+            return False
+
+        practice["implementation"] = normalised
+        return True
+
+    def _mark_practice_incomplete(
+        self,
+        practice: Mapping[str, Any],
+        reason: str,
+        origin: str,
+        *,
+        candidate: Optional[Mapping[str, Any]] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        if not isinstance(practice, dict):
+            return
+
+        messages = {
+            "implementation_missing": "Implémentation absente : fournir des opérations et des étapes complètes.",
+            "implementation_invalid": "Implémentation invalide : impossible de normaliser la structure fournie.",
+            "implementation_incomplete": "Implémentation incomplète : les opérations et les étapes doivent être définies.",
+        }
+
+        note = messages.get(reason, "Implémentation indisponible.")
+        if error:
+            note = f"{note} ({error})"
+
+        summary = practice.get("summary") or ""
+        if summary:
+            summary = f"{summary} — {note}"
+        else:
+            summary = note
+
+        practice["summary"] = summary
+        if not practice.get("feedback"):
+            practice["feedback"] = summary
+        practice["mode"] = practice.get("mode") or origin or "validation"
+        practice["success"] = False
+        practice["error"] = reason
+        evidence = list(practice.get("evidence") or [])
+        evidence.append(reason)
+        practice["evidence"] = evidence[:10]
+        if candidate is not None:
+            practice["implementation_candidate"] = candidate
+        practice["implementation"] = None
+        if error:
+            practice["implementation_error"] = error
 
     def _interpret_text_success(self, text: str, coverage: float) -> bool:
         normalized = text.lower()
@@ -955,6 +1556,33 @@ class SkillSandboxManager:
             req.extend(_unique_keywords(request.description))
         return req[:20]
 
+    def _implementation_requirement_prompts(self) -> List[str]:
+        return [
+            "Fournir une implémentation exécutable complète : définir les operations disponibles et les steps ordonnés.",
+            "Décrire chaque opération avec le code Python ou l'action à appeler ainsi que les entrées nécessaires.",
+            "Lister les steps de la séquence avec les conditions, les paramètres et les noms de stockage des résultats.",
+        ]
+
+    def _inject_implementation_requirements(
+        self, request: SkillRequest, payload_snapshot: Dict[str, Any]
+    ) -> None:
+        if self._has_viable_implementation(request.implementation):
+            return
+
+        existing_req = list(payload_snapshot.get("requirements") or [])
+        prompts = self._implementation_requirement_prompts()
+        for text in prompts:
+            if text not in existing_req:
+                existing_req.append(text)
+
+        payload_snapshot["requirements"] = existing_req
+        payload_snapshot["implementation_required"] = True
+        payload_snapshot["implementation_details"] = {
+            "expect_operations": True,
+            "expect_steps": True,
+            "instructions": prompts,
+        }
+
     def _build_live_handler(
         self, action_type: str, *, interface: Optional[Any] = None
     ) -> Optional[Any]:
@@ -968,40 +1596,490 @@ class SkillSandboxManager:
 
         return _handler
 
+    def _normalise_implementation(self, implementation: Any) -> Dict[str, Any]:
+        if implementation is None:
+            raise ValueError("missing implementation")
+        if isinstance(implementation, str):
+            try:
+                parsed = json.loads(implementation)
+            except Exception as exc:  # noqa: F841
+                raise ValueError("invalid implementation string") from exc
+            implementation = parsed
+        if not isinstance(implementation, Mapping):
+            raise ValueError("implementation must be a mapping")
+
+        payload = dict(implementation)
+        kind = str(payload.get("kind", "sequence") or "sequence")
+        steps = payload.get("steps")
+        if steps is None:
+            steps = []
+        if not isinstance(steps, Sequence):
+            raise ValueError("implementation steps must be a sequence")
+
+        normalised_steps: List[Dict[str, Any]] = []
+        for raw_step in steps:
+            if not isinstance(raw_step, Mapping):
+                continue
+            op = str(
+                raw_step.get("op")
+                or raw_step.get("operation")
+                or raw_step.get("action")
+                or raw_step.get("type")
+                or ""
+            ).strip()
+            if not op:
+                continue
+            step_payload = dict(raw_step)
+            step_payload["op"] = op
+            normalised_steps.append(json_sanitize(step_payload))
+
+        normalised: Dict[str, Any] = {"kind": kind, "steps": normalised_steps}
+
+        raw_operations = payload.get("operations")
+        if isinstance(raw_operations, Mapping):
+            normalised_ops: Dict[str, Any] = {}
+            for name, spec in raw_operations.items():
+                key = str(name or "").strip()
+                if not key:
+                    continue
+                try:
+                    normalised_ops[key] = json_sanitize(spec)
+                except Exception:
+                    normalised_ops[key] = json_sanitize(str(spec))
+            if normalised_ops:
+                normalised["operations"] = normalised_ops
+
+        for key, value in payload.items():
+            if key in {"kind", "steps", "operations"}:
+                continue
+            normalised[key] = json_sanitize(value)
+        return normalised
+
+    def _implementation_has_required_parts(self, implementation: Mapping[str, Any]) -> bool:
+        steps = implementation.get("steps") if isinstance(implementation, Mapping) else None
+        if not isinstance(steps, Sequence) or not steps:
+            return False
+        operations = implementation.get("operations")
+        if not isinstance(operations, Mapping) or not operations:
+            return False
+        for step in steps:
+            if not isinstance(step, Mapping):
+                return False
+            op_name = str(
+                step.get("op")
+                or step.get("use")
+                or step.get("operation")
+                or step.get("action")
+                or ""
+            ).strip()
+            if not op_name:
+                return False
+        return True
+
+    def _has_viable_implementation(self, implementation: Optional[Mapping[str, Any]]) -> bool:
+        if not isinstance(implementation, Mapping):
+            return False
+        return self._implementation_has_required_parts(implementation)
+
+    def _deep_get(self, data: Any, path: str) -> Any:
+        if not path:
+            return data
+        current = data
+        for segment in path.split("."):
+            if isinstance(current, Mapping):
+                current = current.get(segment)
+            elif isinstance(current, Sequence) and segment.isdigit():
+                index = int(segment)
+                if index < 0 or index >= len(current):
+                    return None
+                current = current[index]
+            else:
+                return None
+        return current
+
+    def _resolve_implementation_value(
+        self,
+        spec: Any,
+        *,
+        payload: Mapping[str, Any],
+        knowledge: Sequence[Mapping[str, Any]],
+        results: Mapping[str, Any],
+    ) -> Any:
+        if isinstance(spec, Mapping):
+            if "from_payload" in spec:
+                key = spec["from_payload"]
+                if isinstance(key, str):
+                    return self._deep_get(payload, key)
+                return None
+            if "from_result" in spec:
+                ref = spec["from_result"]
+                if isinstance(ref, str):
+                    return self._deep_get(results, ref)
+                return results.get(ref) if isinstance(ref, str) else None
+            if "from_knowledge" in spec:
+                ref = spec["from_knowledge"]
+                index = 0
+                path = ""
+                if isinstance(ref, Mapping):
+                    index = int(ref.get("index", 0) or 0)
+                    path = str(ref.get("path", "") or "")
+                else:
+                    try:
+                        index = int(ref)
+                    except Exception:
+                        index = 0
+                if 0 <= index < len(knowledge):
+                    item = knowledge[index]
+                    if path:
+                        return self._deep_get(item, path)
+                    return item
+                return None
+            if "literal" in spec:
+                return spec["literal"]
+            if "value" in spec:
+                return spec["value"]
+        if isinstance(spec, str):
+            if spec.startswith("payload."):
+                return self._deep_get(payload, spec[len("payload.") :])
+            if spec.startswith("result."):
+                return self._deep_get(results, spec[len("result.") :])
+            if spec.startswith("knowledge[") and spec.endswith("]"):
+                inner = spec[len("knowledge[") : -1]
+                try:
+                    index = int(inner)
+                except Exception:
+                    index = 0
+                if 0 <= index < len(knowledge):
+                    return knowledge[index]
+        return spec
+
+    def _resolve_implementation_structure(
+        self,
+        spec: Any,
+        *,
+        payload: Mapping[str, Any],
+        knowledge: Sequence[Mapping[str, Any]],
+        results: Mapping[str, Any],
+    ) -> Any:
+        if isinstance(spec, Mapping):
+            pointer_keys = {"from_payload", "from_result", "from_knowledge", "literal"}
+            if any(key in spec for key in pointer_keys):
+                return self._resolve_implementation_value(
+                    spec, payload=payload, knowledge=knowledge, results=results
+                )
+            return {
+                key: self._resolve_implementation_structure(
+                    value,
+                    payload=payload,
+                    knowledge=knowledge,
+                    results=results,
+                )
+                for key, value in spec.items()
+            }
+        if isinstance(spec, (list, tuple)):
+            return [
+                self._resolve_implementation_structure(
+                    item,
+                    payload=payload,
+                    knowledge=knowledge,
+                    results=results,
+                )
+                for item in spec
+            ]
+        return self._resolve_implementation_value(
+            spec, payload=payload, knowledge=knowledge, results=results
+        )
+
+    def _build_operation_registry(
+        self, implementation: Mapping[str, Any]
+    ) -> Dict[str, OperationFunc]:
+        registry: Dict[str, OperationFunc] = dict(self._operations)
+        inline = implementation.get("operations") if isinstance(implementation, Mapping) else None
+        if isinstance(inline, Mapping):
+            for name, definition in inline.items():
+                key = str(name or "").strip()
+                if not key:
+                    continue
+                try:
+                    registry[key] = self._compile_operation(key, definition)
+                except Exception:
+                    continue
+        return registry
+
+    def _compile_operation(self, name: str, definition: Any) -> OperationFunc:
+        if isinstance(definition, str):
+            try:
+                definition = json.loads(definition)
+            except Exception:
+                definition = {"type": "python", "code": str(definition)}
+        if not isinstance(definition, Mapping):
+            raise ValueError(f"invalid operation definition for {name}")
+        op_type = str(
+            definition.get("type")
+            or definition.get("kind")
+            or definition.get("mode")
+            or "python"
+        ).strip().lower()
+
+        if op_type in {"python", "code"}:
+            return self._compile_python_operation(name, definition)
+
+        if op_type in {"action", "skill"}:
+            target_spec = definition.get("action") or definition.get("target")
+
+            def _operation(context: SkillExecutionContext, step: Mapping[str, Any]) -> Dict[str, Any]:
+                interface = context.interface
+                if interface is None or not hasattr(interface, "execute"):
+                    raise RuntimeError("action_interface_unavailable")
+                action_value = step.get("action") or step.get("target") or target_spec
+                action_name = context.resolve_value(action_value)
+                if not action_name:
+                    raise ValueError("missing action target")
+                if str(action_name) == context.request.action_type:
+                    raise RuntimeError("recursive_skill_call")
+                payload_spec = step.get("payload") or step.get("inputs") or definition.get("payload") or {}
+                action_payload = context.resolve_structure(payload_spec)
+                result = interface.execute({"type": str(action_name), "payload": action_payload})
+                ok = True
+                if isinstance(result, Mapping):
+                    ok = bool(result.get("ok", True))
+                return {"ok": ok, "value": json_sanitize(result)}
+
+            return _operation
+
+        raise ValueError(f"unsupported operation type '{op_type}' for {name}")
+
+    def _compile_python_operation(
+        self, name: str, definition: Mapping[str, Any]
+    ) -> OperationFunc:
+        source = definition.get("code") or definition.get("source") or definition.get("body")
+        if not isinstance(source, str) or not source.strip():
+            raise ValueError(f"python operation '{name}' missing code")
+        compiled = compile(source, filename=f"<skill-op:{name}>", mode="exec")
+
+        def _operation(context: SkillExecutionContext, step: Mapping[str, Any]) -> Dict[str, Any]:
+            inputs = context.resolve_structure(step.get("inputs", {}))
+            local_vars = {
+                "context": context,
+                "inputs": inputs,
+                "payload": context.payload,
+                "knowledge": context.knowledge,
+                "results": context.results,
+                "memory": context.memory,
+                "interface": context.interface,
+                "step": step,
+            }
+            globals_env = dict(self._python_operation_globals())
+            exec(compiled, globals_env, local_vars)
+            output = None
+            for key in ("result", "results", "output", "outputs"):
+                if key in local_vars and local_vars[key] is not None:
+                    output = local_vars[key]
+                    break
+            if output is None:
+                output = True
+            if isinstance(output, Mapping):
+                sanitized = json_sanitize(output)
+                if "ok" not in sanitized:
+                    sanitized["ok"] = True
+                return sanitized
+            return {"ok": True, "value": json_sanitize(output)}
+
+        return _operation
+
+    def _python_operation_globals(self) -> Dict[str, Any]:
+        return {
+            "__builtins__": self._python_operation_builtins(),
+            "json": json,
+            "time": time,
+            "os": os,
+            "Path": Path,
+        }
+
+    @staticmethod
+    def _python_operation_builtins() -> Dict[str, Any]:
+        return {
+            "len": len,
+            "min": min,
+            "max": max,
+            "sum": sum,
+            "sorted": sorted,
+            "reversed": reversed,
+            "range": range,
+            "enumerate": enumerate,
+            "any": any,
+            "all": all,
+            "abs": abs,
+            "round": round,
+            "int": int,
+            "float": float,
+            "str": str,
+            "bool": bool,
+            "list": list,
+            "dict": dict,
+            "set": set,
+            "tuple": tuple,
+            "zip": zip,
+            "getattr": getattr,
+            "setattr": setattr,
+            "hasattr": hasattr,
+            "isinstance": isinstance,
+            "issubclass": issubclass,
+            "print": print,
+            "open": open,
+            "__import__": __import__,
+        }
+
+    def _execute_implementation(
+        self,
+        request: SkillRequest,
+        payload: Mapping[str, Any],
+        knowledge: Sequence[Mapping[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        implementation = request.implementation
+        if not implementation:
+            return None
+        steps = implementation.get("steps") if isinstance(implementation, Mapping) else None
+        if not steps:
+            return {"ok": True, "steps": [], "outputs": {}}
+        if not isinstance(steps, Sequence):
+            raise ValueError("invalid implementation steps")
+
+        operation_handlers = self._build_operation_registry(implementation)
+
+        results: Dict[str, Any] = {}
+        context = SkillExecutionContext(
+            manager=self,
+            request=request,
+            payload=payload,
+            knowledge=knowledge,
+            results=results,
+        )
+        log: List[Dict[str, Any]] = []
+        for index, raw_step in enumerate(steps):
+            if not isinstance(raw_step, Mapping):
+                continue
+            op_name = str(
+                raw_step.get("op")
+                or raw_step.get("use")
+                or raw_step.get("operation")
+                or raw_step.get("action")
+                or raw_step.get("step")
+                or ""
+            ).strip()
+            if not op_name:
+                continue
+            handler = operation_handlers.get(op_name)
+            if handler is None:
+                raise ValueError(f"unknown operation '{op_name}'")
+            store_as = (
+                raw_step.get("store_as")
+                or raw_step.get("store")
+                or raw_step.get("as")
+                or f"step_{index}"
+            )
+            log_entry: Dict[str, Any] = {
+                "index": index,
+                "operation": op_name,
+                "store_as": str(store_as),
+            }
+            try:
+                should_run = True
+                if "when" in raw_step:
+                    condition = context.resolve_value(raw_step["when"])
+                    should_run = bool(condition)
+                    log_entry["when"] = condition
+                if not should_run:
+                    log_entry["ok"] = True
+                    log_entry["skipped"] = True
+                    log.append(log_entry)
+                    continue
+
+                outcome = handler(context, raw_step)
+                if not isinstance(outcome, Mapping):
+                    outcome = {"ok": bool(outcome), "value": outcome}
+                outcome = dict(outcome)
+                outcome.setdefault("ok", True)
+                results[str(store_as)] = outcome
+                log_entry["ok"] = bool(outcome.get("ok", True))
+                log.append(log_entry)
+                if not outcome.get("ok", True):
+                    return {
+                        "ok": False,
+                        "error": outcome.get("error", "execution_failed"),
+                        "steps": log,
+                        "outputs": results,
+                    }
+            except Exception as exc:
+                log_entry["ok"] = False
+                log_entry["error"] = str(exc)
+                log.append(log_entry)
+                return {
+                    "ok": False,
+                    "error": str(exc),
+                    "steps": log,
+                    "outputs": results,
+                }
+        return {"ok": True, "steps": log, "outputs": results}
+
     def _render_execution_summary(
         self,
         request: SkillRequest,
         payload: Dict[str, Any],
         knowledge: List[Dict[str, Any]],
+        result: Optional[Dict[str, Any]],
     ) -> str:
         language = self.language
         description = request.description or request.action_type.replace("_", " ")
         hints = [k.get("content") for k in knowledge if isinstance(k, dict) and "content" in k]
         hints_text = ", ".join(str(h)[:120] for h in hints[:4])
-        message = f"Execution synthèse pour {description}."  # fallback
+        base_message = {
+            "description": description,
+            "payload": json_sanitize(payload),
+            "result": json_sanitize(result),
+            "knowledge": [k.get("content") for k in knowledge[:3] if isinstance(k, dict)],
+        }
+        message = f"Exécution de {description} terminée."  # fallback
+        if result is not None and isinstance(result, Mapping):
+            status = "réussie" if result.get("ok", True) else "échouée"
+            message = f"Exécution {status} pour {description}."
 
         if language is not None:
             prompt = {
                 "topic": description,
                 "summary": hints_text or "Synthèse des connaissances intégrées.",
                 "payload": payload,
+                "result": result,
             }
             try:
                 if hasattr(language, "reply"):
                     message = language.reply(
                         intent="inform",
-                        data={"topic": description, "summary": hints_text, "payload": payload},
+                        data={
+                            "topic": description,
+                            "summary": hints_text,
+                            "payload": payload,
+                            "result": result,
+                        },
                         pragmatic={"speech_act": "statement", "context": {"tone": "confident"}},
                     )
                 elif hasattr(language, "generate_reflective_reply"):
                     arch = self.arch_ref() if self.arch_ref else None
                     message = language.generate_reflective_reply(
                         arch,
-                        f"Synthétise l'action {description} avec ces éléments: {json.dumps(json_sanitize(prompt))}",
+                        "Synthétise l'action"
+                        f" {description} avec ces éléments: {json.dumps(json_sanitize(prompt))}",
                     )
             except Exception:
                 pass
 
+        if not isinstance(message, str):
+            try:
+                message = json.dumps(json_sanitize(message), ensure_ascii=False)
+            except Exception:
+                message = str(message)
+        if not message:
+            message = json.dumps(json_sanitize(base_message), ensure_ascii=False)
         return message
 
     def _memorise_event(self, kind: str, metadata: Dict[str, Any]) -> None:
@@ -1072,6 +2150,8 @@ class SkillSandboxManager:
                 "approved_by": req.approved_by,
                 "approval_notes": req.approval_notes,
                 "last_error": req.last_error,
+                "implementation": req.implementation,
+                "last_execution": req.last_execution,
                 "trials": [
                     {
                         "index": t.index,
@@ -1121,6 +2201,13 @@ class SkillSandboxManager:
                 req.approved_by = data.get("approved_by")
                 req.approval_notes = data.get("approval_notes")
                 req.last_error = data.get("last_error")
+                implementation = data.get("implementation")
+                if implementation:
+                    try:
+                        req.implementation = self._normalise_implementation(implementation)
+                    except Exception:
+                        req.implementation = None
+                req.last_execution = data.get("last_execution")
                 req.trials = [
                     SkillTrial(
                         index=int(t.get("index", 0)),
