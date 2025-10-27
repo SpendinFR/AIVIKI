@@ -25,7 +25,7 @@ import platform
 import threading
 import time
 from collections import defaultdict
-from dataclasses import asdict, fields
+from dataclasses import asdict, fields, is_dataclass
 from pathlib import Path
 from typing import Callable, Dict, Iterable, Iterator, List, Mapping, Optional
 
@@ -255,16 +255,42 @@ class MechanismStore:
         return [mapping[identifier] for identifier in ordered_ids]
 
     def _summarize_mai(self, mai: MAI) -> Dict[str, object]:
+        tags: List[str]
+        if isinstance(mai.tags, (list, tuple, set)):
+            tags = [str(tag) for tag in mai.tags]
+        elif mai.tags is None:
+            tags = []
+        else:
+            tags = [str(mai.tags)]
+
+        expected_impact = mai.expected_impact
+        if expected_impact is None:
+            expected_payload: object = None
+        elif is_dataclass(expected_impact):
+            expected_payload = asdict(expected_impact)
+        elif isinstance(expected_impact, Mapping):
+            expected_payload = dict(expected_impact)
+        else:
+            expected_payload = expected_impact
+
+        preconditions_raw = mai.preconditions
+        if isinstance(preconditions_raw, (list, tuple, set)):
+            preconditions = list(preconditions_raw)
+        elif preconditions_raw is None:
+            preconditions = []
+        else:
+            preconditions = [preconditions_raw]
+
         summary: Dict[str, object] = {
             "id": mai.id,
             "title": mai.title,
             "summary": mai.summary,
             "status": mai.status,
-            "tags": list(mai.tags),
+            "tags": self._sanitize_for_json(tags, depth=1),
             "owner": mai.owner,
-            "expected_impact": self._sanitize_for_json(asdict(mai.expected_impact), depth=1),
+            "expected_impact": self._sanitize_for_json(expected_payload, depth=1),
             "metadata": self._sanitize_for_json(mai.metadata, depth=1),
-            "preconditions": self._sanitize_for_json(list(mai.preconditions), depth=1),
+            "preconditions": self._sanitize_for_json(preconditions, depth=1),
             "precondition_expr": self._sanitize_for_json(mai.precondition_expr, depth=1),
         }
         return summary
