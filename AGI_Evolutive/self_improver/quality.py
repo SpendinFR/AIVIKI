@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import importlib
+import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -86,8 +92,26 @@ class QualityGateRunner:
         unit = self._run_unit_suite()
         integration = self._run_integration_suite(overrides)
         passed = unit.passed and integration.passed
-        return {
+        payload = {
             "passed": passed,
             "unit": unit.__dict__,
             "integration": integration.__dict__,
         }
+
+        llm_review = try_call_llm_dict(
+            "self_improver_quality_review",
+            input_payload={
+                "overrides": overrides,
+                "unit": payload["unit"],
+                "integration": payload["integration"],
+            },
+            logger=_LOGGER,
+            max_retries=2,
+        )
+        if llm_review:
+            payload["llm_review"] = dict(llm_review)
+            llm_passed = llm_review.get("llm_passed")
+            if isinstance(llm_passed, bool) and not llm_passed:
+                payload["passed"] = False
+
+        return payload
