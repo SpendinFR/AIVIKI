@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import random
@@ -19,6 +20,7 @@ from AGI_Evolutive.autonomy.auto_signals import (
 )
 from AGI_Evolutive.beliefs.graph import Evidence
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 try:  # pragma: no cover - fallback exercised in tests when metacognition deps missing
     from AGI_Evolutive.metacognition import CognitiveDomain as _CognitiveDomain
@@ -260,6 +262,7 @@ class ActionInterface:
         self._auto_signal_cache: Dict[str, Dict[str, float]] = {}
         self._auto_microaction_history: deque = deque(maxlen=120)
         self.auto_signal_registry: Optional[AutoSignalRegistry] = None
+        self._last_action_scores: Dict[str, Any] = {}
 
     # ------------------------------------------------------------------
     # Binding helpers
@@ -348,6 +351,28 @@ class ActionInterface:
             context=context or {},
         )
         self._prepare_priority_learning(act, base_priority, adjust_priority=True)
+        try:
+            scoring = self.score_actions(
+                [
+                    {
+                        "name": type_,
+                        "type": type_,
+                        "payload": act.payload,
+                        "context": act.context,
+                        "priority": base_priority,
+                    }
+                ],
+                context={"queue_size": len(self.queue)},
+            )
+            actions_report = scoring.get("actions") if isinstance(scoring, Mapping) else []
+            if actions_report:
+                evaluation = dict(actions_report[0])
+                notes = scoring.get("notes") if isinstance(scoring, Mapping) else None
+                if isinstance(notes, str) and notes.strip():
+                    evaluation.setdefault("notes", notes.strip())
+                act.meta["semantic_score"] = evaluation
+        except Exception:
+            logger.debug("Échec de l'évaluation sémantique pour l'action %s", type_, exc_info=True)
         self.queue.append(act)
         self.queue.sort(key=lambda a: a.priority, reverse=True)
         return act.id
@@ -439,6 +464,133 @@ class ActionInterface:
         if load > 0.0:
             base_context *= max(0.2, 1.0 - 0.5 * load)
         return max(0.0, min(1.0, base_context))
+
+    def _heuristic_action_score(
+        self,
+        candidate: Mapping[str, Any],
+        *,
+        shared_context: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        name = str(candidate.get("name") or candidate.get("type") or "action")
+        type_hint = str(candidate.get("type") or name)
+        description = str(candidate.get("description") or candidate.get("summary") or "")
+        payload = candidate.get("payload") if isinstance(candidate.get("payload"), Mapping) else {}
+        action_context = candidate.get("context") if isinstance(candidate.get("context"), Mapping) else {}
+        context = dict(shared_context or {})
+        context.update(action_context)
+
+        def _as_float(value: Any, default: float = 0.0) -> float:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        base_priority = max(0.0, min(1.0, _as_float(candidate.get("priority", context.get("priority", 0.5)), 0.5)))
+        urgency = max(0.0, min(1.0, _as_float(context.get("urgency"), 0.0)))
+        novelty = max(0.0, min(1.0, _as_float(context.get("novelty"), 0.0)))
+        risk_bias = _as_float(context.get("risk"), 0.0)
+        complexity = 0.0
+        if payload:
+            complexity = min(1.0, len(payload) / 6.0)
+
+        impact = max(0.0, min(1.0, 0.35 + 0.4 * base_priority + 0.2 * urgency + 0.1 * novelty))
+        effort = max(0.05, min(1.0, 0.25 + 0.5 * complexity + 0.2 * (1.0 - base_priority)))
+
+        lowered = f"{type_hint} {description} {json.dumps(payload, ensure_ascii=False)}".lower()
+        risk_terms = {"rollback", "delete", "shutdown", "deploy", "danger", "override", "reset"}
+        risk = 0.2 + 0.2 * max(0.0, min(1.0, risk_bias))
+        if any(term in lowered for term in risk_terms):
+            risk += 0.25
+        if "promote" in type_hint.lower():
+            risk += 0.15
+        risk = max(0.05, min(1.0, risk))
+
+        rationale_bits: List[str] = []
+        if urgency > 0.4:
+            rationale_bits.append("urgence élevée")
+        if complexity > 0.5:
+            rationale_bits.append("charge importante")
+        if risk > 0.4:
+            rationale_bits.append("risque non négligeable")
+        if not rationale_bits:
+            rationale_bits.append("estimation heuristique")
+
+        return {
+            "name": name,
+            "type": type_hint,
+            "impact": round(impact, 3),
+            "effort": round(effort, 3),
+            "risk": round(risk, 3),
+            "rationale": "; ".join(rationale_bits),
+        }
+
+    def score_actions(
+        self,
+        actions: Sequence[Mapping[str, Any]],
+        *,
+        context: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if not actions:
+            return {"actions": [], "notes": "aucune action fournie"}
+
+        shared_context = dict(context or {})
+        normalized_candidates: List[Dict[str, Any]] = []
+        for idx, raw in enumerate(actions):
+            if not isinstance(raw, Mapping):
+                continue
+            candidate = dict(raw)
+            candidate.setdefault("name", candidate.get("type") or f"action_{idx}")
+            normalized_candidates.append(candidate)
+
+        heuristics = [
+            self._heuristic_action_score(candidate, shared_context=shared_context)
+            for candidate in normalized_candidates
+        ]
+
+        llm_result = try_call_llm_dict(
+            "action_interface",
+            input_payload={
+                "actions": normalized_candidates,
+                "context": shared_context,
+            },
+            logger=logger,
+        )
+
+        scored: List[Dict[str, Any]] = []
+        notes: Optional[str] = None
+        if isinstance(llm_result, Mapping):
+            llm_actions = llm_result.get("actions")
+            if isinstance(llm_actions, Sequence):
+                for idx, entry in enumerate(llm_actions):
+                    if not isinstance(entry, Mapping):
+                        continue
+                    fallback = heuristics[idx] if idx < len(heuristics) else {}
+                    scored.append(
+                        {
+                            "name": str(entry.get("name") or fallback.get("name") or normalized_candidates[idx]["name"]),
+                            "type": str(entry.get("type") or fallback.get("type") or normalized_candidates[idx].get("type", "")),
+                            "impact": max(0.0, min(1.0, float(entry.get("impact", fallback.get("impact", 0.5))))),
+                            "effort": max(0.0, min(1.0, float(entry.get("effort", fallback.get("effort", 0.5))))),
+                            "risk": max(0.0, min(1.0, float(entry.get("risk", fallback.get("risk", 0.3))))),
+                            "rationale": str(entry.get("rationale") or fallback.get("rationale", "")),
+                        }
+                    )
+            notes_val = llm_result.get("notes")
+            if isinstance(notes_val, str) and notes_val.strip():
+                notes = notes_val.strip()
+
+        if not scored:
+            scored = heuristics
+            notes = notes or "estimation heuristique (LLM indisponible)"
+
+        for item in scored:
+            item["impact"] = round(float(item.get("impact", 0.0)), 3)
+            item["effort"] = round(float(item.get("effort", 0.0)), 3)
+            item["risk"] = round(float(item.get("risk", 0.0)), 3)
+
+        report = {"actions": scored, "notes": notes}
+        self._last_action_scores = report
+        return report
 
     # ------------------------------------------------------------------
     def on_auto_intention_promoted(
@@ -2140,3 +2292,5 @@ class ActionInterface:
                 self.enqueue("reflect", {"trigger": "idle_reflection"}, priority=0.55, context={"auto": True})
             else:
                 self.enqueue("search_memory", {"query": "lacune|erreur|incompréhension"}, priority=0.52, context={"auto": True})
+logger = logging.getLogger(__name__)
+

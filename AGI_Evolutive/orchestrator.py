@@ -68,6 +68,7 @@ from AGI_Evolutive.utils.llm_service import (
     LLMUnavailableError,
     get_llm_manager,
     is_llm_enabled,
+    try_call_llm_dict,
 )
 
 
@@ -1347,6 +1348,46 @@ class Orchestrator:
         expected_score = max(0.65, min(0.95, priority + 0.1))
         timestamp = (need or {}).get("timestamp") or time.time()
 
+        llm_context = {
+            "drive": drive,
+            "level": level,
+            "severity": severity,
+            "slowdown": slowdown,
+            "budgets": budgets,
+            "duration_seconds": duration,
+            "label": label,
+            "message": message,
+            "timestamp": timestamp,
+        }
+
+        llm_notes: Optional[str] = None
+        llm_result = try_call_llm_dict(
+            "orchestrator_needs",
+            input_payload=llm_context,
+            logger=logger,
+        )
+        if isinstance(llm_result, Mapping):
+            protocol = str(llm_result.get("protocol") or "").strip()
+            if protocol:
+                llm_context["protocol"] = protocol
+            duration_hint = llm_result.get("duration")
+            if isinstance(duration_hint, str) and duration_hint.strip():
+                llm_context["duration_hint"] = duration_hint.strip()
+            intensity = llm_result.get("intensity")
+            try:
+                if intensity is not None:
+                    slowdown = max(0.0, min(1.0, float(intensity)))
+                    llm_context["slowdown"] = slowdown
+            except (TypeError, ValueError):
+                pass
+            llm_message = llm_result.get("message")
+            if isinstance(llm_message, str) and llm_message.strip():
+                message = llm_message.strip()
+                llm_context["message"] = message
+            notes_val = llm_result.get("notes")
+            if isinstance(notes_val, str) and notes_val.strip():
+                llm_notes = notes_val.strip()
+
         action = {
             "type": "regulate_resources",
             "priority": priority,
@@ -1362,6 +1403,15 @@ class Orchestrator:
                 "source": "homeostasis",
             },
         }
+
+        if "protocol" in llm_context:
+            action["payload"]["protocol"] = llm_context["protocol"]
+        if "duration_hint" in llm_context:
+            action["payload"]["duration_hint"] = llm_context["duration_hint"]
+        if "slowdown" in llm_context:
+            action["payload"]["slowdown"] = llm_context["slowdown"]
+        if "message" in llm_context:
+            action["payload"]["message"] = llm_context["message"]
 
         summary = f"{label.capitalize()} sous contrainte ({int(round(severity * 100))}% d'urgence)"
         frame = {
@@ -1390,6 +1440,13 @@ class Orchestrator:
             "budgets": budgets,
             "slowdown": slowdown,
         }
+
+        if "protocol" in llm_context:
+            need_context["protocol"] = llm_context["protocol"]
+        if "duration_hint" in llm_context:
+            need_context["duration_hint"] = llm_context["duration_hint"]
+        if llm_notes:
+            need_context["notes"] = llm_notes
 
         return {
             "action": action,
