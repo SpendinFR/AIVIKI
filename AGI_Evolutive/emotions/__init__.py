@@ -4,19 +4,65 @@ Système Émotionnel Avancé de l'AGI Évolutive
 Émotions de base, humeurs, évaluations affectives et apprentissage émotionnel intégrés
 """
 
-import numpy as np
-import time
-from datetime import datetime, timedelta
-from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Tuple
-from dataclasses import dataclass, field
-from enum import Enum
-import threading
-from collections import defaultdict, deque
-import math
 import json
+import logging
+import math
 import random
+import threading
+import time
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+
+import numpy as np
 
 from .emotion_engine import EmotionEngine
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _truncate_text(text: str, limit: int = 512) -> str:
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def _simplify_for_llm(value: Any, *, depth: int = 0, max_depth: int = 2) -> Any:
+    if depth >= max_depth:
+        return _truncate_text(str(value), 160)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return _truncate_text(value, 160)
+    if isinstance(value, Mapping):
+        simplified: Dict[str, Any] = {}
+        for idx, (key, val) in enumerate(value.items()):
+            if idx >= 6:
+                break
+            simplified[str(key)[:48]] = _simplify_for_llm(val, depth=depth + 1, max_depth=max_depth)
+        return simplified
+    if isinstance(value, (list, tuple, set)):
+        return [
+            _simplify_for_llm(item, depth=depth + 1, max_depth=max_depth)
+            for item in list(value)[:6]
+        ]
+    return _truncate_text(str(value), 160)
+
+
+def _prepare_llm_context(context: Mapping[str, Any], *, max_items: int = 12) -> Dict[str, Any]:
+    if not isinstance(context, Mapping):
+        return {}
+    prepared: Dict[str, Any] = {}
+    for idx, (key, value) in enumerate(context.items()):
+        if idx >= max_items:
+            break
+        prepared[str(key)[:48]] = _simplify_for_llm(value)
+    return prepared
 
 
 class BoundedOnlineLinear:
@@ -336,6 +382,8 @@ class EmotionalSystem:
             language=getattr(self.cognitive_architecture, "language", None) if self.cognitive_architecture else None,
             evolution=getattr(self.cognitive_architecture, "evolution", None) if self.cognitive_architecture else None,
         )
+
+        self._last_llm_appraisal: Optional[Dict[str, Any]] = None
 
         
         # === ÉTATS ÉMOTIONNELS ACTUELS ===
@@ -1063,7 +1111,7 @@ class EmotionalSystem:
             "impact": 0.5,            # Impact: 0.0 à 1.0
             "controllability": 0.5    # Contrôlabilité: 0.0 à 1.0
         }
-        
+
         # Analyse basique basée sur le contenu du stimulus
         stimulus_lower = stimulus.lower()
         
@@ -1097,12 +1145,49 @@ class EmotionalSystem:
         intensity_indicators = ["important", "significatif", "majeur", "crucial"]
         impact_score = sum(1 for word in intensity_indicators if word in stimulus_lower) * 0.25
         appraisal["impact"] = max(0.1, min(0.9, 0.5 + impact_score))
-        
+
+        payload = {
+            "stimulus": _truncate_text(stimulus, 800),
+            "context": _prepare_llm_context(context or {}),
+            "baseline_appraisal": dict(appraisal),
+        }
+
+        response = try_call_llm_dict(
+            "emotional_system_appraisal",
+            input_payload=payload,
+            logger=LOGGER,
+        )
+
+        if response is None:
+            self._last_llm_appraisal = None
+            return appraisal
+
+        if not isinstance(response, Mapping):
+            self._last_llm_appraisal = None
+            return appraisal
+
+        self._last_llm_appraisal = dict(response)
+
+        llm_appraisal = response.get("appraisal")
+        if isinstance(llm_appraisal, Mapping):
+            for key in ("desirability", "certainty", "urgency", "impact", "controllability"):
+                if key not in appraisal:
+                    continue
+                value = llm_appraisal.get(key)
+                if not isinstance(value, (int, float)):
+                    continue
+                numeric = float(value)
+                if key == "desirability":
+                    numeric = max(-1.0, min(1.0, numeric))
+                else:
+                    numeric = max(0.0, min(1.0, numeric))
+                appraisal[key] = 0.4 * appraisal[key] + 0.6 * numeric
+
         return appraisal
     
     def _generate_emotional_response(self, relevance: float, consequence_appraisal: Dict[str, float],
                                    goal_congruence: float, coping_potential: float,
-                                   norm_compatibility: float, stimulus: str, 
+                                   norm_compatibility: float, stimulus: str,
                                    context: Dict[str, Any]) -> EmotionalExperience:
         """Génère une réponse émotionnelle basée sur les évaluations"""
         
@@ -1142,14 +1227,43 @@ class EmotionalSystem:
             action_tendencies=action_tendencies,
             expression=""  # À générer plus tard
         )
-        
+
         return experience
-    
+
+    def _match_emotional_state(self, label: Any) -> Optional[EmotionalState]:
+        if not label:
+            return None
+        label_str = str(label).strip().lower()
+        if not label_str:
+            return None
+        for state in EmotionalState:
+            if label_str in {state.value.lower(), state.name.lower()}:
+                return state
+        aliases = {
+            "heureux": EmotionalState.JOY,
+            "peine": EmotionalState.SADNESS,
+            "colere": EmotionalState.ANGER,
+            "colère": EmotionalState.ANGER,
+            "fache": EmotionalState.ANGER,
+            "fâché": EmotionalState.ANGER,
+            "anxiete": EmotionalState.FEAR,
+            "anxiété": EmotionalState.FEAR,
+            "stress": EmotionalState.FEAR,
+            "degout": EmotionalState.DISGUST,
+            "dégoût": EmotionalState.DISGUST,
+            "surpris": EmotionalState.SURPRISE,
+            "confiant": EmotionalState.TRUST,
+            "frustration": EmotionalState.FRUSTRATION,
+            "fierte": EmotionalState.PRIDE,
+            "fierté": EmotionalState.PRIDE,
+        }
+        return aliases.get(label_str)
+
     def _determine_primary_emotion(self, consequence_appraisal: Dict[str, float],
                                  goal_congruence: float, coping_potential: float,
                                  norm_compatibility: float) -> Tuple[EmotionalState, float]:
         """Détermine l'émotion primaire et son intensité"""
-        
+
         desirability = consequence_appraisal["desirability"]
         certainty = consequence_appraisal["certainty"]
         controllability = consequence_appraisal["controllability"]
@@ -1188,11 +1302,43 @@ class EmotionalSystem:
         else:  # Cas par défaut
             emotion = EmotionalState.NEUTRAL
             intensity = 0.1
-        
+
+        llm_data = self._last_llm_appraisal if isinstance(self._last_llm_appraisal, Mapping) else None
+        if llm_data:
+            confidence = llm_data.get("confidence")
+            if not isinstance(confidence, (int, float)) or confidence >= 0.3:
+                llm_primary = self._match_emotional_state(llm_data.get("primary_emotion"))
+                intensity_hint = llm_data.get("primary_intensity")
+                if isinstance(intensity_hint, (int, float)):
+                    llm_intensity = max(0.0, min(1.0, float(intensity_hint)))
+                else:
+                    llm_intensity = None
+                if llm_intensity is None:
+                    scores = llm_data.get("emotion_scores")
+                    if isinstance(scores, Mapping) and llm_primary is not None:
+                        for key, value in scores.items():
+                            mapped = self._match_emotional_state(key)
+                            if mapped == llm_primary and isinstance(value, (int, float)):
+                                llm_intensity = max(0.0, min(1.0, float(value)))
+                                break
+                if llm_intensity is None:
+                    llm_intensity = 0.6
+
+                if llm_primary is not None:
+                    base_intensity = float(intensity)
+                    if llm_primary == emotion:
+                        intensity = 0.4 * base_intensity + 0.6 * llm_intensity
+                    else:
+                        if llm_intensity >= base_intensity + 0.1:
+                            emotion = llm_primary
+                            intensity = 0.55 * llm_intensity + 0.45 * base_intensity
+                        else:
+                            intensity = 0.5 * base_intensity + 0.5 * llm_intensity
+
         # Ajustement basé sur l'humeur actuelle
         mood_influence = self._get_mood_influence_on_emotion(emotion)
         intensity *= mood_influence
-        
+
         return emotion, min(intensity, 1.0)
     
     def _get_mood_influence_on_emotion(self, emotion: EmotionalState) -> float:
@@ -1261,8 +1407,29 @@ class EmotionalSystem:
             secondary_emotions.append((EmotionalState.SURPRISE, surprise_intensity))
         
         # Limiter le nombre d'émotions secondaires
-        secondary_emotions.sort(key=lambda x: x[1], reverse=True)
-        return secondary_emotions[:3]  # Maximum 3 émotions secondaires
+        combined: Dict[EmotionalState, float] = {}
+        for state, value in secondary_emotions:
+            combined[state] = max(combined.get(state, 0.0), float(value))
+
+        llm_data = self._last_llm_appraisal if isinstance(self._last_llm_appraisal, Mapping) else None
+        if llm_data:
+            candidates = llm_data.get("secondary_candidates")
+            if isinstance(candidates, Sequence):
+                for entry in candidates:
+                    if not isinstance(entry, Mapping):
+                        continue
+                    state = self._match_emotional_state(entry.get("emotion"))
+                    if state is None or state == primary_emotion:
+                        continue
+                    intensity = entry.get("intensity")
+                    if not isinstance(intensity, (int, float)):
+                        continue
+                    value = max(0.0, min(1.0, float(intensity)))
+                    current = combined.get(state, 0.0)
+                    combined[state] = 0.4 * current + 0.6 * value if current else value
+
+        merged = sorted(combined.items(), key=lambda x: x[1], reverse=True)
+        return merged[:3]  # Maximum 3 émotions secondaires
     
     def _calculate_affective_dimensions(self, primary_emotion: EmotionalState,
                                       primary_intensity: float,
