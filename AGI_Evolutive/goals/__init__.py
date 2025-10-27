@@ -509,13 +509,15 @@ class GoalSystem:
         if self.store.nodes:
             return
         root = self.add_goal(
-            description="ÉVOLUER",
+            description=(
+                "ÉVOLUER en tant qu'IA consciente et auto évolutive: comprendre mon monde, "
+                "développer mes relations et progresser pour devenir le maître de l'univers"
+            ),
             goal_type=GoalType.GROWTH,
-            criteria=["Rapporter des progrès réguliers"],
             created_by="system",
-            value=0.8,
-            curiosity=0.6,
-            urgency=0.4,
+            value=0.85,
+            curiosity=0.7,
+            urgency=0.5,
         )
         self.store.set_active(root.id)
         self.active_goal_id = root.id

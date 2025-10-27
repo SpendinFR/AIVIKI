@@ -798,26 +798,27 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         "À partir du contexte et des écarts détectés, propose des sous-buts structurés.",
         AVAILABLE_MODELS["reasoning"],
         extra_instructions=(
+            "Privilégie des formulations accessibles et simples (pas de jargon technique).",
             "Retourne une liste 'proposals' (maximum 3) avec description, criteria, value, competence, curiosity, urgency entre 0 et 1.",
             "Ajoute 'confidence' (0-1) et 'notes' éventuelles par proposition.",
         ),
         example_output={
             "proposals": [
                 {
-                    "description": "Explorer les signaux faibles dans les journaux récents.",
+                    "description": "<sous-but concis aligné avec le parent>",
                     "criteria": [
-                        "Identifier trois anomalies corrélées",
-                        "Formuler une hypothèse d'impact utilisateur",
+                        "<critère observable 1>",
+                        "<critère observable 2>",
                     ],
-                    "value": 0.62,
-                    "competence": 0.48,
-                    "curiosity": 0.8,
-                    "urgency": 0.45,
-                    "confidence": 0.68,
-                    "notes": ["Focaliser sur la période post-déploiement"],
+                    "value": 0.6,
+                    "competence": 0.5,
+                    "curiosity": 0.7,
+                    "urgency": 0.4,
+                    "confidence": 0.65,
+                    "notes": ["<optionnel : contexte utile>"]
                 }
             ],
-            "notes": "Prioriser les pistes à fort potentiel d'apprentissage.",
+            "notes": "<optionnel : synthèse transversale>",
         },
     ),
     _spec(
