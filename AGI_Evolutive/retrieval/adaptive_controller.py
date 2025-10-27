@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import random
 import time
@@ -7,6 +8,10 @@ from copy import deepcopy
 from typing import Any, Deque, Dict, Iterable, List, Optional
 
 from AGI_Evolutive.cognition.meta_cognition import OnlineLinear
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+logger = logging.getLogger(__name__)
 
 
 def _clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
@@ -201,9 +206,62 @@ class RAGAdaptiveController:
         }
         min_support = _clamp(self.threshold_model.predict(threshold_features), 0.05, 0.6)
 
-        half_life = float(self.half_life_sampler.ensure_choice(self.base_config.get("retrieval", {}).get("recency_half_life_days", 14.0)))
+        detail_level: Optional[str] = None
+        llm_analysis: Optional[Dict[str, Any]] = None
+        if question.strip():
+            try:
+                llm_analysis = try_call_llm_dict(
+                    "rag_adaptive_controller",
+                    input_payload={
+                        "question": question,
+                        "features": features,
+                        "threshold_features": threshold_features,
+                        "defaults": {
+                            "alpha_dense": alpha_dense,
+                            "beta_sparse": beta_sparse,
+                            "min_support": min_support,
+                            "activation": getattr(self.global_activation_tracker, "value", 0.5),
+                        },
+                    },
+                    logger=logger,
+                )
+            except Exception:
+                llm_analysis = None
+        if llm_analysis:
+            weights = llm_analysis.get("weights")
+            if isinstance(weights, dict):
+                dense = weights.get("dense")
+                sparse = weights.get("sparse")
+                try:
+                    if dense is not None:
+                        alpha_dense = _clamp(float(dense), 0.05, 0.95)
+                    if sparse is not None:
+                        beta_sparse = _clamp(float(sparse), 0.05, 0.95)
+                    if dense is None and sparse is not None:
+                        alpha_dense = _clamp(1.0 - beta_sparse, 0.05, 0.95)
+                    elif sparse is None and dense is not None:
+                        beta_sparse = _clamp(1.0 - alpha_dense, 0.05, 0.95)
+                except (TypeError, ValueError):
+                    logger.debug("LLM rag weights invalid: %r", weights)
+            detail = llm_analysis.get("detail_level")
+            if isinstance(detail, str) and detail.strip():
+                detail_level = detail.strip().lower()
+
+        half_life = float(
+            self.half_life_sampler.ensure_choice(
+                self.base_config.get("retrieval", {}).get("recency_half_life_days", 14.0)
+            )
+        )
         min_support_score = float(self.support_sampler.ensure_choice(min_support))
         min_top1_score = float(self.top1_sampler.ensure_choice(0.25))
+
+        if detail_level:
+            if detail_level in {"technique", "haut", "detaillé", "detaillé"}:
+                min_support_score = _clamp(max(min_support_score, min_support + 0.05), 0.05, 0.95)
+                min_top1_score = _clamp(min_top1_score + 0.05, 0.05, 0.95)
+            elif detail_level in {"synthese", "bas", "résumé", "resume"}:
+                min_support_score = _clamp(min_support_score * 0.85, 0.05, 0.95)
+                min_top1_score = _clamp(min_top1_score * 0.9, 0.05, 0.95)
 
         retrieval_overrides = {
             "alpha_dense": alpha_dense,
@@ -227,6 +285,10 @@ class RAGAdaptiveController:
             "recency_half_life_days": half_life,
             "config": cfg,
         }
+        if detail_level:
+            context["llm_detail_level"] = detail_level
+        if llm_analysis and llm_analysis.get("justification"):
+            context["llm_justification"] = str(llm_analysis["justification"])
         return context
 
     def observe_outcome(self, context: Dict[str, Any], rag_out: Dict[str, Any]) -> None:

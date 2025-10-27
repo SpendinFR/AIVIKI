@@ -11,6 +11,10 @@ import unicodedata
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+logger = logging.getLogger(__name__)
+
 try:
     from AGI_Evolutive.language.quote_memory import QuoteMemory  # type: ignore
 except ImportError:  # pragma: no cover - module optionnel
@@ -270,6 +274,26 @@ class CLIAdaptiveFeedback:
         if confidence >= self.min_confidence:
             return {"label": label, "confidence": float(confidence)}
         return None
+
+    def analyze_with_llm(self, text: str) -> Optional[Dict[str, Any]]:
+        if not text.strip():
+            return None
+        response = try_call_llm_dict(
+            "cli_feedback",
+            input_payload={"text": text},
+            logger=logger,
+        )
+        if response:
+            sentiment = str(response.get("sentiment") or "").strip() or "unknown"
+            urgency = response.get("urgency")
+            self._record_event(
+                label=sentiment,
+                success=None,
+                confidence=1.0,
+                origin="llm",
+                heuristic=str(urgency) if isinstance(urgency, str) else None,
+            )
+        return response
 
     def record_prediction(self, label: str, confidence: float) -> None:
         self._record_event(
@@ -778,6 +802,23 @@ def run_cli():
         # ==== INTERACTION ====
         feedback_label: Optional[str] = None
         feedback_confidence = 0.0
+        feedback_meta: Dict[str, Any] = {}
+        llm_label: Optional[str] = None
+        llm_confidence = 0.0
+
+        llm_analysis = feedback_adapter.analyze_with_llm(msg)
+        if llm_analysis:
+            feedback_meta = dict(llm_analysis)
+            sentiment_norm = _normalize_feedback_text(str(llm_analysis.get("sentiment") or ""))
+            if sentiment_norm:
+                if any(word in sentiment_norm for word in ("positif", "satisfait", "content", "heureux", "ravi", "merci")):
+                    llm_label = "positive"
+                elif any(word in sentiment_norm for word in ("negatif", "mecontent", "insatisfait", "colere", "frustre", "plainte", "critique")):
+                    llm_label = "negative"
+            if llm_label:
+                llm_confidence = 0.7
+                feedback_label = llm_label
+                feedback_confidence = llm_confidence
 
         heur_label, heur_pattern = _detect_feedback_label(msg)
         if heur_label:
@@ -790,6 +831,21 @@ def run_cli():
                 feedback_label = prediction["label"]
                 feedback_confidence = prediction["confidence"]
                 feedback_adapter.record_prediction(prediction["label"], prediction["confidence"])
+
+        if llm_label:
+            if feedback_label is None:
+                feedback_label = llm_label
+                feedback_confidence = llm_confidence
+            elif feedback_label == llm_label:
+                feedback_confidence = max(feedback_confidence, max(llm_confidence, 0.75))
+            else:
+                feedback_confidence *= 0.6
+
+        urgency_level = str(feedback_meta.get("urgency") or "").lower()
+        if feedback_label and urgency_level == "haut":
+            feedback_confidence = max(feedback_confidence, 0.85)
+        elif feedback_label and urgency_level == "bas":
+            feedback_confidence = max(0.2, feedback_confidence * 0.9)
 
         if feedback_label == "positive":
             voice.update_from_feedback(msg, positive=True)
