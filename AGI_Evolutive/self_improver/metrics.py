@@ -3,9 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from statistics import mean
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Tuple
+import logging
 import math
 import random
 from bisect import bisect_left, bisect_right
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _sigmoid(x: float) -> float:
@@ -123,6 +129,41 @@ class AdaptiveDominanceModel:
 _ADAPTIVE_MODEL = AdaptiveDominanceModel()
 
 
+def _llm_dominance_decision(
+    champion: Mapping[str, float], challenger: Mapping[str, float]
+) -> bool | None:
+    payload = {
+        "champion": dict(champion),
+        "challenger": dict(challenger),
+    }
+    response = try_call_llm_dict(
+        "self_improver_dominance",
+        input_payload=payload,
+        logger=_LOGGER,
+        max_retries=2,
+    )
+    if not response:
+        return None
+
+    decision_raw = str(response.get("decision", "")).strip().lower()
+    if not decision_raw:
+        return None
+
+    confidence = response.get("confidence")
+    try:
+        confidence_value = float(confidence) if confidence is not None else 1.0
+    except (TypeError, ValueError):
+        confidence_value = 0.0
+
+    if decision_raw in {"accept", "approve", "go", "promote", "oui"}:
+        if confidence_value >= 0.5:
+            return True
+    elif decision_raw in {"reject", "refuse", "stop", "non", "no"}:
+        if confidence_value >= 0.5:
+            return False
+    return None
+
+
 def _iter_metric_keys(samples: Iterable[Dict[str, Any]]) -> List[str]:
     keys = set()
     for sample in samples:
@@ -198,6 +239,11 @@ def dominates(
         )
 
     comparator = model or _ADAPTIVE_MODEL
+
+    llm_decision = _llm_dominance_decision(champion, challenger)
+    if llm_decision is True:
+        return True
+
     adaptive_accept = comparator.should_accept(champion, challenger)
     if adaptive_accept:
         warmup = getattr(comparator, "warmup_samples", 0)

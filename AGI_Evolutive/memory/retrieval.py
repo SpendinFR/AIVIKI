@@ -1,9 +1,10 @@
+import logging
 import math
 import re
 import time
 import unicodedata
 from collections import defaultdict
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 try:
     from config.memory_flags import ENABLE_RERANKING  # type: ignore
@@ -19,9 +20,14 @@ except Exception:  # pragma: no cover - graceful degradation
     PreferencesAdapter = None
 
 
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
 from .encoders import TinyEncoder
-from .indexing import InMemoryIndex, DiscreteThompsonSampler
+from .indexing import DiscreteThompsonSampler, InMemoryIndex
 from .vector_store import VectorStore
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 _EMOJI_RE = re.compile("[\U0001F300-\U0001F6FF\U0001F900-\U0001F9FF\U0001FA70-\U0001FAFF]")
@@ -172,6 +178,8 @@ class _AdaptiveCandidateReranker:
         )
         self._fallback = _OnlineFallbackClassifier()
         self._feedback_trace: Dict[int, Dict[str, Any]] = {}
+        self._last_llm_payload: Optional[Dict[str, Any]] = None
+        self._last_llm_response: Optional[Mapping[str, Any]] = None
 
     def _clip_feature(self, value: float) -> float:
         return max(0.0, min(1.0, float(value)))
@@ -268,6 +276,10 @@ class _AdaptiveCandidateReranker:
                 "vector_kind": candidate.get("meta", {}).get("vector_kind"),
             }
 
+        llm_response = self._call_llm_rerank(query, candidates)
+        if llm_response:
+            self._apply_llm_adjustments(candidates, llm_response)
+
         return candidates
 
     def register_feedback(self, doc_id: int, reward: float) -> None:
@@ -291,6 +303,125 @@ class _AdaptiveCandidateReranker:
         if not kind:
             return None
         return f"{kind}::{int(doc_id)}"
+
+    # ------------------------------------------------------------------
+    def _call_llm_rerank(
+        self,
+        query: str,
+        candidates: List[Dict[str, Any]],
+    ) -> Optional[Mapping[str, Any]]:
+        if len(candidates) <= 1:
+            return None
+
+        payload_candidates: List[Dict[str, Any]] = []
+        for candidate in candidates:
+            try:
+                doc_id = int(candidate.get("id", 0))
+            except (TypeError, ValueError):
+                continue
+            text = str(candidate.get("text", ""))
+            text = text.strip()
+            if len(text) > 480:
+                text = text[:480] + "…"
+            meta = candidate.get("meta", {})
+            if not isinstance(meta, Mapping):
+                meta = {}
+            allowed_meta = {
+                key: meta[key]
+                for key in ("type", "title", "source", "tags", "ts", "vector_kind")
+                if key in meta
+            }
+            adaptive_features = candidate.get("_adaptive_features", {})
+            if not isinstance(adaptive_features, Mapping):
+                adaptive_features = {}
+            payload_candidates.append(
+                {
+                    "id": doc_id,
+                    "text_preview": text,
+                    "scores": {
+                        "heuristic": float(candidate.get("final", 0.0)),
+                        "lexical": float(candidate.get("lexical", 0.0)),
+                        "vector": float(candidate.get("vector", 0.0)),
+                        "salience": float(candidate.get("salience", adaptive_features.get("salience", 0.0))),
+                        "recency": float(candidate.get("_recency", adaptive_features.get("recency", 0.0))),
+                        "affinity": float(candidate.get("_affinity", adaptive_features.get("affinity", 0.0))),
+                        "fallback": float(candidate.get("_fallback_score", adaptive_features.get("fallback", 0.0))),
+                    },
+                    "metadata": allowed_meta,
+                }
+            )
+
+        if not payload_candidates:
+            return None
+
+        payload = {
+            "query": query,
+            "candidates": payload_candidates,
+        }
+
+        self._last_llm_payload = payload
+        response = try_call_llm_dict(
+            "memory_retrieval_ranking",
+            input_payload=payload,
+            logger=LOGGER,
+            max_retries=2,
+        )
+        self._last_llm_response = response
+        return response
+
+    def _apply_llm_adjustments(
+        self,
+        candidates: List[Dict[str, Any]],
+        response: Mapping[str, Any],
+    ) -> None:
+        rankings = response.get("rankings") if isinstance(response, Mapping) else None
+        if not isinstance(rankings, Sequence):
+            return
+
+        adjustments: Dict[int, Dict[str, Any]] = {}
+        for idx, entry in enumerate(rankings, start=1):
+            if not isinstance(entry, Mapping):
+                continue
+            try:
+                doc_id = int(entry.get("id"))
+            except (TypeError, ValueError):
+                continue
+            try:
+                score = float(entry.get("adjusted_score", entry.get("score", 0.0)))
+            except (TypeError, ValueError):
+                continue
+            score = self._clip_feature(score)
+            adjustments[doc_id] = {
+                "score": score,
+                "rationale": str(entry.get("rationale") or entry.get("reason") or "").strip(),
+                "priority": entry.get("priority"),
+                "rank": int(entry.get("rank", idx)),
+            }
+
+        if not adjustments:
+            return
+
+        for candidate in candidates:
+            try:
+                doc_id = int(candidate.get("id", 0))
+            except (TypeError, ValueError):
+                continue
+            adjustment = adjustments.get(doc_id)
+            if not adjustment:
+                continue
+            heuristic = float(candidate.get("final", 0.0))
+            llm_score = adjustment["score"]
+            candidate["llm_adjusted_score"] = llm_score
+            if adjustment["rationale"]:
+                candidate["llm_rationale"] = adjustment["rationale"]
+            if adjustment.get("priority") is not None:
+                candidate["llm_priority"] = adjustment["priority"]
+            candidate["llm_rank"] = adjustment["rank"]
+            candidate["final"] = 0.65 * heuristic + 0.35 * llm_score
+            ctx = self._feedback_trace.get(doc_id)
+            if ctx is not None:
+                ctx["llm_adjusted_score"] = llm_score
+                ctx["llm_rank"] = adjustment["rank"]
 
 
 class MemoryRetrieval:

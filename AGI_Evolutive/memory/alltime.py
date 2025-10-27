@@ -18,9 +18,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import logging
 import math
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set
 import time
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+LOGGER = logging.getLogger(__name__)
 
 
 DAY_SECONDS = 24 * 3600
@@ -53,6 +58,7 @@ class DigestDetails:
     digest_id: Optional[str]
     lineage: Sequence[str]
     coverage: Sequence[Dict[str, Any]]
+    llm_analysis: Optional[Mapping[str, Any]] = None
 
     def to_payload(self) -> Dict[str, Any]:
         return {
@@ -65,6 +71,7 @@ class DigestDetails:
             "digest_id": self.digest_id,
             "lineage": list(self.lineage),
             "coverage": list(self.coverage),
+            "llm_analysis": dict(self.llm_analysis) if isinstance(self.llm_analysis, Mapping) else None,
         }
 
 
@@ -273,6 +280,28 @@ class LongTermMemoryHub:
             lineage=lineage,
             coverage=coverage,
         )
+        llm_payload = {
+            "level": level,
+            "summary": details.summary,
+            "start_ts": details.start_ts,
+            "end_ts": details.end_ts,
+            "coverage": [
+                {
+                    "id": item.get("id"),
+                    "kind": item.get("kind"),
+                    "ts": item.get("ts"),
+                    "text": item.get("text"),
+                }
+                for item in coverage[:12]
+            ],
+        }
+        llm_response = try_call_llm_dict(
+            "memory_long_term_digest",
+            input_payload=llm_payload,
+            logger=LOGGER,
+        )
+        if llm_response:
+            details.llm_analysis = llm_response
         return details
 
     # ------------------------------------------------------------------

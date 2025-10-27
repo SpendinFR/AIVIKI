@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import json
+import logging
+import math
 import os
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Set
 
-import math
-
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _now() -> float:
@@ -165,6 +169,92 @@ class DagStore:
             warmup_updates=20,
         )
         self._load()
+
+    # ------------------------------------------------------------------
+    def _llm_review_priority(
+        self,
+        node: GoalNode,
+        base_priority: float,
+        adaptive_score: float,
+        fallback_priority: float,
+    ) -> Optional[Dict[str, Any]]:
+        goal_snapshot = {
+            "id": node.id,
+            "description": node.description,
+            "status": node.status,
+            "value": node.value,
+            "urgency": node.urgency,
+            "curiosity": node.curiosity,
+            "competence": node.competence,
+            "progress": node.progress,
+            "created_by": node.created_by,
+            "parent_ids": list(node.parent_ids),
+            "child_ids": list(node.child_ids),
+        }
+        if node.evidence:
+            goal_snapshot["recent_evidence"] = node.evidence[-3:]
+
+        payload = {
+            "goal": goal_snapshot,
+            "base_priority": float(base_priority),
+            "adaptive_score": float(adaptive_score),
+            "fallback_priority": float(fallback_priority),
+            "feature_vector": self._feature_vector(node),
+        }
+
+        response = try_call_llm_dict(
+            "goal_priority_review",
+            input_payload=payload,
+            logger=LOGGER,
+        )
+        if not isinstance(response, dict):
+            return None
+
+        recommended = response.get("priority")
+        if recommended is None and "priority_delta" in response:
+            try:
+                recommended = fallback_priority + float(response["priority_delta"])
+            except (TypeError, ValueError):
+                recommended = None
+
+        try:
+            priority_value = float(recommended)
+        except (TypeError, ValueError):
+            return None
+
+        priority_value = max(0.0, min(1.0, priority_value))
+        confidence = response.get("confidence")
+        try:
+            confidence_value = max(0.0, min(1.0, float(confidence))) if confidence is not None else 0.0
+        except (TypeError, ValueError):
+            confidence_value = 0.0
+
+        if confidence_value:
+            blended = (1.0 - confidence_value) * fallback_priority + confidence_value * priority_value
+        else:
+            blended = priority_value
+
+        review: Dict[str, Any] = {
+            "priority": max(0.0, min(1.0, blended)),
+            "confidence": confidence_value,
+        }
+
+        reason = response.get("reason") or response.get("rationale")
+        if isinstance(reason, str) and reason.strip():
+            review["reason"] = reason.strip()
+        notes = response.get("notes")
+        if isinstance(notes, str) and notes.strip():
+            review["notes"] = notes.strip()
+        elif isinstance(notes, (list, tuple)):
+            extracted = [n.strip() for n in notes if isinstance(n, str) and n.strip()]
+            if extracted:
+                review["notes"] = extracted
+
+        adjustments = response.get("adjustments")
+        if isinstance(adjustments, dict) and adjustments:
+            review["adjustments"] = adjustments
+
+        return review
 
     # ------------------------------------------------------------------
     # CRUD
@@ -343,7 +433,22 @@ class DagStore:
         self.priority_model.ensure_features(list(adaptive_features.keys()))
         adaptive_score = self.priority_model.predict(adaptive_features)
         blend = self.priority_model.confidence()
-        priority = (1.0 - blend) * base + blend * adaptive_score
+        fallback_priority = (1.0 - blend) * base + blend * adaptive_score
+        review = self._llm_review_priority(node, base, adaptive_score, fallback_priority)
+        if review:
+            priority = review.get("priority", fallback_priority)
+            if review.get("reason") or review.get("notes"):
+                node.evidence.append(
+                    {
+                        "t": _now(),
+                        "event": "llm_priority_review",
+                        "reason": review.get("reason"),
+                        "notes": review.get("notes"),
+                        "confidence": review.get("confidence"),
+                    }
+                )
+        else:
+            priority = fallback_priority
         if node.status not in {"pending", "active"}:
             priority *= 0.2
         node.priority = float(max(0.0, min(1.0, priority)))

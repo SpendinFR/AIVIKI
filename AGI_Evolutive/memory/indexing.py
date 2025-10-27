@@ -1,6 +1,7 @@
 import json
 import math
 import random
+import logging
 import time
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Tuple, Iterable
@@ -8,6 +9,9 @@ from typing import List, Dict, Any, Optional, Tuple, Iterable
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
 
 from .encoders import TinyEncoder, cosine
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -170,6 +174,7 @@ class InMemoryIndex:
         hits = self._search_vec(qvec, top_k=top_k)
         # Résolution en docs
         out = []
+        llm_candidates: List[Dict[str, Any]] = []
         for did, score in hits:
             d = self._by_id.get(did)
             if not d:
@@ -177,12 +182,50 @@ class InMemoryIndex:
             self._usage[did] = self._usage.get(did, 0) + 1
             if did in self._last_matches:
                 self._last_matches[did].query = query or ""
-            out.append({
+                features = dict(self._last_matches[did].features)
+            else:
+                features = {}
+            payload = {
                 "id": did,
                 "score": float(round(score, 4)),
                 "text": d["text"],
                 "meta": dict(d["meta"]) if d["meta"] else {},
-            })
+            }
+            out.append(payload)
+            llm_candidates.append(
+                {
+                    "id": did,
+                    "score": float(round(score, 4)),
+                    "features": features,
+                    "text": d["text"],
+                    "meta": dict(d["meta"]) if d["meta"] else {},
+                }
+            )
+        llm_response = try_call_llm_dict(
+            "memory_index_optimizer",
+            input_payload={"query": query, "candidates": llm_candidates},
+            logger=LOGGER,
+        )
+        if llm_response:
+            adjustments: Dict[int, Dict[str, Any]] = {}
+            for item in llm_response.get("reranked", []):
+                if not isinstance(item, dict):
+                    continue
+                cid = item.get("id")
+                if isinstance(cid, int):
+                    adjustments[cid] = item
+            if adjustments:
+                for entry in out:
+                    adj = adjustments.get(entry["id"])
+                    if not adj:
+                        continue
+                    boost = adj.get("boost")
+                    if isinstance(boost, (int, float)):
+                        entry["score"] = float(round(entry["score"] + float(boost), 4))
+                    justification = adj.get("justification")
+                    if justification:
+                        entry.setdefault("llm_justifications", []).append(str(justification))
+                out.sort(key=lambda item: item["score"], reverse=True)
         return out
 
     # ---------- Adaptive feedback ----------

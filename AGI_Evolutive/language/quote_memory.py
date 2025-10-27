@@ -1,10 +1,16 @@
 from dataclasses import dataclass, asdict, field
 from typing import List, Optional, Dict, Any, Tuple
+import logging
 import time, re, math, os, unicodedata, hashlib
 
 import numpy as np
 
 from . import DATA_DIR, _json_load, _json_save
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+LOGGER = logging.getLogger(__name__)
+LLM_SPEC_KEY = "language_quote_memory"
 
 
 @dataclass
@@ -272,15 +278,16 @@ class QuoteMemory:
             candidates.append((sample_score, mean_score, idx, feats, text_score, text_feats))
 
         candidates.sort(key=lambda item: item[0], reverse=True)
-        selected = None
+        selected = self._llm_select_candidate(context, candidates[:12])
         fallback = None
         for entry in candidates[:12]:
             if fallback is None or entry[4] > fallback[4]:
                 fallback = entry
-            sample_score, mean_score, _, _, text_score, _ = entry
-            if mean_score > 0.05 or text_score > 0.45:
-                selected = entry
-                break
+            if selected is None:
+                sample_score, mean_score, _, _, text_score, _ = entry
+                if mean_score > 0.05 or text_score > 0.45:
+                    selected = entry
+                    break
 
         if selected is None and fallback and fallback[4] > 0.3:
             selected = fallback
@@ -314,6 +321,79 @@ class QuoteMemory:
         if self._last_text_feats is not None:
             self._text_model.update(self._last_text_feats, reward)
         self._save_state()
+
+    def _llm_select_candidate(
+        self, context: str, candidates: List[Tuple[float, float, int, np.ndarray, float, Dict[int, int]]]
+    ) -> Optional[Tuple[float, float, int, np.ndarray, float, Dict[int, int]]]:
+        if not candidates:
+            return None
+
+        feature_labels = [
+            "bias",
+            "recency",
+            "overlap",
+            "liked_flag",
+            "cooldown_penalty",
+            "fatigue",
+            "text_score",
+        ]
+        payload_candidates = []
+        index_map: Dict[int, Tuple[float, float, int, np.ndarray, float, Dict[int, int]]] = {}
+        for local_id, entry in enumerate(candidates):
+            sample_score, mean_score, idx, feats, text_score, _ = entry
+            quote = self.items[idx]
+            feature_values = {name: float(feats[i]) for i, name in enumerate(feature_labels)}
+            payload_candidates.append(
+                {
+                    "id": local_id,
+                    "quote_index": idx,
+                    "text": quote.text[:240],
+                    "liked": bool(quote.liked),
+                    "uses": int(quote.uses),
+                    "last_used_seconds": float(max(0.0, time.time() - quote.last_used)),
+                    "sample_score": float(sample_score),
+                    "mean_score": float(mean_score),
+                    "text_score": float(text_score),
+                    "features": feature_values,
+                    "tags": list(quote.tags or [])[:8],
+                }
+            )
+            index_map[local_id] = entry
+
+        payload = {
+            "context": (context or "")[-600:],
+            "candidates": payload_candidates,
+        }
+        response = try_call_llm_dict(LLM_SPEC_KEY, input_payload=payload, logger=LOGGER)
+        if not isinstance(response, dict):
+            return None
+
+        if response.get("reject_all"):
+            return None
+
+        selected_id = response.get("selected_id")
+        try:
+            selected_idx = int(selected_id)
+        except (TypeError, ValueError):
+            selected_idx = None
+
+        if selected_idx is not None and selected_idx in index_map:
+            entry = index_map[selected_idx]
+            quote = self.items[entry[2]]
+            quote.tags = list(set((quote.tags or []) + response.get("selected_tags", [])))
+            return entry
+
+        alternatives = response.get("alternatives")
+        if isinstance(alternatives, list):
+            for alt in alternatives:
+                try:
+                    alt_idx = int(alt)
+                except (TypeError, ValueError):
+                    continue
+                if alt_idx in index_map:
+                    return index_map[alt_idx]
+
+        return None
 
     # util: ingestion de fichier texte en extraits "réutilisables"
     def ingest_file_units(self, path: str, liked: bool=True):

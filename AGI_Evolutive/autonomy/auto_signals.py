@@ -8,11 +8,18 @@ requiring the metric to be pre-declared in the codebase.
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 from dataclasses import dataclass, field
 import unicodedata
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -210,15 +217,13 @@ def _derive_signal_templates(
     return templates
 
 
-def derive_signals_for_description(
+def _heuristic_signal_derivation(
     action_type: str,
     description: str,
     *,
     requirements: Optional[Sequence[str]] = None,
     hints: Optional[Sequence[str]] = None,
 ) -> List[Dict[str, Any]]:
-    """Generate autonomous signal definitions from textual hints."""
-
     base = str(action_type or "auto").replace(" ", "_")
     signals: List[Dict[str, Any]] = [
         {
@@ -259,6 +264,105 @@ def derive_signals_for_description(
             existing.add(candidate.get("name"))
 
     return signals
+
+
+def _llm_signal_derivation(
+    action_type: str,
+    description: str,
+    *,
+    requirements: Optional[Sequence[str]] = None,
+    hints: Optional[Sequence[str]] = None,
+    baseline: Optional[Sequence[Mapping[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    payload = json_sanitize({
+        "action_type": action_type,
+        "description": description,
+        "requirements": [str(req) for req in (requirements or [])],
+        "hints": [str(hint) for hint in (hints or [])],
+        "baseline": list(baseline or []),
+    })
+    response = try_call_llm_dict(
+        "autonomy_signal_derivation",
+        input_payload=payload,
+        logger=logger,
+    )
+    if not isinstance(response, Mapping):
+        return []
+
+    candidates = response.get("signals")
+    if not isinstance(candidates, list):
+        return []
+
+    parsed: List[Dict[str, Any]] = []
+    for entry in candidates:
+        if not isinstance(entry, Mapping):
+            continue
+        name = str(entry.get("name") or "").strip()
+        metric = str(entry.get("metric") or name or "").strip()
+        if not metric:
+            continue
+        if not name:
+            name = metric
+        try:
+            target = float(entry.get("target", 0.7))
+        except (TypeError, ValueError):
+            target = 0.7
+        try:
+            weight = float(entry.get("weight", 1.0))
+        except (TypeError, ValueError):
+            weight = 1.0
+        direction = str(entry.get("direction", "above") or "above").lower()
+        if direction not in {"above", "below"}:
+            direction = "above"
+        candidate: Dict[str, Any] = {
+            "name": name,
+            "metric": metric,
+            "target": max(0.0, min(1.5, target)),
+            "direction": direction,
+            "weight": weight,
+        }
+        for optional_key in ("source_keyword", "notes", "rationale"):
+            if entry.get(optional_key):
+                candidate[optional_key] = entry[optional_key]
+        parsed.append(candidate)
+    return parsed
+
+
+def derive_signals_for_description(
+    action_type: str,
+    description: str,
+    *,
+    requirements: Optional[Sequence[str]] = None,
+    hints: Optional[Sequence[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Generate autonomous signal definitions from textual hints."""
+
+    baseline = _heuristic_signal_derivation(
+        action_type,
+        description,
+        requirements=requirements,
+        hints=hints,
+    )
+    llm_candidates = _llm_signal_derivation(
+        action_type,
+        description,
+        requirements=requirements,
+        hints=hints,
+        baseline=baseline,
+    )
+    if not llm_candidates:
+        return baseline
+
+    existing = {(sig.get("name"), sig.get("metric")) for sig in baseline}
+    for candidate in llm_candidates:
+        key = (candidate.get("name"), candidate.get("metric"))
+        if not candidate.get("metric"):
+            continue
+        if key in existing:
+            continue
+        baseline.append(candidate)
+        existing.add(key)
+    return baseline
 
 
 class AutoSignalRegistry:

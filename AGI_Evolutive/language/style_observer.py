@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 from typing import Dict, Any, List
+import logging
 import math
 import re
 import time
 import unicodedata
 from collections import deque
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+LOGGER = logging.getLogger(__name__)
+LLM_SPEC_KEY = "language_style_observer"
 
 
 class OnlineLinearModel:
@@ -121,13 +128,120 @@ class StyleObserver:
             return
 
         scored.sort(reverse=True)
-        picked = [it for _, it in scored[:budget]]
+        picked = self._llm_rank_candidates(
+            scored,
+            persona=persona,
+            drives=drives,
+            channel=channel,
+            budget=budget,
+        )
+        if not picked:
+            picked = [it for _, it in scored[:budget]]
 
         # 4) appliquer (petits incréments)
         for it in picked:
             self._apply_like(it)
             self.last_updates.append(now)
             self._record_feedback(it, channel, accepted=True)
+
+    def _llm_rank_candidates(
+        self,
+        scored: List[tuple[float, Dict[str, Any]]],
+        *,
+        persona: Dict[str, Any],
+        drives: Dict[str, float],
+        channel: str,
+        budget: int,
+    ) -> List[Dict[str, Any]]:
+        if not scored or budget <= 0:
+            return []
+
+        candidate_map: Dict[int, tuple[float, Dict[str, Any]]] = {
+            idx: (score, item) for idx, (score, item) in enumerate(scored)
+        }
+        payload = {
+            "channel": channel,
+            "budget": int(budget),
+            "persona": {
+                "tone": str(persona.get("tone", "")) if isinstance(persona, dict) else "",
+                "values": [
+                    str(v) for v in (persona.get("values") or [])
+                ]
+                if isinstance(persona, dict)
+                else [],
+            },
+            "drives": {k: float(v) for k, v in drives.items()},
+            "candidates": [
+                {
+                    "id": idx,
+                    "text": (item.get("text", "") or "")[:200],
+                    "type": item.get("type", "unknown"),
+                    "heuristic_score": round(float(score), 3),
+                }
+                for idx, (score, item) in candidate_map.items()
+            ],
+        }
+        response = try_call_llm_dict(LLM_SPEC_KEY, input_payload=payload, logger=LOGGER)
+        if not response:
+            return []
+
+        decisions = response.get("decisions")
+        if not isinstance(decisions, list):
+            return []
+
+        accepted: list[tuple[float, int]] = []
+        rejected_ids: set[int] = set()
+        decision_map: Dict[int, Dict[str, Any]] = {}
+        for entry in decisions:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                cand_id = int(entry.get("id"))
+            except (TypeError, ValueError):
+                continue
+            if cand_id not in candidate_map:
+                continue
+            decision_map[cand_id] = entry
+            priority = float(entry.get("priority", candidate_map[cand_id][0]))
+            if entry.get("accept"):
+                accepted.append((priority, cand_id))
+            else:
+                rejected_ids.add(cand_id)
+
+        for cand_id in rejected_ids:
+            _, item = candidate_map[cand_id]
+            item.setdefault("llm_feedback", {})["reason"] = decision_map.get(cand_id, {}).get(
+                "justification", ""
+            )
+            self._record_feedback(item, channel, accepted=False)
+
+        selected_items: List[Dict[str, Any]] = []
+        used_ids: set[int] = set()
+
+        if accepted:
+            accepted.sort(key=lambda x: x[0], reverse=True)
+            for priority, cand_id in accepted:
+                if len(selected_items) >= budget:
+                    break
+                score, item = candidate_map[cand_id]
+                item.setdefault("llm_feedback", {})["priority"] = priority
+                item.setdefault("llm_feedback", {})["justification"] = decision_map.get(
+                    cand_id, {}
+                ).get("justification", "")
+                selected_items.append(item)
+                used_ids.add(cand_id)
+
+        idx_order = list(range(len(candidate_map)))
+        for idx in idx_order:
+            if len(selected_items) >= budget:
+                break
+            if idx in used_ids or idx in rejected_ids:
+                continue
+            _, item = candidate_map[idx]
+            selected_items.append(item)
+            used_ids.add(idx)
+
+        return selected_items
 
     # --------- Extracteurs ----------
     def _extract_candidates(self, text: str) -> List[Dict[str, Any]]:

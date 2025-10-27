@@ -22,6 +22,7 @@ from AGI_Evolutive.autonomy.auto_signals import (
 )
 from AGI_Evolutive.core.structures.mai import ImpactHypothesis, MAI
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 try:  # GoalType is optional when goal system is not available
     from AGI_Evolutive.goals import GoalType
@@ -303,6 +304,51 @@ class AutoEvolutionCoordinator:
                     return dict(result)
             except Exception:
                 logger.exception("Évaluation métacognitive échouée")
+
+        llm_payload = json_sanitize(
+            {
+                "intention": {
+                    "action_type": intention.action_type,
+                    "description": intention.description,
+                    "source": intention.source,
+                    "signals": intention.signals,
+                    "requirements": intention.requirements,
+                    "metadata": intention.metadata,
+                    "source_emotion": intention.source_emotion,
+                },
+                "metacog_available": bool(metacog),
+            }
+        )
+        response = try_call_llm_dict(
+            "autonomy_intention_evaluation",
+            input_payload=llm_payload,
+            logger=logger,
+        )
+        if isinstance(response, Mapping):
+            def _coerce_float(value: Any, default: float) -> float:
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    return default
+
+            evaluation = {
+                "accepted": bool(response.get("accepted", False)),
+                "significance": _coerce_float(
+                    response.get("significance", response.get("score", 0.6)),
+                    0.6,
+                ),
+                "alignment": _coerce_float(response.get("alignment", 0.5), 0.5),
+                "emotional_drive": _coerce_float(
+                    response.get("emotional_drive", (intention.source_emotion or {}).get("intensity", 0.5)),
+                    (intention.source_emotion or {}).get("intensity", 0.5) or 0.5,
+                ),
+            }
+            for key, value in response.items():
+                if key in evaluation:
+                    continue
+                evaluation[key] = value
+            return evaluation
+
         # fallback heuristic
         score = 0.5 + 0.05 * len(intention.signals) + 0.02 * len(intention.requirements)
         return {

@@ -10,12 +10,15 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from .config import cfg
 from .document_ingest import DocumentIngest
 from .persistence import PersistenceManager
 from .question_manager import QuestionManager
+
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 
 @dataclass
@@ -337,9 +340,11 @@ class Autopilot:
         except Exception:
             pass
 
-        ranked: List[Dict[str, Any]] = sorted(
+        base_ranked: List[Dict[str, Any]] = sorted(
             candidates.values(), key=lambda q: q.get("score", 0.0), reverse=True
         )
+        llm_ranked = self._rank_questions_with_llm(base_ranked, now)
+        ranked = llm_ranked if llm_ranked is not None else base_ranked
         return ranked[: self.max_pending_questions]
 
     def _sync_question_block_state(self) -> List[str]:
@@ -655,6 +660,107 @@ class Autopilot:
             return None
         payload["score"] = self._score_question(payload, now)
         return payload
+
+    def _rank_questions_with_llm(
+        self, candidates: List[Dict[str, Any]], now: float
+    ) -> Optional[List[Dict[str, Any]]]:
+        if not candidates:
+            return None
+
+        questions_payload: List[Dict[str, Any]] = []
+        for item in candidates:
+            meta = dict(item.get("meta") or {})
+            questions_payload.append(
+                {
+                    "id": item.get("id"),
+                    "text": item.get("text"),
+                    "type": item.get("type"),
+                    "heuristic_score": item.get("score"),
+                    "importance": item.get("importance") or meta.get("importance"),
+                    "urgency": item.get("urgency") or meta.get("urgency"),
+                    "confidence": item.get("confidence") or meta.get("confidence"),
+                    "metadata": meta,
+                }
+            )
+
+        payload = {
+            "questions": questions_payload,
+            "max_to_select": self.max_pending_questions,
+            "recent_cycle_metrics": self._last_cycle_metrics,
+            "now": now,
+        }
+
+        response = try_call_llm_dict(
+            "autopilot_question_prioritization",
+            input_payload=json_sanitize(payload),
+            logger=getattr(self, "logger", None),
+            max_retries=2,
+        )
+        if not response:
+            return None
+
+        prioritized = response.get("prioritized_questions")
+        if not isinstance(prioritized, list):
+            return None
+
+        by_id = {}
+        for item in candidates:
+            qid = item.get("id")
+            if isinstance(qid, str):
+                by_id[qid] = item
+
+        ranked: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for entry in prioritized:
+            if not isinstance(entry, dict):
+                continue
+            qid = entry.get("id")
+            base_item = None
+            if isinstance(qid, str) and qid in by_id:
+                base_item = by_id[qid]
+            else:
+                text = entry.get("text")
+                if isinstance(text, str):
+                    base_item = next(
+                        (cand for cand in candidates if cand.get("text") == text),
+                        None,
+                    )
+            if not base_item:
+                continue
+
+            cloned = dict(base_item)
+            cloned_meta = dict(cloned.get("meta") or {})
+
+            reason = entry.get("reason")
+            if isinstance(reason, str) and reason.strip():
+                cloned_meta["llm_reason"] = reason.strip()
+
+            notes = entry.get("notes")
+            if isinstance(notes, str) and notes.strip():
+                cloned_meta["llm_notes"] = notes.strip()
+
+            priority = entry.get("priority")
+            if isinstance(priority, (int, float)):
+                cloned["score"] = max(0.0, min(1.0, float(priority)))
+
+            cloned["meta"] = cloned_meta
+            ranked.append(cloned)
+
+            if isinstance(qid, str):
+                seen.add(qid)
+            elif isinstance(cloned.get("id"), str):
+                seen.add(cloned["id"])
+
+        if not ranked:
+            return None
+
+        for item in candidates:
+            qid = item.get("id")
+            if isinstance(qid, str) and qid in seen:
+                continue
+            ranked.append(item)
+
+        return ranked
 
     # ------------------------------------------------------------------
     # Logging helpers

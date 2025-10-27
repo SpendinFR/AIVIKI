@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
 import math
 import os
 import random
@@ -33,7 +34,11 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from AGI_Evolutive.models.intent import IntentModel
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
+
+LOGGER = logging.getLogger(__name__)
+LLM_SPEC_KEY = "language_semantic_understanding"
 
 DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data"))
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -743,7 +748,16 @@ class SemanticUnderstanding:
         topic_match = re.search(r"\b(?:sur|a propos de|concernant)\s+(.+)$", norm_plain)
         if topic_match:
             slots["topic"] = topic_match.group(1).strip()[:120]
-        return Frame(intent=intent, slots=slots, confidence=_clip(conf, 0.0, 1.0))
+
+        frame = Frame(intent=intent, slots=slots, confidence=_clip(conf, 0.0, 1.0))
+        self._llm_refine_frame(
+            frame,
+            text=text,
+            normalized=normalized,
+            tokens=toks,
+            entities=ents,
+        )
+        return frame
 
     def _pragmatics(self, text: str, toks: List[str], normalized: str) -> Dict[str, Any]:
         stripped = text.strip()
@@ -786,6 +800,46 @@ class SemanticUnderstanding:
         if hedge_uncertainty >= 0.4:
             quality = max(0.2, quality - 0.15)
         return _clip(quality, 0.0, 1.0)
+
+    def _llm_refine_frame(
+        self,
+        frame: Frame,
+        *,
+        text: str,
+        normalized: str,
+        tokens: List[str],
+        entities: List[Entity],
+    ) -> None:
+        payload = {
+            "text": text,
+            "normalized": normalized,
+            "heuristic_intent": frame.intent,
+            "heuristic_confidence": frame.confidence,
+            "tokens": tokens[:64],
+            "entities": [
+                {"text": e.text, "label": e.label, "start": e.start, "end": e.end}
+                for e in entities[:16]
+            ],
+        }
+        response = try_call_llm_dict(LLM_SPEC_KEY, input_payload=payload, logger=LOGGER)
+        if not isinstance(response, dict):
+            return
+
+        new_intent = response.get("intent")
+        if isinstance(new_intent, str) and new_intent:
+            frame.intent = new_intent
+
+        new_conf = response.get("confidence")
+        if isinstance(new_conf, (int, float)):
+            frame.confidence = _clip(float(new_conf), 0.0, 1.0)
+
+        slots = response.get("slots")
+        if isinstance(slots, dict):
+            frame.slots.update(slots)
+
+        notes = response.get("notes")
+        if notes:
+            frame.slots.setdefault("_llm_notes", str(notes))
 
     def _persist_learning_state(self, force: bool = False):
         if not (self._classifier_state_dirty or self._tracker_state_dirty or force):

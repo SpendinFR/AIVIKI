@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from typing import Any, Dict, Iterable
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _norm_concept(value: str) -> str:
@@ -19,6 +24,7 @@ class PrefsBridge:
         self.path = path
         self.graph = graph
         self._mem: Dict[str, Dict[str, float]] = {"likes": {}, "dislikes": {}}
+        self._last_guidance: Dict[str, Any] = {}
         self._load()
 
     # ------------------------------------------------------------------
@@ -33,9 +39,30 @@ class PrefsBridge:
             dislikes += self._score("dislikes", it)
         # map -> [0,1]
         total = likes + dislikes
-        if total <= 0:
-            return 0.0
-        return max(0.0, min(1.0, likes / total))
+        base_affinity = 0.0 if total <= 0 else max(0.0, min(1.0, likes / total))
+        payload = {
+            "concepts": [str(c) for c in concepts],
+            "tags": [str(tag) for tag in tags],
+            "base_affinity": base_affinity,
+        }
+        response = try_call_llm_dict(
+            "memory_preferences_guidance",
+            input_payload=payload,
+            logger=LOGGER,
+        )
+        if response:
+            try:
+                adjusted = float(response.get("adjusted_affinity", base_affinity))
+                base_affinity = max(0.0, min(1.0, adjusted))
+            except Exception:
+                pass
+            self._last_guidance = dict(response)
+        else:
+            self._last_guidance = {}
+        return base_affinity
+
+    def last_guidance(self) -> Dict[str, Any]:
+        return dict(self._last_guidance)
 
     def observe_feedback(
         self,

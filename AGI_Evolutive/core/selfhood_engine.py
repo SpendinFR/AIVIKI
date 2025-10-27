@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import logging
 import math
 import random
-from dataclasses import dataclass, field
-from typing import Dict, List, Sequence
+import time
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, List, Mapping, MutableMapping, Sequence
+
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 
 class OnlineRegressor:
@@ -97,6 +102,7 @@ class SelfhoodEngine:
     ) -> None:
         self.traits = IdentityTraits()
         self.ema_alpha = ema_alpha
+        self.logger = logging.getLogger(__name__)
         self.claims: Dict[str, Claim] = {
             "thinking": Claim(
                 text="I am thinking when I explore, hypothesize, and reason.",
@@ -130,6 +136,8 @@ class SelfhoodEngine:
         }
         self._policy_choice_memory: Dict[str, float] = {}
         self.drift_log: List[str] = []
+        self.identity_insight: MutableMapping[str, Any] = self._fallback_identity_report()
+        self._last_identity_review: float = 0.0
 
     # ---- helpers ----
     def _ema(self, prev: float, x: float) -> float:
@@ -179,10 +187,14 @@ class SelfhoodEngine:
 
     def _log_drift(self, trait_name: str, previous: float, new_value: float) -> None:
         delta = abs(new_value - previous)
+        updated = False
         if delta > 0.15:  # substantial drift
             self.drift_log.append(
                 f"{trait_name}: drift={delta:.3f} prev={previous:.3f} new={new_value:.3f}"
             )
+            updated = True
+        if self.drift_log and (updated or (time.time() - self._last_identity_review) > 60):
+            self._refresh_identity_insight()
 
     def update_from_cycle(
         self,
@@ -338,3 +350,87 @@ class SelfhoodEngine:
             "explore_portfolio": exploration_gate * growth_bonus,
             "phase": t.phase,
         }
+
+    def get_identity_insight(self) -> MutableMapping[str, Any]:
+        return dict(self.identity_insight)
+
+    def _refresh_identity_insight(self) -> None:
+        fallback = self._fallback_identity_report()
+        payload = {
+            "traits": asdict(self.traits),
+            "claims": {key: asdict(claim) for key, claim in self.claims.items()},
+            "drift_log": self.drift_log[-8:],
+            "current_phase": self.traits.phase,
+        }
+        response = try_call_llm_dict(
+            "selfhood_reflection",
+            input_payload=json_sanitize(payload),
+            logger=self.logger,
+            max_retries=2,
+        )
+        self._last_identity_review = time.time()
+        if not isinstance(response, Mapping):
+            self.identity_insight = fallback
+            return
+
+        summary = self._clean_text(response.get("summary")) or fallback["summary"]
+        alerts = self._clean_list(response.get("alerts"))
+        recommendations = self._clean_list(response.get("recommended_actions"))
+        notes = self._clean_text(response.get("notes")) or fallback["notes"]
+        confidence = fallback.get("confidence", 0.6)
+        try:
+            confidence = float(response.get("confidence", confidence))
+        except Exception:
+            confidence = float(confidence)
+
+        self.identity_insight = {
+            "source": "llm",
+            "summary": summary,
+            "alerts": alerts,
+            "recommended_actions": recommendations or fallback["recommended_actions"],
+            "confidence": max(0.0, min(1.0, confidence)),
+            "notes": notes,
+        }
+
+    def _fallback_identity_report(self) -> MutableMapping[str, Any]:
+        t = self.traits
+        avg_confidence = (self.claims["thinking"].confidence + self.claims["understanding"].confidence) / 2
+        alerts: List[str] = []
+        if t.self_trust < 0.4:
+            alerts.append("Auto-confiance fragile : renforcer les preuves de réussite.")
+        if t.self_consistency < 0.4:
+            alerts.append("Consistance identitaire basse : formaliser des routines stables.")
+        if avg_confidence < 0.5:
+            alerts.append("Claims cognitifs peu assurés : capitaliser sur les victoires récentes.")
+        recommendations: List[str] = []
+        if alerts:
+            recommendations.append("Planifier une session de revue identitaire guidée.")
+        recommendations.append("Consigner les preuves marquantes dans le journal de soi.")
+        summary = "Identité stable en progression." if not alerts else "Identité en phase d'ajustement."
+        return {
+            "source": "heuristic",
+            "summary": summary,
+            "alerts": alerts,
+            "recommended_actions": recommendations,
+            "confidence": 0.55 if alerts else 0.7,
+            "notes": "Synthèse heuristique basée sur les traits et la confiance des claims.",
+        }
+
+    @staticmethod
+    def _clean_text(value: Any) -> str:
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if cleaned:
+                return cleaned
+        return ""
+
+    @staticmethod
+    def _clean_list(value: Any) -> List[str]:
+        if not isinstance(value, (list, tuple)):
+            return []
+        results: List[str] = []
+        for item in value:
+            text = SelfhoodEngine._clean_text(item)
+            if text:
+                results.append(text)
+        return results

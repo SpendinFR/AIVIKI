@@ -1,6 +1,7 @@
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from typing import Dict, Any, Iterable, List
 from collections import Counter, defaultdict
+import logging
 import math
 import os
 import json
@@ -9,6 +10,11 @@ import unicodedata
 from datetime import datetime
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+LOGGER = logging.getLogger(__name__)
+LLM_SPEC_KEY = "language_style_profiler"
 
 
 @dataclass
@@ -290,6 +296,22 @@ class StyleProfiler:
 
         self._update_personal_context(p, text)
 
+        llm_update = self._llm_analyse(
+            user_id,
+            text,
+            profile=p,
+            heuristics={
+                "avg_sentence_len": avg_len,
+                "emoji_ratio": emoji_ratio,
+                "exclam_density": exclam / max(1, len(text)),
+                "question_density": quest / max(1, len(text)),
+                "formality_score": p.formality,
+                "language": lang,
+            },
+        )
+        if llm_update:
+            self._apply_llm_update(p, llm_update)
+
         self.profiles[user_id] = p
 
         if confident_label:
@@ -357,6 +379,125 @@ class StyleProfiler:
                 json.dump(json_sanitize(data), f, ensure_ascii=False, indent=2)
         except Exception:
             pass
+
+    def _llm_analyse(
+        self,
+        user_id: str,
+        text: str,
+        *,
+        profile: UserStyleProfile,
+        heuristics: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        payload = {
+            "user_id": user_id,
+            "text": text[-4000:],
+            "language": profile.language,
+            "samples_seen": profile.samples_seen,
+            "heuristics": heuristics,
+            "recent_preferences": sorted(
+                list((profile.fav_lexicon or {}).items()),
+                key=lambda item: item[1],
+                reverse=True,
+            )[:10],
+        }
+        response = try_call_llm_dict(LLM_SPEC_KEY, input_payload=payload, logger=LOGGER)
+        if not isinstance(response, dict):
+            return {}
+        return response
+
+    def _apply_llm_update(self, profile: UserStyleProfile, llm_data: Dict[str, Any]) -> None:
+        tone = llm_data.get("tone")
+        if isinstance(tone, str):
+            tone_lower = tone.lower()
+            if "formel" in tone_lower or "formal" in tone_lower:
+                profile.formality = min(1.0, profile.formality + 0.08)
+            elif any(key in tone_lower for key in ("casual", "familial", "décontracté", "relaxed")):
+                profile.formality = max(0.0, profile.formality - 0.08)
+
+        preferences = llm_data.get("preferences")
+        if isinstance(preferences, list):
+            for pref in preferences:
+                if not isinstance(pref, dict):
+                    continue
+                trait = str(pref.get("trait", "")).lower()
+                try:
+                    strength = float(pref.get("strength", 0.5))
+                except (TypeError, ValueError):
+                    strength = 0.5
+                if trait in {"emoji", "emoji_usage"}:
+                    profile.emoji_rate = max(
+                        0.0, min(0.5, profile.emoji_rate + (strength - 0.5) * 0.2)
+                    )
+                elif trait in {"exclamation", "exclamations"}:
+                    profile.exclam_rate = max(
+                        0.0, min(0.3, profile.exclam_rate + (strength - 0.5) * 0.15)
+                    )
+                elif trait in {"questions", "question"}:
+                    profile.question_rate = max(
+                        0.0, min(0.3, profile.question_rate + (strength - 0.5) * 0.15)
+                    )
+                elif trait in {"caps", "uppercase"}:
+                    profile.uses_caps = max(
+                        0.0, min(0.6, profile.uses_caps + (strength - 0.5) * 0.2)
+                    )
+                elif trait in {"bullet_lists", "bullets", "listes"} and strength >= 0.55:
+                    profile.prefers_bullets = True
+
+        lexicon_suggestions = llm_data.get("lexicon" )
+        if isinstance(lexicon_suggestions, list):
+            for suggestion in lexicon_suggestions:
+                if isinstance(suggestion, dict):
+                    token = suggestion.get("token")
+                    weight = suggestion.get("weight", 0.0)
+                else:
+                    token = suggestion
+                    weight = 0.1
+                if not token:
+                    continue
+                try:
+                    weight_val = float(weight)
+                except (TypeError, ValueError):
+                    weight_val = 0.1
+                profile.fav_lexicon[token] = profile.fav_lexicon.get(token, 0.0) + weight_val
+
+        personal_facts = llm_data.get("personal_facts")
+        if isinstance(personal_facts, list):
+            for fact in personal_facts:
+                if isinstance(fact, dict):
+                    summary = fact.get("summary")
+                    confidence = fact.get("confidence")
+                else:
+                    summary = fact
+                    confidence = None
+                if not summary:
+                    continue
+                entry = {
+                    "text": str(summary),
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                }
+                if confidence is not None:
+                    entry["confidence"] = float(confidence)
+                profile.associative_memory.append(entry)
+
+        detected_names = llm_data.get("names")
+        if isinstance(detected_names, list):
+            for name_info in detected_names:
+                if isinstance(name_info, dict):
+                    name = name_info.get("name") or name_info.get("text")
+                    count = name_info.get("count", 1)
+                else:
+                    name = name_info
+                    count = 1
+                if not name:
+                    continue
+                name_norm = unicodedata.normalize("NFKD", str(name)).strip()
+                if not name_norm:
+                    continue
+                try:
+                    increment = int(count)
+                except (TypeError, ValueError):
+                    increment = 1
+                profile.personal_names[name_norm] = profile.personal_names.get(name_norm, 0) + increment
 
     def _load(self):
         if not os.path.exists(self.persist_path):

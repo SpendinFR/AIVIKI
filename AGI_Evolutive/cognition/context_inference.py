@@ -7,6 +7,7 @@ import platform
 import statistics
 import time
 
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 DEFAULT_THRESHOLD = 0.70
 DEFAULT_STABLE_CYCLES = 2
@@ -367,6 +368,54 @@ def situational_summary(where: Dict[str, Any]) -> Tuple[str, float]:
     return summary, score
 
 
+def _build_llm_payload(
+    *, where: Dict[str, Any], decision_payload: Dict[str, Any], state: Dict[str, Any]
+) -> Dict[str, Any]:
+    history = state.get("history") if isinstance(state, dict) else None
+    recent = []
+    if isinstance(history, dict):
+        log = history.get("where")
+        if isinstance(log, list):
+            recent = log[-5:]
+    return {
+        "where": where,
+        "decision": decision_payload,
+        "recent_history": recent,
+    }
+
+
+def _merge_llm_context(
+    heuristic_result: Dict[str, Any], llm_response: Dict[str, Any]
+) -> Dict[str, Any]:
+    result = dict(heuristic_result)
+
+    if isinstance(llm_response.get("status"), str):
+        result["status"] = llm_response["status"].strip()
+    if isinstance(llm_response.get("summary"), str) and llm_response["summary"].strip():
+        result["summary"] = llm_response["summary"].strip()
+    if "score" in llm_response:
+        try:
+            result["score"] = max(0.0, min(1.0, float(llm_response["score"])))
+        except (TypeError, ValueError):
+            pass
+    if "threshold" in llm_response:
+        try:
+            result["threshold"] = max(0.3, min(0.99, float(llm_response["threshold"])))
+        except (TypeError, ValueError):
+            pass
+    if "confidence" in llm_response:
+        try:
+            result["confidence"] = max(0.0, min(1.0, float(llm_response["confidence"])))
+        except (TypeError, ValueError):
+            pass
+    if isinstance(llm_response.get("notes"), str) and llm_response["notes"].strip():
+        result["notes"] = llm_response["notes"].strip()
+    if isinstance(llm_response.get("actions"), list):
+        result["actions"] = [str(a) for a in llm_response["actions"] if str(a).strip()][:6]
+    result["llm"] = llm_response
+    return result
+
+
 def infer_where_and_apply(
     arch,
     threshold: float = DEFAULT_THRESHOLD,
@@ -496,4 +545,24 @@ def infer_where_and_apply(
         _logistic_update(state.setdefault("logreg", {}), features, label, raw_prob)
         _platt_update(state.setdefault("platt", {}), raw_prob, label)
 
-    return {"status": status, "score": fused_prob, "summary": summary, "threshold": effective_threshold}
+    heuristic_result = {
+        "status": status,
+        "score": fused_prob,
+        "summary": summary,
+        "threshold": effective_threshold,
+        "stable": stable,
+        "hits": hits,
+        "required_hits": required_hits,
+    }
+    llm_payload = _build_llm_payload(where=where, decision_payload=decision_payload, state=state)
+    llm_response = try_call_llm_dict(
+        "cognition_context_inference",
+        input_payload=llm_payload,
+        logger=getattr(arch, "logger", None),
+    )
+    if isinstance(llm_response, dict):
+        try:
+            return _merge_llm_context(heuristic_result, dict(llm_response))
+        except Exception:
+            pass
+    return heuristic_result

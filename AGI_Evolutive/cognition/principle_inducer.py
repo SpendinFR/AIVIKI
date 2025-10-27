@@ -12,6 +12,7 @@ import hashlib
 
 from AGI_Evolutive.core.structures.mai import MAI, new_mai, EvidenceRef, ImpactHypothesis
 from AGI_Evolutive.knowledge.mechanism_store import MechanismStore
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 # Adapters (branchés sur tes modules v11)
 # On suppose que interaction_miner renvoie des "patterns" normatifs déjà extraits.
@@ -187,6 +188,47 @@ class PrincipleInducer:
         self.store = mechanism_store
         self._feedback = _FeedbackLedger()
         self._telemetry = _TelemetryLogger()
+        self._logger = getattr(mechanism_store, "logger", None)
+
+    def _llm_summarize_run(
+        self,
+        *,
+        produced: int,
+        selected: int,
+        latency: float,
+        metrics_snapshot: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        payload = {
+            "produced": produced,
+            "selected": selected,
+            "latency": latency,
+            "metrics_snapshot": metrics_snapshot,
+            "feedback_accept_rate": self._feedback.aggregate_accept_rate(),
+        }
+        response = try_call_llm_dict(
+            "cognition_principle_inducer",
+            input_payload=payload,
+            logger=getattr(self, "_logger", None),
+        )
+        summary = {
+            "produced": produced,
+            "selected": selected,
+            "latency": latency,
+        }
+        if isinstance(response, dict):
+            if isinstance(response.get("notes"), str) and response["notes"].strip():
+                summary["notes"] = response["notes"].strip()
+            if "confidence" in response:
+                try:
+                    summary["confidence"] = max(0.0, min(1.0, float(response["confidence"])))
+                except (TypeError, ValueError):
+                    pass
+            if isinstance(response.get("actions"), list):
+                summary["actions"] = [
+                    str(action) for action in response["actions"] if str(action).strip()
+                ][:5]
+            summary["llm"] = response
+        return summary
 
     # ---- 1) Synthèse de MAI candidats depuis des patterns normatifs ----
     def induce_from_patterns(self, patterns: List[NormativePattern]) -> List[MAI]:
@@ -676,12 +718,19 @@ class PrincipleInducer:
         except Exception:
             pass
         finally:
+            latency = time.time() - started
             self._telemetry.log(
                 "run_summary",
                 {
                     "produced": produced,
                     "selected": selected,
-                    "latency": time.time() - started,
+                    "latency": latency,
                     "metrics_snapshot": metrics_snapshot,
                 },
             )
+        return self._llm_summarize_run(
+            produced=produced,
+            selected=selected,
+            latency=latency,
+            metrics_snapshot=metrics_snapshot,
+        )
