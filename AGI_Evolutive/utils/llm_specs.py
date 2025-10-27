@@ -61,6 +61,36 @@ def _spec(
 
 LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
     _spec(
+        "package_overview",
+        "AGI_Evolutive/__init__.py",
+        "Analyse la structure du package AGI_Evolutive et propose une synthèse actionnable.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Résume le rôle global du package en une phrase claire.",
+            "Liste les capacités clés (2 à 5 éléments).",
+            "Suggère 1 à 3 axes prioritaires dans 'recommended_focus'.",
+            "Ajoute des alertes dans 'alerts' uniquement si nécessaire.",
+            "Fournis un champ 'confidence' entre 0 et 1 et des 'notes' concises.",
+        ),
+        example_output={
+            "summary": "AGI_Evolutive orchestre perception, mémoire et cognition pour un agent autonome évolutif.",
+            "capabilities": [
+                "Coordination multi-systèmes",
+                "Suivi heuristique robuste",
+                "Intégrations LLM modulaires",
+            ],
+            "recommended_focus": [
+                "Aligner les sorties LLM sur les métriques clés",
+                "Documenter les dépendances critiques",
+            ],
+            "alerts": [
+                "Surveiller la dette technique des heuristiques historiques",
+            ],
+            "confidence": 0.82,
+            "notes": "Consolider la télémétrie avant extension.",
+        },
+    ),
+    _spec(
         "intent_classification",
         "AGI_Evolutive/io/intent_classifier.py",
         "Classifie l'intention utilisateur et justifie ta décision.",
