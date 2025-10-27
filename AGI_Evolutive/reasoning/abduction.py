@@ -320,7 +320,17 @@ class AbductiveReasoner:
                 if not label:
                     continue
                 normalized = label.lower()
-                probability = item.get("probability", 0.0)
+                probability_raw = item.get("probability", 0.0)
+                probability = 0.0
+                if probability_raw is not None:
+                    try:
+                        probability = float(probability_raw)
+                    except (TypeError, ValueError):
+                        logger.warning(
+                            "Non-numeric probability '%s' returned by LLM for hypothesis '%s'",
+                            probability_raw,
+                            label,
+                        )
                 mechanism = str(item.get("mechanism", "") or "").strip()
                 tests = [
                     str(test).strip()
@@ -329,7 +339,7 @@ class AbductiveReasoner:
                 ]
                 llm_guidance[normalized] = {
                     "label": label,
-                    "probability": max(0.0, min(1.0, float(probability) if probability is not None else 0.0)),
+                    "probability": max(0.0, min(1.0, probability)),
                     "mechanism": mechanism,
                     "tests": tests,
                 }

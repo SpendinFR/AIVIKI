@@ -872,7 +872,10 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         "AGI_Evolutive/reasoning/abduction.py",
         "Propose des hypothèses causales structurées.",
         AVAILABLE_MODELS["reasoning"],
-        extra_instructions=("Indique probabilité, mécanisme et tests recommandés.",),
+        extra_instructions=(
+            "Indique probabilité, mécanisme et tests recommandés.",
+            "La probabilité doit être un nombre entre 0 et 1 (ex: 0.42).",
+        ),
         example_output={
             "hypotheses": [
                 {
