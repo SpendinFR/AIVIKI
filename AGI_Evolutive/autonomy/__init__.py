@@ -5,10 +5,15 @@
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 from collections import deque, defaultdict
+import logging
 import os, time, uuid, json, threading, random, math
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
 from AGI_Evolutive.autonomy.auto_signals import AutoSignalRegistry, AutoSignal
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+logger = logging.getLogger(__name__)
 
 # --------- Structures ---------
 
@@ -255,6 +260,7 @@ class AutonomyManager:
         self.metric_states: Dict[str, MetricLearningState] = {}
         self.weight_learner = OnlineWeightLearner()
         self.auto_evolution_stream: deque[Dict[str, Any]] = deque(maxlen=120)
+        self._last_weak_capabilities: List[Dict[str, float]] = []
 
         # Journal
         self.log_dir = "./logs"
@@ -318,6 +324,20 @@ class AutonomyManager:
 
         # a) lacunes / signaux faibles depuis la métacognition
         weak = self._detect_weak_capabilities()
+        self._last_weak_capabilities = list(weak)
+        inbox_path = "./inbox"
+        inbox_has_content = os.path.isdir(inbox_path) and self._dir_has_content(inbox_path)
+        fuzzy = self._context_is_fuzzy()
+
+        llm_props = self._llm_seed_proposals(
+            weak,
+            fuzzy_context=fuzzy,
+            inbox_path=inbox_path,
+            inbox_has_content=inbox_has_content,
+        )
+        if llm_props:
+            return llm_props
+
         for cap_state in weak:
             cap = cap_state["metric"]
             score = cap_state["smoothed"]
@@ -330,8 +350,7 @@ class AutonomyManager:
             })
 
         # b) environnement (inbox)
-        inbox_path = "./inbox"
-        if os.path.isdir(inbox_path) and self._dir_has_content(inbox_path):
+        if inbox_has_content:
             props.append({
                 "title": "Analyser l'inbox (fichiers récents)",
                 "kind": "intake",
@@ -361,7 +380,7 @@ class AutonomyManager:
             })
 
         # d) principe : toujours demander ce qui manque si le contexte est flou
-        if self._context_is_fuzzy():
+        if fuzzy:
             props.append({
                 "title": "Clarifier le contexte et les contraintes",
                 "kind": "alignment",
@@ -665,12 +684,147 @@ class AutonomyManager:
     # ---------- Helpers ----------
 
     def _build_clarifying_question(self) -> str:
+        llm_question = self._llm_clarifying_question()
+        if llm_question:
+            return llm_question
         base = [
             "Quel est l'objectif le plus important pour toi maintenant ?",
             "Y a-t-il des contraintes (temps, format, sources) que je dois respecter ?",
             "Souhaites-tu que je priorise l'exploration ou la fiabilité ?"
         ]
         return " / ".join(base)
+
+    def _llm_seed_proposals(
+        self,
+        weak: List[Dict[str, Any]],
+        *,
+        fuzzy_context: bool,
+        inbox_path: str,
+        inbox_has_content: bool,
+    ) -> Optional[List[Dict[str, Any]]]:
+        payload = json_sanitize({
+            "constitution": list(self.constitution),
+            "weak_signals": weak,
+            "fuzzy_context": bool(fuzzy_context),
+            "agenda": [
+                {
+                    "title": item.title,
+                    "kind": item.kind,
+                    "priority": item.priority,
+                    "status": item.status,
+                    "payload": dict(item.payload or {}),
+                }
+                for item in list(self.agenda)[:8]
+            ],
+            "inbox": {
+                "path": inbox_path,
+                "has_content": bool(inbox_has_content),
+            },
+            "language_state": {
+                "present": bool(self.language),
+                "known_terms": len(getattr(self.language, "known_terms", {}))
+                if self.language and hasattr(self.language, "known_terms")
+                else None,
+                "has_parser": bool(self.language and hasattr(self.language, "parse_utterance")),
+            },
+            "recent_auto_stream": list(self.auto_evolution_stream)[-5:],
+        })
+        response = try_call_llm_dict(
+            "autonomy_seed_proposals",
+            input_payload=payload,
+            logger=logger,
+        )
+        if not response:
+            return None
+
+        proposals_field = response.get("proposals")
+        if not isinstance(proposals_field, list):
+            return None
+
+        allowed_kinds = {"learning", "reasoning", "intake", "alignment", "meta"}
+        proposals: List[Dict[str, Any]] = []
+        for raw in proposals_field:
+            if not isinstance(raw, Mapping):
+                continue
+            title = str(raw.get("title") or "").strip()
+            kind = str(raw.get("kind") or "").strip().lower()
+            if not title or kind not in allowed_kinds:
+                continue
+            try:
+                priority = float(raw.get("priority", 0.6))
+            except (TypeError, ValueError):
+                priority = 0.6
+            priority = max(0.0, min(1.0, priority))
+            rationale = str(raw.get("rationale") or "").strip() or "Justification non précisée."
+            payload_data = raw.get("payload")
+            payload_dict = dict(payload_data) if isinstance(payload_data, Mapping) else {}
+            proposal: Dict[str, Any] = {
+                "title": title,
+                "kind": kind,
+                "priority": priority,
+                "rationale": rationale,
+                "payload": payload_dict,
+            }
+            dedupe_key = raw.get("dedupe_key")
+            if isinstance(dedupe_key, str) and dedupe_key.strip():
+                proposal["dedupe_key"] = dedupe_key.strip()
+            proposals.append(proposal)
+
+        if proposals:
+            self._log(f"🤖 Auto-seed (LLM): {len(proposals)} proposition(s)")
+            return proposals
+        return None
+
+    def _llm_clarifying_question(self) -> Optional[str]:
+        agenda_snapshot = [
+            {
+                "title": item.title,
+                "kind": item.kind,
+                "priority": item.priority,
+                "status": item.status,
+            }
+            for item in list(self.agenda)[:8]
+        ]
+        existing_questions = [
+            str((item.payload or {}).get("question"))
+            for item in self.agenda
+            if item.kind == "alignment" and isinstance((item.payload or {}).get("question"), str)
+        ]
+        payload = json_sanitize({
+            "agenda": agenda_snapshot,
+            "constitution": list(self.constitution),
+            "recent_questions": existing_questions,
+            "weak_signals": getattr(self, "_last_weak_capabilities", []),
+            "fuzzy_context": self._context_is_fuzzy(),
+        })
+        response = try_call_llm_dict(
+            "autonomy_clarifying_question",
+            input_payload=payload,
+            logger=logger,
+        )
+        if not response:
+            return None
+        question = response.get("question")
+        if isinstance(question, str) and question.strip():
+            question_text = question.strip()
+        else:
+            alternatives = response.get("alternatives")
+            if isinstance(alternatives, list):
+                question_text = next(
+                    (
+                        str(option).strip()
+                        for option in alternatives
+                        if isinstance(option, str) and option.strip()
+                    ),
+                    "",
+                )
+            else:
+                question_text = ""
+        if not question_text:
+            return None
+        if not question_text.endswith("?"):
+            question_text = f"{question_text}?"
+        return question_text
 
     def _dir_has_content(self, path: str) -> bool:
         try:
