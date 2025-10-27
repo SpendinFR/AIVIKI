@@ -361,8 +361,8 @@ class ExperientialLearning:
         experiments = self._design_experiments(concepts)
         outcomes = self._execute_and_evaluate(experiments)
         emotional_valence = self._valence(outcomes)
-       confidence_gain = self._confidence(outcomes)
-       integration = self._integration(concepts, outcomes)
+        confidence_gain = self._confidence(outcomes)
+        integration = self._integration(concepts, outcomes)
         llm_guidance = self._llm_summarise_experience(
             raw,
             reflections=reflections,
