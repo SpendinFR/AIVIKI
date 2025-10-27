@@ -1,10 +1,16 @@
 import json
+import json
+import logging
 import math
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _sigmoid(x: float) -> float:
@@ -267,6 +273,20 @@ class Consolidator:
             else:
                 lesson_threshold = max(0.25, lesson_threshold * 0.92)
 
+        llm_response = self._llm_recommendations(
+            lesson_candidates,
+            topics_tracker.top(5),
+            error_trend.value,
+            praise_trend.value,
+            fallback_lessons=lessons,
+            fallback_proposals=proposals,
+        )
+
+        if isinstance(llm_response, Mapping):
+            llm_lessons = self._coerce_llm_lessons(llm_response.get("lessons"))
+            if llm_lessons:
+                lessons = llm_lessons
+
         max_ts = max((m.get("ts", 0) for m in recents), default=last_ts)
         self.state["last_ts"] = max(last_ts, max_ts)
         if lessons:
@@ -282,7 +302,107 @@ class Consolidator:
         self.state["topics"] = topics_tracker.to_state()
 
         self._save()
-        return {"lessons": lessons, "processed": len(recents), "proposals": proposals}
+        result: Dict[str, Any] = {
+            "lessons": lessons,
+            "processed": len(recents),
+            "proposals": proposals,
+        }
+        if isinstance(llm_response, Mapping):
+            result["llm"] = dict(llm_response)
+        return result
+
+    # ------------------------------------------------------------------
+    # LLM integration helpers
+
+    def _candidate_snapshot(
+        self,
+        probability: float,
+        memory: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        text = (memory.get("text") or memory.get("content") or "").strip()
+        snippet = text[:280]
+        metadata = memory.get("metadata") if isinstance(memory.get("metadata"), Mapping) else {}
+        safe_meta = {
+            key: metadata[key]
+            for key in ("kind", "source", "channel", "location")
+            if metadata.get(key) is not None
+        }
+        return {
+            "id": memory.get("id"),
+            "kind": memory.get("kind"),
+            "probability": round(float(probability), 4),
+            "ts": memory.get("ts"),
+            "text": snippet,
+            "metadata": safe_meta,
+        }
+
+    def _llm_recommendations(
+        self,
+        lesson_candidates: Sequence[Tuple[float, Mapping[str, Any]]],
+        topics: Sequence[str],
+        error_trend: float,
+        praise_trend: float,
+        *,
+        fallback_lessons: Sequence[str],
+        fallback_proposals: Sequence[Mapping[str, Any]],
+    ) -> Optional[Mapping[str, Any]]:
+        if not lesson_candidates:
+            return None
+
+        payload = {
+            "candidates": [
+                self._candidate_snapshot(prob, mem)
+                for prob, mem in list(lesson_candidates)[:6]
+            ],
+            "topics": list(topics),
+            "signals": {
+                "error_trend": error_trend,
+                "praise_trend": praise_trend,
+            },
+            "fallback": {
+                "lessons": list(fallback_lessons)[:5],
+                "proposals": [dict(p) for p in fallback_proposals],
+            },
+        }
+
+        response = try_call_llm_dict(
+            "memory_consolidator",
+            input_payload=payload,
+            logger=LOGGER,
+        )
+        if isinstance(response, Mapping):
+            return dict(response)
+        return None
+
+    def _coerce_llm_lessons(
+        self,
+        lessons: Any,
+        *,
+        limit: int = 3,
+    ) -> List[str]:
+        if lessons is None:
+            return []
+        results: List[str] = []
+        if isinstance(lessons, Mapping):
+            lessons = lessons.get("items")
+        if isinstance(lessons, Iterable) and not isinstance(lessons, (str, bytes)):
+            for entry in lessons:
+                if isinstance(entry, Mapping):
+                    title = str(entry.get("title") or entry.get("lesson") or "").strip()
+                    action = str(entry.get("action") or entry.get("follow_up") or "").strip()
+                    if title and action:
+                        results.append(f"{title} — {action}")
+                    elif title:
+                        results.append(title)
+                    elif action:
+                        results.append(action)
+                elif isinstance(entry, str):
+                    stripped = entry.strip()
+                    if stripped:
+                        results.append(stripped)
+                if len(results) >= limit:
+                    break
+        return results[:limit]
 
     @staticmethod
     def _lesson_features(kind: str, text: str) -> Dict[str, float]:

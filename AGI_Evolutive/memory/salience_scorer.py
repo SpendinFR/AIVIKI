@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import dataclasses
+import logging
 import math
 import random
 import time
-from typing import Any, Callable, Dict, Iterable, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Tuple
 
 try:  # Modules optionnels (config) peuvent manquer selon l'environnement
     from config import memory_flags as _mem_flags
 except Exception:  # pragma: no cover - robustesse import
     _mem_flags = None  # type: ignore
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _norm01(value: float) -> float:
@@ -93,6 +99,7 @@ class SalienceScorer:
         self.reward = reward
         self.goals = goals
         self.prefs = prefs
+        self._llm_cache: Dict[str, Dict[str, Any]] = {}
 
         self._weights = getattr(_mem_flags, "SALIENCE_WEIGHTS", {
             "recency": 0.25,
@@ -135,13 +142,14 @@ class SalienceScorer:
             if self._learning_cfg.exploration > 0.0 and random.random() < self._learning_cfg.exploration:
                 # epsilon-greedy : petite exploration en ajoutant bruit uniform
                 score = _norm01(score + random.uniform(-0.1, 0.1))
-            return score
+            return self._maybe_llm_enrich(item, parts, score)
 
         total_weight = sum(self._weights.values()) or 1.0
         score = 0.0
         for key, weight in self._weights.items():
             score += weight * parts.get(key, 0.0)
-        return _norm01(score / total_weight)
+        base_score = _norm01(score / total_weight)
+        return self._maybe_llm_enrich(item, parts, base_score)
 
     # ------------------------------------------------------------------
     def mutate_static_weights(self, spread: float = 0.05) -> Dict[str, float]:
@@ -175,6 +183,84 @@ class SalienceScorer:
         parts = self._feature_parts(item)
         features = self._feature_vector(parts)
         self._model.update(features, _norm01(target), weight)
+
+    # ------------------------------------------------------------------
+    # LLM integration helpers
+
+    def _memory_identifier(self, item: Mapping[str, Any]) -> Optional[str]:
+        for key in ("id", "uuid", "memory_id"):
+            value = item.get(key)
+            if isinstance(value, str) and value:
+                return value
+        return None
+
+    def _llm_payload(
+        self,
+        item: Mapping[str, Any],
+        parts: Mapping[str, float],
+        heuristic_score: float,
+    ) -> Dict[str, Any]:
+        text = (item.get("text") or item.get("content") or "").strip()
+        snippet = text[:320]
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {}
+        safe_meta = {
+            key: metadata[key]
+            for key in ("kind", "source", "channel", "topic")
+            if metadata.get(key) is not None
+        }
+        return {
+            "memory_id": self._memory_identifier(item),
+            "kind": item.get("kind"),
+            "text": snippet,
+            "features": {name: round(float(value), 4) for name, value in parts.items()},
+            "heuristic_score": round(float(heuristic_score), 4),
+            "metadata": safe_meta,
+        }
+
+    def _maybe_llm_enrich(
+        self,
+        item: Mapping[str, Any],
+        parts: Mapping[str, float],
+        heuristic_score: float,
+    ) -> float:
+        identifier = self._memory_identifier(item)
+        if not identifier:
+            return float(heuristic_score)
+
+        cached = self._llm_cache.get(identifier)
+        if cached is None and 0.25 <= heuristic_score <= 0.85:
+            response = try_call_llm_dict(
+                "salience_scorer",
+                input_payload=self._llm_payload(item, parts, heuristic_score),
+                logger=LOGGER,
+            )
+            if isinstance(response, Mapping):
+                cached = dict(response)
+                cached.setdefault("memory_id", identifier)
+                self._llm_cache[identifier] = cached
+            else:
+                self._llm_cache[identifier] = {}
+                cached = self._llm_cache[identifier]
+
+        if cached:
+            llm_score = cached.get("salience")
+            try:
+                llm_value = float(llm_score)
+            except (TypeError, ValueError):
+                llm_value = heuristic_score
+            else:
+                llm_value = max(0.0, min(1.0, llm_value))
+            blended = 0.6 * heuristic_score + 0.4 * llm_value
+            if hasattr(item, "setdefault"):
+                try:
+                    container = item.setdefault("llm", {})  # type: ignore[assignment]
+                    if isinstance(container, dict):
+                        container.setdefault("salience", cached)
+                except Exception:  # pragma: no cover - defensive
+                    pass
+            return float(_norm01(blended))
+
+        return float(heuristic_score)
 
     # ------------------------------------------------------------------
     def _filter_learning_kwargs(self, values: Dict[str, Any]) -> Dict[str, Any]:

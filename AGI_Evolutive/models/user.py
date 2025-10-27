@@ -1,8 +1,12 @@
 from __future__ import annotations
 from typing import Dict, Any, Optional, List
-import os, json, datetime as dt, time, math
+import os, json, datetime as dt, time, math, logging
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+LOGGER = logging.getLogger(__name__)
 
 class UserModel:
     """
@@ -139,6 +143,113 @@ class UserModel:
 
     def _blend_probabilities(self, beta_prob: float, glm_prob: float) -> float:
         return float(max(0.0, min(1.0, (1.0 - self.pref_blend) * beta_prob + self.pref_blend * glm_prob)))
+
+    def _top_preferences(self, limit: int = 5) -> List[Dict[str, Any]]:
+        items: List[Dict[str, Any]] = []
+        preferences = self.state.get("preferences", {})
+        for label, payload in preferences.items():
+            if not isinstance(payload, dict):
+                continue
+            prob = payload.get("prob")
+            if isinstance(prob, (int, float)):
+                items.append({"label": label, "probability": float(max(0.0, min(1.0, prob)))})
+        items.sort(key=lambda entry: entry.get("probability", 0.0), reverse=True)
+        return items[:limit]
+
+    def _sample_routines(self, limit: int = 4) -> List[Dict[str, Any]]:
+        routines = []
+        buckets = self.state.get("routines", {})
+        for bucket, entries in buckets.items():
+            if not isinstance(entries, dict):
+                continue
+            for label, payload in entries.items():
+                prob = payload.get("prob") if isinstance(payload, dict) else None
+                if isinstance(prob, (int, float)):
+                    routines.append(
+                        {
+                            "time_bucket": bucket,
+                            "activity": label,
+                            "probability": float(max(0.0, min(1.0, prob))),
+                        }
+                    )
+        routines.sort(key=lambda entry: entry.get("probability", 0.0), reverse=True)
+        return routines[:limit]
+
+    def _build_llm_payload(self, memories: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        recent_memories: List[Dict[str, Any]] = []
+        for memory in reversed(memories[-20:]):
+            if not isinstance(memory, dict):
+                continue
+            text = str(memory.get("content") or memory.get("text") or "").strip()
+            if not text:
+                continue
+            metadata = memory.get("metadata") if isinstance(memory.get("metadata"), dict) else {}
+            recent_memories.append(
+                {
+                    "text": text[:240],
+                    "metadata": {
+                        key: metadata[key]
+                        for key in ("channel", "partner", "location", "sentiment")
+                        if metadata.get(key) is not None
+                    },
+                }
+            )
+        persona = self.state.get("persona", {})
+        payload = {
+            "current_persona": {
+                "tone": persona.get("tone", "neutral"),
+                "values": persona.get("values", {}),
+            },
+            "top_preferences": self._top_preferences(),
+            "routines": self._sample_routines(),
+            "recent_memories": recent_memories,
+        }
+        if not any(payload.values()):
+            return None
+        return payload
+
+    def _llm_update_profile(self, memories: List[Dict[str, Any]]) -> None:
+        payload = self._build_llm_payload(memories)
+        if not payload:
+            return
+        response = try_call_llm_dict(
+            "user_model",
+            input_payload=payload,
+            logger=LOGGER,
+        )
+        if not response:
+            return
+
+        persona = self.state.setdefault("persona", {})
+        dirty = False
+
+        tone = response.get("tone")
+        if isinstance(tone, str) and tone:
+            if persona.get("tone") != tone:
+                persona["tone"] = tone
+                dirty = True
+
+        satisfaction = response.get("satisfaction")
+        if isinstance(satisfaction, (int, float)):
+            clipped = float(max(0.0, min(1.0, satisfaction)))
+            if persona.get("satisfaction") != clipped:
+                persona["satisfaction"] = clipped
+                dirty = True
+
+        traits = response.get("persona_traits")
+        if isinstance(traits, list):
+            persona["traits"] = traits
+            dirty = True
+
+        notes = response.get("notes")
+        if isinstance(notes, str):
+            self.state.setdefault("insights", {})["user_model_notes"] = notes
+            dirty = True
+
+        self.state.setdefault("llm_profiles", {})["user_model"] = response
+        dirty = True
+        if dirty:
+            self.save()
 
     def observe_preference(
         self,
@@ -313,4 +424,9 @@ class UserModel:
                 for activity in meta["activities"]:
                     self.observe_routine(str(activity), strength=0.3, timestamp=ts)
                     n += 1
+        if n:
+            try:
+                self._llm_update_profile(memories)
+            except Exception:
+                LOGGER.debug("LLM user model update failed", exc_info=True)
         return n

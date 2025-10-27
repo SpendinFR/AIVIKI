@@ -4,11 +4,16 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Callable, Deque, Dict, Optional
+import logging
+from typing import Any, Callable, Deque, Dict, Mapping, Optional
 import random
 import time
 
 from .summarizer import ProgressiveSummarizer, SummarizerConfig
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -19,6 +24,19 @@ class TaskStats:
     iterations: int = 0
     last_result: Optional[Any] = None
     history: Deque[Dict[str, Any]] = field(default_factory=lambda: deque(maxlen=256))
+
+
+_TASK_ALIASES: Dict[str, str] = {
+    "concept": "concept",
+    "concepts": "concept",
+    "concept_update": "concept",
+    "episodic": "episodic",
+    "episodes": "episodic",
+    "episodique": "episodic",
+    "summarize": "summarize",
+    "summary": "summarize",
+    "synthese": "summarize",
+}
 
 
 class AdaptiveEMA:
@@ -231,6 +249,8 @@ class SemanticMemoryManager:
 
         self.drift_events: Deque[Dict[str, Any]] = deque(maxlen=128)
         self._drift_cursors: Dict[str, int] = {name: 0 for name in self._controllers}
+        self.last_llm_guidance: Optional[Dict[str, Any]] = None
+        self.llm_guidance_history: Deque[Dict[str, Any]] = deque(maxlen=50)
 
     # ------------------------------------------------------------------
     def tick(self, now: Optional[float] = None) -> Dict[str, Any]:
@@ -284,6 +304,10 @@ class SemanticMemoryManager:
                     result=stats.get("summaries"),
                 )
 
+        guidance = self._llm_prioritize(now, stats)
+        if guidance:
+            stats["llm_guidance"] = guidance
+
         return stats
 
     # ------------------------------------------------------------------
@@ -333,6 +357,119 @@ class SemanticMemoryManager:
             return deque()
         sliced = list(self.drift_events)[-limit:]
         return deque(sliced)
+
+    def _llm_prioritize(self, now: float, stats: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        payload = self._build_llm_payload(now, stats)
+        if not payload:
+            return None
+
+        try:
+            response = try_call_llm_dict("semantic_memory_manager", input_payload=payload)
+        except Exception:  # pragma: no cover - prudence
+            LOGGER.debug("Guidance LLM pour la mémoire sémantique indisponible", exc_info=True)
+            return None
+
+        if not isinstance(response, Mapping):
+            return None
+
+        guidance = dict(response)
+        applied = self._apply_llm_prioritization(guidance.get("tasks"), now)
+        if applied:
+            guidance["applied_adjustments"] = applied
+
+        self.last_llm_guidance = guidance
+        self.llm_guidance_history.append({"ts": now, "guidance": guidance})
+        return guidance
+
+    def _build_llm_payload(self, now: float, stats: Dict[str, Any]) -> Dict[str, Any]:
+        tasks_info: list[Dict[str, Any]] = []
+        for name, meta in self._task_meta.items():
+            snapshot = self.get_task_metrics(name)
+            controller = self._controllers.get(name)
+            task_stats: TaskStats = getattr(self, meta["task_attr"])
+            next_run = float(snapshot.get("next_run", now) or now)
+            history = list(snapshot.get("history", []))
+            if history:
+                history = history[-3:]
+            entry = {
+                "name": name,
+                "period": float(snapshot.get("period", getattr(self, meta["period_attr"])) or 0.0),
+                "next_run_in": max(0.0, next_run - now),
+                "iterations": int(task_stats.iterations),
+                "last_processed": history[-1]["processed"] if history else None,
+                "ema_load": controller.load.value if controller else None,
+                "ema_rate": controller.rate.value if controller else None,
+                "last_result": task_stats.last_result,
+            }
+            if history:
+                entry["history"] = history
+            tasks_info.append(entry)
+
+        payload: Dict[str, Any] = {
+            "timestamp": now,
+            "tasks": tasks_info,
+            "drift_events": list(self.drift_events)[-5:],
+            "recent_stats": stats,
+        }
+        return payload
+
+    def _resolve_task_name(self, raw: Any) -> Optional[str]:
+        if not raw:
+            return None
+        name = str(raw).strip().lower()
+        if name in self._task_meta:
+            return name
+        return _TASK_ALIASES.get(name)
+
+    def _apply_llm_prioritization(
+        self, tasks: Any, now: float
+    ) -> Dict[str, Dict[str, float]]:
+        if not isinstance(tasks, list):
+            return {}
+
+        applied: Dict[str, Dict[str, float]] = {}
+        for entry in tasks:
+            if not isinstance(entry, Mapping):
+                continue
+            resolved = self._resolve_task_name(entry.get("task"))
+            if not resolved or resolved not in self._task_meta:
+                continue
+            controller = self._controllers.get(resolved)
+            meta = self._task_meta[resolved]
+            period_attr = meta["period_attr"]
+            next_attr = meta["next_attr"]
+            current_period = float(getattr(self, period_attr) or 0.0)
+            if current_period <= 0:
+                continue
+
+            category = str(entry.get("category") or "").lower().replace(" ", "_")
+            if category == "urgent":
+                target_period = max(controller.min_period, current_period * 0.5) if controller else current_period * 0.5
+                next_base = controller.min_period if controller else target_period * 0.5
+            elif category in {"court_terme", "court-terme", "court_term", "court"}:
+                target_period = max(controller.min_period, current_period * 0.75) if controller else current_period * 0.75
+                next_base = target_period * 0.5
+            elif category in {"long_terme", "long-terme", "long_term", "long"}:
+                candidate = current_period * 1.25
+                max_period = controller.max_period if controller else None
+                target_period = min(max_period, candidate) if max_period else candidate
+                next_base = target_period
+            else:
+                continue
+
+            if controller:
+                controller.period = target_period
+            setattr(self, period_attr, target_period)
+            next_run = now + self._jitter(next_base if next_base > 0 else target_period)
+            setattr(self, next_attr, next_run)
+            applied[resolved] = {
+                "period": target_period,
+                "previous_period": current_period,
+                "next_run": next_run,
+                "category": category,
+            }
+
+        return applied
 
     # ------------------------------------------------------------------
     def _run_concept_update(self, now: float) -> int:
