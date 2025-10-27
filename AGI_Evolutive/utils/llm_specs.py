@@ -91,6 +91,84 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         },
     ),
     _spec(
+        "reasoning_episode",
+        "AGI_Evolutive/reasoning/__init__.py",
+        "Analyse un épisode de raisonnement et propose une réponse structurée prête à l'exécution.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Fixe le champ 'confidence' entre 0 et 1 en cohérence avec l'hypothèse retenue.",
+            "Décris chaque test avec les champs description/goal/priority (1 = priorité la plus haute).",
+            "Ajoute des 'actions' concrètes avec label, utility et notes si pertinent.",
+        ),
+        example_output={
+            "summary": "Stratégie déduction: prioriser l'explication A avec validation terrain.",
+            "confidence": 0.72,
+            "hypothesis": {
+                "label": "L'utilisateur veut une procédure détaillée", 
+                "confidence": 0.72,
+                "rationale": "Le prompt insiste sur des étapes numérotées et un besoin de traçabilité."
+            },
+            "tests": [
+                {
+                    "description": "Vérifier les journaux récents du module QA",
+                    "goal": "Identifier un cas similaire pour valider la démarche",
+                    "priority": 1,
+                    "expected_gain": 0.6,
+                }
+            ],
+            "actions": [
+                {
+                    "label": "Scanner la mémoire récente",
+                    "utility": 0.58,
+                    "notes": "Permet d'ancrer la recommandation dans les retours d'expérience."
+                }
+            ],
+            "learning": [
+                "Documenter explicitement le lien hypothèse→test pour faciliter l'audit."
+            ],
+            "notes": "Prévoir une relance utilisateur si la confiance reste <0.75.",
+        },
+    ),
+    _spec(
+        "counterfactual_analysis",
+        "AGI_Evolutive/reasoning/causal.py",
+        "Analyse une simulation contrefactuelle et propose des validations/actions prioritaires.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Résume la plausibilité de la relation cause→effet en français clair.",
+            "Renseigne le champ 'confidence' entre 0 et 1.",
+            "Liste les hypothèses clés dans 'assumptions'.",
+            "Suggère des 'checks' (description/goal/priority) pour valider le scénario.",
+            "Fournis des 'actions' concrètes avec label/priority/utility/notes si pertinent.",
+            "Ajoute 'alerts' si un risque, une donnée manquante ou une incohérence est détecté.",
+        ),
+        example_output={
+            "summary": "La relation semble plausible mais dépend d'une température stable.",
+            "confidence": 0.64,
+            "assumptions": [
+                "La température ambiante reste comprise entre 20 et 25°C.",
+                "Les capteurs de vibration sont calibrés.",
+            ],
+            "checks": [
+                {
+                    "description": "Vérifier le journal thermique des dernières 24h",
+                    "goal": "Confirmer l'absence de pic de chaleur",
+                    "priority": 1,
+                }
+            ],
+            "actions": [
+                {
+                    "label": "Déployer un capteur redondant",
+                    "priority": 1,
+                    "utility": 0.55,
+                    "notes": "Sécurise la mesure principale avant l'intervention.",
+                }
+            ],
+            "alerts": ["La confiance reste limitée faute de simulations réussies."],
+            "notes": "Prévoir un re-test si de nouvelles données arrivent.",
+        },
+    ),
+    _spec(
         "intent_classification",
         "AGI_Evolutive/io/intent_classifier.py",
         "Classifie l'intention utilisateur et justifie ta décision.",

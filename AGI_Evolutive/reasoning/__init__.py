@@ -1,5 +1,6 @@
 """Reasoning system responsible for producing structured hypothesis/test plans."""
 
+import logging
 import math
 import random
 import time
@@ -7,7 +8,11 @@ import unicodedata
 from collections import deque
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from ..utils.llm_service import try_call_llm_dict
 from .structures import Evidence, Hypothesis, Test, episode_record
+
+
+logger = logging.getLogger(__name__)
 
 
 class OnlineLinear:
@@ -185,7 +190,14 @@ class ReasoningSystem:
             complexity=complexity,
         )
 
-        metadata = {"deliberation": deliberation} if deliberation else None
+        base_summary = self._make_readable_summary(
+            strategy, hypos, chosen_idx, tests, evidence, final_conf
+        )
+        metadata: Dict[str, Any] = {}
+        if deliberation:
+            metadata["deliberation"] = deliberation
+        metadata["heuristic_summary"] = base_summary
+
         ep = episode_record(
             user_msg=prompt,
             hypotheses=hypos,
@@ -194,7 +206,7 @@ class ReasoningSystem:
             evidence=evidence,
             result_text=evidence.notes,
             final_confidence=final_conf,
-            metadata=metadata,
+            metadata=metadata or None,
         )
         ep["reasoning_time"] = reasoning_time
         ep["complexity"] = complexity
@@ -202,18 +214,204 @@ class ReasoningSystem:
         ep["hypothesis_features"] = features_by_idx
         ep["smoothing_value"] = smoothing_value
         ep["test_keys"] = chosen_test_keys
+        ep["heuristic_summary"] = base_summary
         if deliberation:
             ep["deliberation"] = deliberation
 
-        self._push_episode(ep)
+        chosen_hypothesis_text = hypos[chosen_idx].content if hypos else ""
+        tests_display = [t.description for t in tests]
+        prochain_test = tests_display[0] if tests_display else "-"
+        appris_entries = [
+            f"Stratégie={strategy}, complexité≈{complexity:.2f}",
+            "Toujours relier hypothèse→test→évidence (traçabilité).",
+        ]
 
-        summary = self._make_readable_summary(strategy, hypos, chosen_idx, tests, evidence, final_conf)
+        llm_summary: Optional[str] = None
+        llm_tests_display: Optional[List[str]] = None
+        llm_learning: List[str] = []
+        llm_notes: Optional[str] = None
+        llm_actions: Optional[List[Dict[str, Any]]] = None
+
+        def _coerce_float(value: Any) -> Optional[float]:
+            try:
+                if value is None:
+                    return None
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        def _coerce_int(value: Any) -> Optional[int]:
+            try:
+                if value is None:
+                    return None
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
+        heuristics_payload = {
+            "strategy": strategy,
+            "scores": [float(s) for s in scores],
+            "chosen_index": int(chosen_idx),
+            "hypotheses": [h.to_dict() for h in hypos],
+            "tests": [t.to_dict() for t in tests],
+            "evidence": evidence.to_dict(),
+            "summary": base_summary,
+            "complexity": complexity,
+            "smoothing_value": smoothing_value,
+            "features": [
+                {
+                    "index": int(idx),
+                    "values": {name: float(val) for name, val in feats.items()},
+                }
+                for idx, feats in features_by_idx.items()
+            ],
+            "deliberation": deliberation,
+            "reasoning_time": reasoning_time,
+        }
+
+        llm_response = try_call_llm_dict(
+            "reasoning_episode",
+            input_payload={
+                "prompt": prompt,
+                "context": self._prepare_llm_context(context or {}),
+                "heuristics": heuristics_payload,
+            },
+            logger=logger,
+        )
+
+        if isinstance(llm_response, Mapping):
+            llm_guidance = ep.setdefault("llm_guidance", {})
+            llm_guidance["raw"] = llm_response
+            summary_text = str(llm_response.get("summary") or "").strip()
+            if summary_text:
+                llm_summary = summary_text
+
+            llm_notes_value = str(llm_response.get("notes") or "").strip()
+            if llm_notes_value:
+                llm_notes = llm_notes_value
+                llm_guidance["notes"] = llm_notes
+
+            confidence_value = _coerce_float(llm_response.get("confidence"))
+            hypothesis_payload = llm_response.get("hypothesis")
+            if isinstance(hypothesis_payload, Mapping):
+                label_value = str(
+                    hypothesis_payload.get("label")
+                    or hypothesis_payload.get("name")
+                    or ""
+                ).strip()
+                if label_value:
+                    chosen_hypothesis_text = label_value
+                    llm_guidance.setdefault("hypothesis", {})["label"] = label_value
+                rationale = str(hypothesis_payload.get("rationale") or "").strip()
+                if rationale:
+                    llm_guidance.setdefault("hypothesis", {})["rationale"] = rationale
+                if confidence_value is None:
+                    confidence_value = _coerce_float(hypothesis_payload.get("confidence"))
+
+            if confidence_value is not None:
+                final_conf = float(max(0.0, min(1.0, confidence_value)))
+                evidence.confidence = final_conf
+                ep["evidence"]["confidence"] = final_conf
+                ep["final_confidence"] = final_conf
+
+            tests_payload = llm_response.get("tests")
+            if isinstance(tests_payload, Sequence):
+                llm_tests_display = []
+                llm_tests_details: List[Dict[str, Any]] = []
+                for item in tests_payload:
+                    if not isinstance(item, Mapping):
+                        continue
+                    description = str(item.get("description") or item.get("label") or "").strip()
+                    if not description:
+                        continue
+                    goal = str(item.get("goal") or item.get("objectif") or "").strip()
+                    priority_val = _coerce_int(item.get("priority"))
+                    detail: Dict[str, Any] = {"description": description}
+                    if goal:
+                        detail["goal"] = goal
+                    if priority_val is not None:
+                        detail["priority"] = priority_val
+                    expected_gain = _coerce_float(item.get("expected_gain"))
+                    if expected_gain is not None:
+                        detail["expected_gain"] = float(max(0.0, min(1.0, expected_gain)))
+                    llm_tests_details.append(detail)
+
+                    parts: List[str] = []
+                    if priority_val is not None:
+                        parts.append(f"[p{max(1, min(9, priority_val))}]")
+                    parts.append(description)
+                    if goal:
+                        parts.append(f"objectif: {goal}")
+                    llm_tests_display.append(" ".join(parts))
+
+                if llm_tests_details:
+                    llm_guidance["tests"] = llm_tests_details
+
+            learning_payload = llm_response.get("learning")
+            if isinstance(learning_payload, Sequence):
+                llm_learning = [
+                    str(item).strip()
+                    for item in learning_payload
+                    if isinstance(item, (str, bytes)) and str(item).strip()
+                ]
+                if llm_learning:
+                    llm_guidance["learning"] = llm_learning
+
+            actions_payload = llm_response.get("actions")
+            if isinstance(actions_payload, Sequence):
+                parsed_actions: List[Dict[str, Any]] = []
+                for item in actions_payload:
+                    if not isinstance(item, Mapping):
+                        continue
+                    label = str(item.get("label") or item.get("action") or "").strip()
+                    if not label:
+                        continue
+                    action_entry: Dict[str, Any] = {"label": label}
+                    utility_val = _coerce_float(item.get("utility"))
+                    if utility_val is not None:
+                        action_entry["utility"] = float(max(0.0, min(1.0, utility_val)))
+                    notes_val = str(item.get("notes") or item.get("why") or "").strip()
+                    if notes_val:
+                        action_entry["notes"] = notes_val
+                    parsed_actions.append(action_entry)
+                if parsed_actions:
+                    llm_actions = parsed_actions
+                    llm_guidance["actions"] = parsed_actions
+
+        if llm_tests_display:
+            tests_display = llm_tests_display
+            prochain_test = llm_tests_display[0]
+
+        if llm_learning:
+            appris_entries.extend(llm_learning)
+
+        if llm_notes:
+            appris_entries.append(f"Note LLM: {llm_notes}")
+
+        if llm_actions:
+            if deliberation and isinstance(deliberation, Mapping):
+                deliberation = dict(deliberation)
+            else:
+                deliberation = {}
+            deliberation["llm_actions"] = llm_actions
+            ep["deliberation"] = deliberation
+
+        summary = llm_summary or base_summary
         if deliberation and deliberation.get("chosen"):
             best = deliberation["chosen"]
             summary += (
                 f" Choix opératoire privilégié: {best.get('label')} (utilité≈{best.get('utility', 0.0):.2f})."
             )
-        self._learn(final_conf, strategy, features_by_idx.get(chosen_idx, {}), smoothing_value, chosen_test_keys)
+
+        self._push_episode(ep)
+
+        self._learn(
+            final_conf,
+            strategy,
+            features_by_idx.get(chosen_idx, {}),
+            smoothing_value,
+            chosen_test_keys,
+        )
         if deliberation:
             self._record_deliberation(prompt, deliberation, final_conf, complexity)
 
@@ -223,18 +421,17 @@ class ReasoningSystem:
         except Exception:
             pass
 
-        result = {
+        result: Dict[str, Any] = {
             "summary": summary,
-            "chosen_hypothesis": hypos[chosen_idx].content if hypos else "",
-            "tests": [t.description for t in tests],
+            "chosen_hypothesis": chosen_hypothesis_text,
+            "tests": tests_display,
             "final_confidence": final_conf,
-            "appris": [
-                f"Stratégie={strategy}, complexité≈{complexity:.2f}",
-                "Toujours relier hypothèse→test→évidence (traçabilité).",
-            ],
-            "prochain_test": tests[0].description if tests else "-",
+            "appris": appris_entries,
+            "prochain_test": prochain_test,
             "episode": ep,
         }
+        if llm_notes:
+            result["notes"] = llm_notes
         if deliberation:
             result["deliberation"] = deliberation
             cooldown = deliberation.get("rules", {}).get("ask_user_cooldown", 0)
@@ -338,6 +535,52 @@ class ReasoningSystem:
         strategy_factor = 0.6 if strategy == "deduction" else 0.5
         hypo_factor = min(1.0, 0.2 * len(hypos))
         return float(min(1.0, 0.3 + length_factor * 0.4 + strategy_factor * 0.2 + hypo_factor * 0.2))
+
+    def _prepare_llm_context(self, payload: Mapping[str, Any] | None) -> Dict[str, Any]:
+        if not isinstance(payload, Mapping):
+            return {}
+
+        def _simplify(value: Any, depth: int = 0) -> Any:
+            if depth >= 2:
+                if isinstance(value, (str, int, float, bool)) or value is None:
+                    return value
+                return str(value)
+            if isinstance(value, Mapping):
+                simplified: Dict[str, Any] = {}
+                for idx, (key, item) in enumerate(value.items()):
+                    if idx >= 6:
+                        remaining = 0
+                        try:
+                            remaining = max(0, len(value) - 6)
+                        except Exception:
+                            remaining = 0
+                        simplified["..."] = f"+{remaining} entrées" if remaining else "…"
+                        break
+                    simplified[str(key)] = _simplify(item, depth + 1)
+                return simplified
+            if isinstance(value, (list, tuple, set)):
+                items = list(value)
+                limited = items[:6]
+                simplified_list = [_simplify(item, depth + 1) for item in limited]
+                if len(items) > 6:
+                    simplified_list.append(f"... +{len(items) - 6} éléments")
+                return simplified_list
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                return value
+            return str(value)
+
+        simplified_context: Dict[str, Any] = {}
+        for idx, (key, value) in enumerate(payload.items()):
+            if idx >= 8:
+                remaining = 0
+                try:
+                    remaining = max(0, len(payload) - 8)
+                except Exception:
+                    remaining = 0
+                simplified_context["..."] = f"+{remaining} clés" if remaining else "…"
+                break
+            simplified_context[str(key)] = _simplify(value, 0)
+        return simplified_context
 
     def _make_readable_summary(
         self,
