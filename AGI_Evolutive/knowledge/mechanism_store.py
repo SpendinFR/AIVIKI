@@ -19,6 +19,7 @@ If that file does not exist but legacy 'data/mai_store.jsonl' exists, it will us
 
 import getpass
 import json
+import logging
 import os
 import platform
 import threading
@@ -34,6 +35,7 @@ from AGI_Evolutive.core.structures.mai import (
     ImpactHypothesis,
     MAI,
 )
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 SCHEMA_VERSION = 1
 
@@ -45,6 +47,9 @@ else:
     _DEFAULT_PATH = Path("data/runtime/mai_store.jsonl")
 
 _LEGACY_PATH = Path("data/mai_store.jsonl")
+
+LOGGER = logging.getLogger(__name__)
+_LLM_SPEC_KEY = "knowledge_mechanism_screening"
 
 
 class MechanismStore:
@@ -154,7 +159,144 @@ class MechanismStore:
                 except Exception:
                     # Defensive: skip malformed MAIs rather than crashing
                     continue
+        if not winners:
+            return winners
+
+        refined = self._llm_refine_applicable(winners, state, predicate_registry)
+        if refined is not None:
+            return refined
+
         return winners
+
+    # ------------------------------------------------------------------
+    # LLM-assisted prioritisation
+    def _llm_refine_applicable(
+        self,
+        candidates: List[MAI],
+        state: Mapping[str, object],
+        predicate_registry: Mapping[str, object],
+    ) -> Optional[List[MAI]]:
+        payload = {
+            "state": self._sanitize_for_json(dict(state)),
+            "predicate_names": sorted(str(name) for name in predicate_registry.keys()),
+            "candidates": [self._summarize_mai(mai) for mai in candidates],
+        }
+
+        response = try_call_llm_dict(
+            _LLM_SPEC_KEY,
+            input_payload=payload,
+            logger=LOGGER,
+        )
+        if not response:
+            return None
+
+        decisions = response.get("decisions")
+        if not isinstance(decisions, (list, tuple)):
+            return None
+
+        mapping = {mai.id: mai for mai in candidates}
+        accepted_entries: List[tuple[int, Optional[float], str]] = []
+        rejected_ids: set[str] = set()
+        seen_accepts: set[str] = set()
+
+        for index, entry in enumerate(decisions):
+            if not isinstance(entry, Mapping):
+                continue
+            identifier_raw = entry.get("id") or entry.get("mai_id")
+            if identifier_raw is None:
+                continue
+            identifier = str(identifier_raw).strip()
+            if not identifier or identifier not in mapping:
+                continue
+
+            decision = str(entry.get("decision") or entry.get("status") or "").strip().lower()
+            if decision in {"reject", "drop", "exclude"}:
+                rejected_ids.add(identifier)
+                continue
+            if decision in {"accept", "select", "keep", "prioritize", "priorise"}:
+                priority = self._safe_float(entry.get("priority"))
+                if identifier not in seen_accepts:
+                    accepted_entries.append((index, priority, identifier))
+                    seen_accepts.add(identifier)
+                continue
+            if decision in {"defer", "abstain", "ignore"}:
+                continue
+
+        if not accepted_entries and not rejected_ids:
+            return None
+
+        ordered_ids: List[str] = []
+
+        if accepted_entries:
+            accepted_entries.sort(
+                key=lambda item: (
+                    item[1] if item[1] is not None else float("inf"),
+                    item[0],
+                )
+            )
+            for _, _priority, identifier in accepted_entries:
+                ordered_ids.append(identifier)
+
+        if rejected_ids:
+            for identifier in list(ordered_ids):
+                if identifier in rejected_ids:
+                    ordered_ids.remove(identifier)
+
+        for mai in candidates:
+            if mai.id in rejected_ids:
+                continue
+            if mai.id in ordered_ids:
+                continue
+            ordered_ids.append(mai.id)
+
+        if not ordered_ids:
+            return []
+
+        return [mapping[identifier] for identifier in ordered_ids]
+
+    def _summarize_mai(self, mai: MAI) -> Dict[str, object]:
+        summary: Dict[str, object] = {
+            "id": mai.id,
+            "title": mai.title,
+            "summary": mai.summary,
+            "status": mai.status,
+            "tags": list(mai.tags),
+            "owner": mai.owner,
+            "expected_impact": self._sanitize_for_json(asdict(mai.expected_impact), depth=1),
+            "metadata": self._sanitize_for_json(mai.metadata, depth=1),
+            "preconditions": self._sanitize_for_json(list(mai.preconditions), depth=1),
+            "precondition_expr": self._sanitize_for_json(mai.precondition_expr, depth=1),
+        }
+        return summary
+
+    def _sanitize_for_json(self, value: object, *, depth: int = 0, limit: int = 8) -> object:
+        if depth > 3:
+            return str(value)
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        if isinstance(value, Mapping):
+            result: Dict[str, object] = {}
+            for index, (key, sub_value) in enumerate(value.items()):
+                if index >= limit:
+                    break
+                result[str(key)] = self._sanitize_for_json(sub_value, depth=depth + 1)
+            return result
+        if isinstance(value, (list, tuple, set)):
+            sanitized_items = []
+            for index, item in enumerate(value):
+                if index >= limit:
+                    break
+                sanitized_items.append(self._sanitize_for_json(item, depth=depth + 1))
+            return sanitized_items
+        return str(value)
+
+    def _safe_float(self, value: object) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     # ------------------------------------------------------------------
     # Extensibility / observability helpers

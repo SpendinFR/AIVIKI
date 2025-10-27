@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections import Counter, defaultdict
@@ -10,6 +11,11 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 from AGI_Evolutive.beliefs.entity_linker import EntityLinker as _BeliefEntityLinker
 from AGI_Evolutive.beliefs.graph import BeliefGraph
 from AGI_Evolutive.beliefs.ontology import Ontology as _BeliefOntology
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+LOGGER = logging.getLogger(__name__)
+_LLM_SPEC_KEY = "knowledge_entity_typing"
 
 
 class Ontology(_BeliefOntology):
@@ -67,6 +73,10 @@ class EntityLinker(_BeliefEntityLinker):
         if not stripped:
             return "Entity"
 
+        llm_type = self._llm_infer_type(stripped)
+        if llm_type:
+            return llm_type
+
         if not self._type_priors:
             return self._fallback_type(stripped)
 
@@ -117,6 +127,69 @@ class EntityLinker(_BeliefEntityLinker):
         if tokens:
             features.append(("last_token", tokens[-1].lower()))
         return features
+
+    def _llm_infer_type(self, stripped: str) -> Optional[str]:
+        payload = {
+            "label": stripped,
+            "known_types": sorted(self.ontology.entity_types.keys()),
+            "feature_snapshot": [
+                {"name": name, "value": value} for name, value in self._extract_features(stripped)
+            ],
+            "priors": [
+                {"type": type_name, "count": count}
+                for type_name, count in self._type_priors.most_common(6)
+            ],
+        }
+
+        response = try_call_llm_dict(
+            _LLM_SPEC_KEY,
+            input_payload=payload,
+            logger=LOGGER,
+        )
+        if not response:
+            return None
+
+        candidate = self._normalize_type_name(response.get("type"))
+        fallback = self._normalize_type_name(response.get("fallback_type"))
+        confidence = self._safe_float(response.get("confidence"))
+
+        chosen = self._select_llm_type(candidate, fallback, confidence)
+        return chosen
+
+    def _normalize_type_name(self, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        return normalized or None
+
+    def _safe_float(self, value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _select_llm_type(
+        self,
+        candidate: Optional[str],
+        fallback: Optional[str],
+        confidence: Optional[float],
+    ) -> Optional[str]:
+        known_types = set(self.ontology.entity_types.keys())
+        threshold = 0.45
+
+        if candidate and (not known_types or candidate in known_types):
+            if confidence is None or confidence >= threshold:
+                return candidate
+
+        if fallback and fallback in known_types:
+            return fallback
+
+        if candidate and not known_types:
+            return candidate
+
+        return None
 
     def _record_features(self, entity_type: str, label: str) -> None:
         features = list(self._extract_features(label))

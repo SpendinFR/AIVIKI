@@ -1388,6 +1388,53 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
             "notes": "",
         },
     ),
+    _spec(
+        "knowledge_entity_typing",
+        "AGI_Evolutive/knowledge/ontology_facade.py",
+        "Identifie le type d'entité le plus plausible à partir d'un libellé.",
+        AVAILABLE_MODELS["fast"],
+        extra_instructions=(
+            "Réponds dans le champ 'type' avec une valeur existante dans l'ontologie si possible.",
+            "Si tu hésites, propose une alternative dans 'fallback_type'.",
+            "Justifie brièvement dans 'reason' et fournis 'confidence' entre 0 et 1.",
+        ),
+        example_output={
+            "type": "Person",
+            "confidence": 0.78,
+            "reason": "Prénom et nom typiques d'une personne.",
+            "fallback_type": "Entity",
+            "notes": "",
+        },
+    ),
+    _spec(
+        "knowledge_mechanism_screening",
+        "AGI_Evolutive/knowledge/mechanism_store.py",
+        "Priorise les MAIs applicables en fonction de l'état courant.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Retourne une liste 'decisions' avec un objet par MAI évalué.",
+            "Pour chaque entrée, indique 'decision' parmi accept/reject/defer et optionnellement 'priority'.",
+            "Explique les refus dans 'reason' et ajoute 'confidence' entre 0 et 1.",
+        ),
+        example_output={
+            "decisions": [
+                {
+                    "id": "mai_focus_tests",
+                    "decision": "accept",
+                    "priority": 1,
+                    "reason": "Préconditions satisfaites et gain élevé.",
+                    "confidence": 0.74,
+                },
+                {
+                    "id": "mai_archive_docs",
+                    "decision": "reject",
+                    "reason": "Pas d'indication de dette documentaire urgente.",
+                    "confidence": 0.42,
+                },
+            ],
+            "notes": "",
+        },
+    ),
 )
 
 
