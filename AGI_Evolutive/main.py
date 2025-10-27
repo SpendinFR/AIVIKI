@@ -102,6 +102,7 @@ from AGI_Evolutive.language import OnlineNgramClassifier
 from AGI_Evolutive.memory.concept_extractor import ConceptExtractor
 from AGI_Evolutive.memory.prefs_bridge import PrefsBridge as PreferencesAdapter
 from AGI_Evolutive.utils.logging_setup import configure_logging
+from AGI_Evolutive.utils.llm_service import get_llm_manager
 
 BANNER = """
 ╔══════════════════════════════════════════════╗
@@ -293,6 +294,21 @@ def run_cli():
     print(BANNER)
     print(f"📝 Journaux: {log_path}")
     print("Chargement de l'architecture cognitive…")
+
+    llm_auto_enabled = False
+    if not os.getenv("AGI_DISABLE_LLM"):
+        try:
+            manager = get_llm_manager()
+            if not manager.enabled:
+                manager.set_enabled(True)
+                llm_auto_enabled = True
+        except Exception as exc:  # pragma: no cover - uniquement log utilisateur
+            logger.warning(
+                "Impossible d'activer automatiquement le LLM : %s", exc, exc_info=True
+            )
+    if llm_auto_enabled:
+        logger.info("LLM activé automatiquement au démarrage de l'IA")
+        print("🤖 Intégration LLM activée automatiquement.")
 
     logger.info("Démarrage de la CLI AGI Évolutive", extra={"log_path": str(log_path)})
     logger.info("Initialisation de l'architecture cognitive")
