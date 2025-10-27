@@ -1,9 +1,15 @@
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Mapping
+import logging
 import math
 import random
 import time
 
 from AGI_Evolutive.cognition.homeostasis import OnlineLinearModel
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+logger = logging.getLogger(__name__)
 
 
 def _norm(x: float) -> float:
@@ -502,12 +508,69 @@ def recommend_and_apply_mission(
     second = candidates[1] if len(candidates) > 1 else (None, 0.0)
     delta = best[1] - (second[1] if second else 0.0)
 
+    original_best_text = best[0]
+    selected_text = best[0]
+    llm_axes: Optional[Dict[str, str]] = None
+    llm_notes: Optional[str] = None
+
+    llm_payload = {
+        "frequent_goals": freq,
+        "constraints": cons,
+        "feedback_score": fb,
+        "candidates": [{"text": text, "score": score} for text, score in candidates[:3]],
+        "selected": {"text": best[0], "score": best[1]},
+        "delta": delta,
+        "threshold": threshold,
+        "auto_threshold": auto_threshold,
+        "auto_delta": auto_delta,
+    }
+
+    llm_result = try_call_llm_dict(
+        "identity_mission",
+        input_payload=json_sanitize(llm_payload),
+        logger=logger,
+    )
+
+    if isinstance(llm_result, Mapping):
+        mission_block = llm_result.get("mission")
+        if not isinstance(mission_block, dict):
+            keys = {"prioritaire", "support", "vision"}.intersection(llm_result.keys())
+            if keys:
+                mission_block = {key: llm_result.get(key) for key in ("prioritaire", "support", "vision")}
+        if isinstance(mission_block, Mapping):
+            axes: Dict[str, str] = {}
+            axis_aliases = {
+                "prioritaire": ("prioritaire", "priority", "focus"),
+                "support": ("support", "backbone", "soutien"),
+                "vision": ("vision", "aspiration", "north_star"),
+            }
+            for axis, aliases in axis_aliases.items():
+                value = None
+                for alias in aliases:
+                    if alias in mission_block and mission_block.get(alias):
+                        value = mission_block.get(alias)
+                        break
+                if isinstance(value, str) and value.strip():
+                    axes[axis] = value.strip()
+            if axes:
+                llm_axes = axes
+        mission_text = llm_result.get("mission_text") or llm_result.get("mission_statement")
+        if not mission_text and llm_axes:
+            mission_text = " | ".join(f"{k}: {v}" for k, v in llm_axes.items())
+        if isinstance(mission_text, str) and mission_text.strip():
+            selected_text = mission_text.strip()
+        notes_val = llm_result.get("notes")
+        if isinstance(notes_val, str) and notes_val.strip():
+            llm_notes = notes_val.strip()
+
+    best = (selected_text, best[1])
+
     decided = False
     if best[1] >= float(threshold) and delta >= float(delta_gate):
         proposal = {
             "type": "update",
             "path": ["identity", "purpose", "mission"],
-            "value": best[0],
+            "value": selected_text,
             "rationale": "Mission inferred from frequent goals, constraints and feedback.",
             "evidence_refs": freq.get("evidence_refs", [])[:50],
         }
@@ -531,7 +594,19 @@ def recommend_and_apply_mission(
         _bandit_update(bandit_jobs, reward)
         _bandit_update(bandit_decisions, reward)
 
-    return {
+    llm_info: Optional[Dict[str, Any]] = None
+    if llm_axes or llm_notes or selected_text != original_best_text:
+        llm_info = {
+            "mission": llm_axes,
+            "text": selected_text,
+            "notes": llm_notes,
+        }
+        llm_info = {k: v for k, v in llm_info.items() if v}
+        if llm_info:
+            llm_info["timestamp"] = time.time()
+            state.setdefault("llm", {})["identity_mission"] = json_sanitize(llm_info)
+
+    result = {
         "status": "applied" if decided else "needs_confirmation",
         "best": best,
         "second": second,
@@ -539,3 +614,6 @@ def recommend_and_apply_mission(
         "freq": freq,
         "constraints": cons,
     }
+    if llm_info:
+        result["llm"] = llm_info
+    return result
