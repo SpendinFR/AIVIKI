@@ -1,8 +1,15 @@
 # language/ranker.py
+import hashlib
+import logging
 import math
 import os
-from typing import Dict, Any
+from typing import Any, Dict, List, Mapping, Optional
+
 from . import DATA_DIR, _json_load, _json_save
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+logger = logging.getLogger(__name__)
 
 
 def sigmoid(x):
@@ -22,6 +29,8 @@ class RankerModel:
         self.storage = storage or os.path.join(DATA_DIR, "ranker.json")
         self.w: Dict[str, float] = {}
         self.load()
+        self._llm_cache: Dict[str, float] = {}
+        self._llm_explanations: Dict[str, str] = {}
 
     # --------- Persistence ----------
     def load(self):
@@ -73,6 +82,15 @@ class RankerModel:
         return s
 
     def score(self, context: Dict[str, Any], text: str) -> float:
+        cache_key = self._cache_key(context, text)
+        cached = self._llm_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        llm_score = self._score_with_llm(context, text, cache_key)
+        if llm_score is not None:
+            return llm_score
+
         f = self.featurize(context, text)
         return sigmoid(self._dot(f))
 
@@ -93,3 +111,103 @@ class RankerModel:
         # régule doucement
         for k in list(self.w.keys()):
             self.w[k] *= 0.999
+
+    def rank_candidates(self, context: Dict[str, Any], candidates: Mapping[str, str]) -> Dict[str, Dict[str, Any]]:
+        if not candidates:
+            return {}
+        payload = {
+            "context": self._llm_context_snapshot(context),
+            "candidates": [
+                {"id": str(candidate_id), "text": text}
+                for candidate_id, text in candidates.items()
+                if isinstance(text, str)
+            ],
+        }
+        response = try_call_llm_dict("ranker_model", input_payload=payload, logger=logger)
+        results: Dict[str, Dict[str, Any]] = {}
+        if not response or not isinstance(response.get("ranking"), list):
+            return results
+        for entry in response["ranking"]:
+            if not isinstance(entry, Mapping):
+                continue
+            candidate_id = str(entry.get("id") or "")
+            if candidate_id not in candidates:
+                continue
+            score = entry.get("score")
+            explanation = entry.get("explanation")
+            try:
+                float_score = max(0.0, min(1.0, float(score)))
+            except (TypeError, ValueError):
+                continue
+            results[candidate_id] = {
+                "score": float_score,
+                "explanation": str(explanation) if explanation is not None else "",
+            }
+            cache_key = self._cache_key(context, candidates[candidate_id])
+            self._llm_cache[cache_key] = float_score
+            if explanation is not None:
+                self._llm_explanations[cache_key] = str(explanation)
+        return results
+
+    def llm_explanation(self, context: Dict[str, Any], text: str) -> Optional[str]:
+        cache_key = self._cache_key(context, text)
+        if cache_key not in self._llm_cache:
+            self._score_with_llm(context, text, cache_key)
+        return self._llm_explanations.get(cache_key)
+
+    def _score_with_llm(
+        self, context: Dict[str, Any], text: str, cache_key: str
+    ) -> Optional[float]:
+        if not text.strip():
+            return None
+        candidate_id = cache_key[:12]
+        payload = {
+            "context": self._llm_context_snapshot(context),
+            "candidates": [{"id": candidate_id, "text": text}],
+        }
+        response = try_call_llm_dict("ranker_model", input_payload=payload, logger=logger)
+        if not response or not isinstance(response.get("ranking"), list):
+            return None
+        entry = next((item for item in response["ranking"] if isinstance(item, Mapping)), None)
+        if not entry:
+            return None
+        score = entry.get("score")
+        explanation = entry.get("explanation")
+        try:
+            float_score = max(0.0, min(1.0, float(score)))
+        except (TypeError, ValueError):
+            return None
+        self._llm_cache[cache_key] = float_score
+        if explanation is not None:
+            self._llm_explanations[cache_key] = str(explanation)
+        return float_score
+
+    def _cache_key(self, context: Dict[str, Any], text: str) -> str:
+        style = context.get("style") if isinstance(context, Mapping) else {}
+        fragments = []
+        if isinstance(style, Mapping):
+            for key, value in style.items():
+                try:
+                    fragments.append(f"{key}:{float(value):.3f}")
+                except (TypeError, ValueError):
+                    fragments.append(f"{key}:?")
+        raw = f"{';'.join(sorted(fragments))}|{text}"
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+    def _llm_context_snapshot(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        snapshot: Dict[str, Any] = {}
+        if not isinstance(context, Mapping):
+            return snapshot
+        style = context.get("style")
+        if isinstance(style, Mapping):
+            snapshot["style"] = {
+                str(k): float(v)
+                for k, v in style.items()
+                if isinstance(v, (int, float))
+            }
+        for key, value in context.items():
+            if key == "style":
+                continue
+            if isinstance(value, (str, int, float, bool)):
+                snapshot.setdefault("hints", {})[str(key)] = value
+        return snapshot

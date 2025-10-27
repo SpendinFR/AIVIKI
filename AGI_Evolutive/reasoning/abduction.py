@@ -2,10 +2,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Deque, Dict, List, Optional, Tuple
 import datetime as dt
+import logging
 import re
 from collections import defaultdict, deque
 
 from ..learning import OnlineLinearModel
+from ..utils.llm_service import try_call_llm_dict
+
+
+logger = logging.getLogger(__name__)
+
 
 FRENCH_CAUSE_REGEX = re.compile(
     r"\best\s+(?:un|une|le|la|l'|les|des)\s+([\wàâäéèêëîïôöùûüç'-]+)",
@@ -281,6 +287,61 @@ class AbductiveReasoner:
                 )
             )
 
+        llm_guidance: Dict[str, Dict[str, Any]] = {}
+        try:
+            user_snapshot = {}
+            descriptor = getattr(self.user, "describe", None)
+            if callable(descriptor):
+                try:
+                    user_snapshot = descriptor() or {}
+                except Exception:
+                    user_snapshot = {}
+            llm_response = try_call_llm_dict(
+                "abductive_reasoner",
+                input_payload={
+                    "observation": observation_text,
+                    "candidates": [
+                        {"label": lab, "rationale": why, "generator": generator}
+                        for lab, why, generator in candidate_rows
+                    ],
+                    "user": user_snapshot,
+                },
+                logger=logger,
+            )
+        except Exception:
+            llm_response = None
+
+        if llm_response and isinstance(llm_response.get("hypotheses"), list):
+            for item in llm_response["hypotheses"]:
+                if not isinstance(item, dict):
+                    continue
+                raw_label = item.get("name") or item.get("label") or ""
+                label = str(raw_label).strip()
+                if not label:
+                    continue
+                normalized = label.lower()
+                probability = item.get("probability", 0.0)
+                mechanism = str(item.get("mechanism", "") or "").strip()
+                tests = [
+                    str(test).strip()
+                    for test in (item.get("tests") or [])
+                    if isinstance(test, (str, bytes)) and str(test).strip()
+                ]
+                llm_guidance[normalized] = {
+                    "label": label,
+                    "probability": max(0.0, min(1.0, float(probability) if probability is not None else 0.0)),
+                    "mechanism": mechanism,
+                    "tests": tests,
+                }
+                if not any(existing_label.lower() == normalized for existing_label, _, _ in candidate_rows):
+                    candidate_rows.append(
+                        (
+                            label,
+                            mechanism or "hypothèse proposée par le LLM",
+                            "llm",
+                        )
+                    )
+
         uniq: Dict[str, Dict[str, Any]] = {}
         for lab, why, generator in candidate_rows:
             weight = self.adaptation.generator_weight(generator)
@@ -290,6 +351,7 @@ class AbductiveReasoner:
 
         hyps: List[Hypothesis] = []
         for lab, info in uniq.items():
+            normalized_label = lab.lower()
             base_score, priors, evidence = self._score(lab, observation_text)
             causal_support = self._causal_support(lab, observation_text)
             simulations = self._run_simulations(lab, observation_text)
@@ -313,6 +375,21 @@ class AbductiveReasoner:
             plan_depth = min(1.0, (len(plan) if plan else 0) / 5.0)
             text_confidence = self.adaptation.text_classifier.predict(lab, observation_text)
 
+            llm_info = llm_guidance.get(normalized_label)
+            if llm_info:
+                base_score = 0.5 * base_score + 0.5 * llm_info["probability"]
+                if llm_info["mechanism"]:
+                    info["why"] = (
+                        f"{info['why']} · {llm_info['mechanism']}"
+                        if info.get("why")
+                        else llm_info["mechanism"]
+                    )
+                    causal_support = list(causal_support) + [
+                        f"Mécanisme proposé par LLM: {llm_info['mechanism']}"
+                    ]
+                if llm_info["tests"] and not plan:
+                    plan = list(llm_info["tests"])
+
             context = {
                 "causal_strength": causal_strength,
                 "simulation_success": simulation_success,
@@ -321,6 +398,11 @@ class AbductiveReasoner:
                 "generator": info["generator"],
                 "observation": observation_text,
             }
+            if llm_info:
+                context["llm_probability"] = llm_info["probability"]
+                if llm_info["tests"]:
+                    context["llm_tests"] = list(llm_info["tests"])
+
             adaptive_score = self.adaptation.score(base_score, priors, context)
             score = max(0.0, min(1.0, (0.6 * base_score + 0.4 * adaptive_score) * info["weight"]))
 
