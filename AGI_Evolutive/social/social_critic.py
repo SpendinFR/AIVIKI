@@ -2,16 +2,19 @@
 # et met à jour les InteractionRule (postérieurs + ema_reward).
 from __future__ import annotations
 from typing import Any, Dict, Optional, List, Tuple
-import time, json, random, re
+import time, json, random, re, logging
 from collections import deque
 
 from AGI_Evolutive.social.adaptive_lexicon import AdaptiveLexicon
 from AGI_Evolutive.social.interaction_rule import (
     InteractionRule, clamp
 )
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 
 def _now() -> float: return time.time()
+
+LOGGER = logging.getLogger(__name__)
 
 # ----------------- lexiques FR simples (tu peux enrichir) -----------------
 POS_MARKERS = [
@@ -366,6 +369,63 @@ class SocialCritic:
             pass
         return 0
 
+    @staticmethod
+    def _sanitize_for_llm(data: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not isinstance(data, dict):
+            return None
+        sanitized: Dict[str, Any] = {}
+        for key, value in data.items():
+            if not isinstance(key, str):
+                continue
+            if isinstance(value, (str, float, int, bool)) or value is None:
+                sanitized[key] = value
+            elif isinstance(value, (list, tuple)):
+                simple_items: List[Any] = []
+                for item in list(value)[:6]:
+                    if isinstance(item, (str, float, int, bool)):
+                        simple_items.append(item)
+                if simple_items:
+                    sanitized[key] = simple_items
+            elif isinstance(value, dict):
+                nested = SocialCritic._sanitize_for_llm(value)
+                if nested:
+                    sanitized[key] = nested
+        return sanitized or None
+
+    def _llm_payload(
+        self,
+        user_msg: str,
+        decision_trace: Dict[str, Any],
+        pre_ctx: Optional[Dict[str, Any]],
+        post_ctx: Optional[Dict[str, Any]],
+        heuristics: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        payload = {
+            "message": user_msg or "",
+            "heuristics": heuristics,
+            "pre_context": self._sanitize_for_llm(pre_ctx),
+            "post_context": self._sanitize_for_llm(post_ctx),
+            "decision_trace": self._sanitize_for_llm(decision_trace),
+            "user_id": getattr(self.arch, "last_user_id", None) or getattr(self.arch, "user_id", None),
+        }
+        return payload
+
+    def _llm_assess(
+        self,
+        user_msg: str,
+        decision_trace: Dict[str, Any],
+        pre_ctx: Optional[Dict[str, Any]],
+        post_ctx: Optional[Dict[str, Any]],
+        heuristics: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        payload = self._llm_payload(user_msg, decision_trace, pre_ctx, post_ctx, heuristics)
+        response = try_call_llm_dict(
+            "social_critic_assessment",
+            input_payload=payload,
+            logger=LOGGER,
+        )
+        return dict(response) if isinstance(response, dict) else None
+
     # ----------- calcul de l'outcome ----------
     def compute_outcome(self,
                         user_msg: str,
@@ -413,19 +473,6 @@ class SocialCritic:
             post_ctx,
         )
         baseline_before = float(getattr(self, "_relationship_baseline", 0.5))
-        growth_signal = clamp(0.5 + (relationship_depth - baseline_before) * 0.8, 0.0, 1.0)
-        self._relationship_baseline = 0.92 * baseline_before + 0.08 * relationship_depth
-
-        snapshot = self._build_relationship_snapshot(
-            user_msg or "",
-            rel_meta,
-            decision_trace,
-            pre_ctx,
-            post_ctx,
-            relationship_depth,
-            growth_signal,
-        )
-
         # feedback explicite (hybride: statique + lexique appris)
         user_id = getattr(self.arch, "user_id", None)
         match_fn = getattr(self.lex, "match", None)
@@ -449,6 +496,112 @@ class SocialCritic:
         # policy friction
         frictions = self._policy_friction_recent(window_sec=300)
         pol_pen = 1.0 if frictions == 0 else (0.7 if frictions == 1 else 0.4)
+
+        heuristics_snapshot = {
+            "reduced_uncertainty": bool(reduced_unc),
+            "continue_dialogue": bool(cont),
+            "valence": float(val),
+            "acceptance": bool(acc),
+            "explicit_feedback": float(explicit),
+            "identity_consist": float(identity_consist),
+            "relationship_depth": float(relationship_depth),
+            "pending_questions_before": pre_q,
+            "pending_questions_after": post_q,
+            "policy_penalty": float(pol_pen),
+        }
+
+        llm_data = self._llm_assess(user_msg or "", decision_trace or {}, pre_ctx, post_ctx, heuristics_snapshot)
+        llm_reward_hint: Optional[float] = None
+        llm_confidence: Optional[float] = None
+        llm_markers: List[Dict[str, Any]] = []
+        if llm_data:
+            try:
+                raw_hint = llm_data.get("reward_hint")
+                if raw_hint is not None:
+                    llm_reward_hint = clamp(float(raw_hint), 0.0, 1.0)
+            except (TypeError, ValueError):
+                llm_reward_hint = None
+            try:
+                if "confidence" in llm_data:
+                    llm_confidence = clamp(float(llm_data.get("confidence", 0.0)), 0.0, 1.0)
+            except (TypeError, ValueError):
+                llm_confidence = None
+            signals = llm_data.get("signals") if isinstance(llm_data.get("signals"), dict) else {}
+            if signals:
+                if "reduced_uncertainty" in signals:
+                    reduced_unc = bool(signals.get("reduced_uncertainty"))
+                if "continue_dialogue" in signals:
+                    cont = bool(signals.get("continue_dialogue"))
+                if "valence" in signals:
+                    try:
+                        val = clamp(float(signals.get("valence", val)), -1.0, 1.0)
+                    except (TypeError, ValueError):
+                        pass
+                if "acceptance" in signals:
+                    acc = bool(signals.get("acceptance"))
+                if "relationship_depth" in signals:
+                    try:
+                        relationship_depth = clamp(float(signals.get("relationship_depth", relationship_depth)), 0.0, 1.0)
+                    except (TypeError, ValueError):
+                        pass
+                if "identity_consistency" in signals:
+                    try:
+                        identity_consist = clamp(float(signals.get("identity_consistency", identity_consist)), 0.0, 1.0)
+                    except (TypeError, ValueError):
+                        pass
+                feedback = signals.get("explicit_feedback")
+                if isinstance(feedback, dict):
+                    polarity = str(feedback.get("polarity") or "").strip().lower()
+                    try:
+                        fb_conf = clamp(float(feedback.get("confidence", 0.7)), 0.0, 1.0)
+                    except (TypeError, ValueError):
+                        fb_conf = 0.7
+                    if polarity == "positive":
+                        exp_pos, exp_neg = True, False
+                        explicit = max(explicit, fb_conf)
+                    elif polarity == "negative":
+                        exp_pos, exp_neg = False, True
+                        explicit = min(explicit, 1.0 - fb_conf)
+                    elif polarity in {"mixed", "both"}:
+                        exp_pos = exp_neg = True
+                        explicit = 0.5
+                    elif polarity == "neutral":
+                        exp_pos = exp_neg = False
+                        explicit = 0.5
+            markers_payload = llm_data.get("markers")
+            if isinstance(markers_payload, list):
+                for item in markers_payload:
+                    if isinstance(item, dict):
+                        llm_markers.append(item)
+
+        if llm_markers:
+            for marker in llm_markers:
+                polarity = str(marker.get("polarity") or "").strip().lower()
+                if polarity == "positive":
+                    exp_pos = True
+                elif polarity == "negative":
+                    exp_neg = True
+
+        growth_signal = clamp(0.5 + (relationship_depth - baseline_before) * 0.8, 0.0, 1.0)
+        self._relationship_baseline = 0.92 * baseline_before + 0.08 * relationship_depth
+
+        if isinstance(llm_data, dict):
+            llm_topics = llm_data.get("topics")
+            if isinstance(llm_topics, list):
+                topics = [t for t in llm_topics if isinstance(t, str)]
+                if topics:
+                    rel_meta = dict(rel_meta or {})
+                    rel_meta.setdefault("topics", topics)
+
+        snapshot = self._build_relationship_snapshot(
+            user_msg or "",
+            rel_meta,
+            decision_trace,
+            pre_ctx,
+            post_ctx,
+            relationship_depth,
+            growth_signal,
+        )
 
         # agrégation reward (0..1), pondérée
         # mapping valence [-1..1] -> [0..1]
@@ -474,6 +627,15 @@ class SocialCritic:
         reward = reward * max(0.0, min(1.0, 1.0 + float(W.get("policy_friction", -0.15)) * (1.0 - pol_pen)))
         reward = clamp(reward, 0.0, 1.0)
 
+        if llm_reward_hint is not None:
+            reward = clamp(0.7 * reward + 0.3 * llm_reward_hint, 0.0, 1.0)
+
+        if llm_data:
+            try:
+                setattr(self.arch, "_social_critic_last_llm", llm_data)
+            except Exception:
+                pass
+
         # confiance de l'estimation (plus on a de signaux forts, plus c'est fiable)
         support = 0.0
         support += 0.35 if (exp_pos or exp_neg) else 0.0
@@ -482,7 +644,11 @@ class SocialCritic:
         support += 0.10 if acc else 0.0
         support += 0.18 if growth_signal >= 0.55 else 0.05
         support += 0.10  # base
+        if llm_confidence is not None:
+            support += 0.08 * llm_confidence
         confidence = clamp(max(self.cfg.get("min_confidence", 0.15), support), 0.0, 1.0)
+        if llm_confidence is not None:
+            confidence = clamp(0.6 * confidence + 0.4 * llm_confidence, 0.0, 1.0)
 
         # apprentissage du lexique (pas binaire — reward et confidence pondèrent)
         observe_fn = getattr(self.lex, "observe_message", None)
@@ -511,6 +677,12 @@ class SocialCritic:
             "relationship_snapshot": snapshot,
             "features": {name: float(val) for name, val in parts},
         }
+        if llm_data:
+            outcome["llm"] = {
+                "confidence": llm_confidence,
+                "notes": llm_data.get("notes"),
+                "reward_hint": llm_reward_hint,
+            }
         return outcome
 
     # ----------- application à la règle ----------

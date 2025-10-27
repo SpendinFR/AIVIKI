@@ -531,6 +531,90 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         },
     ),
     _spec(
+        "social_adaptive_lexicon",
+        "AGI_Evolutive/social/adaptive_lexicon.py",
+        "Repère les expressions saillantes et indique leur polarité sociale.",
+        AVAILABLE_MODELS["fast"],
+        extra_instructions=(
+            "Limite-toi aux marqueurs réellement présents dans le message.",
+            "Retourne au plus 6 éléments classés par confiance décroissante.",
+            "Fourni une estimation 'reward_hint' ∈ [0,1] si le ton global est clair.",
+        ),
+        example_output={
+            "markers": [
+                {
+                    "phrase": "merci infiniment",
+                    "polarity": "positive",
+                    "confidence": 0.82,
+                    "rationale": "Remerciement explicite",
+                },
+                {
+                    "phrase": "un peu déçu",
+                    "polarity": "negative",
+                    "confidence": 0.56,
+                    "rationale": "Expression directe de déception",
+                },
+            ],
+            "reward_hint": 0.74,
+            "notes": "Aucun sarcasme détecté.",
+        },
+    ),
+    _spec(
+        "social_interaction_context",
+        "AGI_Evolutive/social/interaction_rule.py",
+        "Analyse le dernier échange et affine le contexte symbolique social.",
+        AVAILABLE_MODELS["fast"],
+        extra_instructions=(
+            "Retourne un objet 'context' avec les clés détectées.",
+            "Ajoute 'topics' si tu peux inférer des thèmes prioritaires.",
+            "Fournis 'confidence' global et 'notes' synthétiques.",
+        ),
+        example_output={
+            "context": {
+                "dialogue_act": "demande_assistance",
+                "risk_level": "low",
+                "persona_alignment": 0.62,
+                "implicature_hint": "sous-entendu",
+                "topics": ["incident api", "urgence"],
+            },
+            "confidence": 0.76,
+            "notes": "Utilisateur inquiet mais collaboratif.",
+        },
+    ),
+    _spec(
+        "social_critic_assessment",
+        "AGI_Evolutive/social/social_critic.py",
+        "Évalue la réponse utilisateur et synthétise les signaux sociaux clés.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Retourne un objet 'signals' avec les mesures recommandées.",
+            "Déduis 'relationship_depth' et 'relationship_growth' ∈ [0,1].",
+            "Indique 'markers' pertinents si détectés.",
+        ),
+        example_output={
+            "signals": {
+                "reduced_uncertainty": True,
+                "continue_dialogue": True,
+                "valence": 0.35,
+                "acceptance": True,
+                "explicit_feedback": {"polarity": "positive", "confidence": 0.78},
+                "relationship_depth": 0.66,
+                "relationship_growth": 0.58,
+                "identity_consistency": 0.7,
+            },
+            "reward_hint": 0.73,
+            "markers": [
+                {
+                    "phrase": "merci pour l'aide",
+                    "polarity": "positive",
+                    "confidence": 0.81,
+                }
+            ],
+            "confidence": 0.8,
+            "notes": "Tonalité rassurée, attentes clarifiées.",
+        },
+    ),
+    _spec(
         "social_tactic_selector",
         "AGI_Evolutive/social/tactic_selector.py",
         "Évalue les tactiques sociales et anticipe leurs effets.",
