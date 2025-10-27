@@ -1038,6 +1038,148 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         },
     ),
     _spec(
+        "core_overview",
+        "AGI_Evolutive/core/__init__.py",
+        "Dresse un panorama de la couche core et hiérarchise les points d'attention.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Analyse les modules fournis et identifie les manques critiques.",
+            "Retourne un champ 'recommended_focus' (liste de chaînes).",
+        ),
+        example_output={
+            "summary": "La couche core est opérationnelle avec autopilot et persistance actifs.",
+            "alerts": ["TriggerTypes indisponible"],
+            "recommended_focus": ["Vérifier l'initialisation des triggers"],
+            "components": [
+                {
+                    "name": "Autopilot",
+                    "module": "AGI_Evolutive.core.autopilot",
+                    "available": True,
+                }
+            ],
+            "confidence": 0.78,
+            "notes": "Limiter les modifications simultanées sur persistance et triggers.",
+        },
+    ),
+    _spec(
+        "config_profile",
+        "AGI_Evolutive/core/config.py",
+        "Synthétise la configuration actuelle et signale les risques.",
+        AVAILABLE_MODELS["fast"],
+        extra_instructions=("Retourne 'recommended_actions' (liste) et 'alerts' (liste).",),
+        example_output={
+            "summary": "Configuration personnalisée : DATA_DIR redirigé vers /srv/agi.",
+            "alerts": ["Répertoire SELF_VERSIONS_DIR manquant"],
+            "recommended_actions": ["Créer data/self_model_versions"],
+            "confidence": 0.7,
+            "notes": "Veiller à sauvegarder les valeurs sur disque chiffré.",
+        },
+    ),
+    _spec(
+        "cognitive_state_summary",
+        "AGI_Evolutive/core/cognitive_architecture.py",
+        "Diagnostique l'état cognitif courant et priorise les actions.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=("Retourne 'recommended_actions' en ordre de priorité.",),
+        example_output={
+            "summary": "Activation modérée avec surcharge mémoire imminente.",
+            "alerts": ["working_memory_load > 0.8"],
+            "recommended_actions": ["Purger la mémoire de travail", "Rehausser l'activation"],
+            "confidence": 0.76,
+            "notes": "Surveiller la cohérence des sous-systèmes manquants.",
+        },
+    ),
+    _spec(
+        "persistence_healthcheck",
+        "AGI_Evolutive/core/persistence.py",
+        "Analyse la santé de la persistance et priorise les actions préventives.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=("Identifie les dérives critiques et propose des mitigations concrètes.",),
+        example_output={
+            "summary": "Dérive modérée sur la mémoire : déclencher un snapshot complet.",
+            "alerts": ["severity=0.6 sur mémoire"],
+            "recommended_actions": ["forcer une sauvegarde", "auditer la mémoire"],
+            "confidence": 0.73,
+            "notes": "Rythme d'autosave à réviser si dérives fréquentes.",
+        },
+    ),
+    _spec(
+        "selfhood_reflection",
+        "AGI_Evolutive/core/selfhood_engine.py",
+        "Interprète les dérives identitaires et suggère des micro-ajustements.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=("Retourne 'recommended_actions' orientées introspection ou preuves.",),
+        example_output={
+            "summary": "Identité en transition vers reflective : consolider la confiance.",
+            "alerts": ["self_trust bas"],
+            "recommended_actions": ["Consigner trois réussites récentes"],
+            "confidence": 0.74,
+            "notes": "Réévaluer dans 2 cycles.",
+        },
+    ),
+    _spec(
+        "mai_bid_coach",
+        "AGI_Evolutive/core/structures/mai.py",
+        "Réordonne les bids et ajuste les métriques si nécessaire.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Réutilise strictement les bids fournis.",
+            "Pour chaque entrée, fournis {index, reason?, notes?, adjustments?}.",
+        ),
+        example_output={
+            "prioritized_bids": [
+                {
+                    "index": 1,
+                    "reason": "Urgence conversationnelle élevée",
+                    "adjustments": {"urgency": 0.75, "expected_info_gain": 0.68},
+                },
+                {"index": 0, "notes": "À garder en backup"},
+            ],
+            "notes": "Limiter l'activation à 2 bids simultanés.",
+        },
+    ),
+    _spec(
+        "trigger_classifier",
+        "AGI_Evolutive/core/trigger_types.py",
+        "Classe le trigger reçu et motive la décision.",
+        AVAILABLE_MODELS["fast"],
+        extra_instructions=("Ajoute 'suggested_actions' si pertinent.",),
+        example_output={
+            "trigger_type": "THREAT",
+            "reason": "Mention d'incident critique",
+            "priority": 0.82,
+            "suggested_actions": ["Activer protocole incident"],
+            "notes": "Vérifier la source de l'alerte.",
+        },
+    ),
+    _spec(
+        "autopilot_question_prioritization",
+        "AGI_Evolutive/core/autopilot.py",
+        "Priorise les questions à poser à l'utilisateur et explique les arbitrages.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Retourne 'prioritized_questions' trié par priorité décroissante.",
+            "Inclue {id, priority (0-1), reason, notes facultatives} pour chaque entrée.",
+            "Ne réécris pas de nouvelles questions : réutilise celles fournies.",
+        ),
+        example_output={
+            "prioritized_questions": [
+                {
+                    "id": "q-1",
+                    "priority": 0.82,
+                    "reason": "fort impact client et délai court",
+                    "notes": "",
+                },
+                {
+                    "id": "q-3",
+                    "priority": 0.55,
+                    "reason": "rappel utile mais moins pressant",
+                },
+            ],
+            "notes": "Attention à la saturation utilisateur : limiter à 2 questions.",
+        },
+    ),
+    _spec(
         "question_auto_answer",
         "AGI_Evolutive/core/question_manager.py",
         (

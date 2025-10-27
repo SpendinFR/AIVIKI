@@ -14,13 +14,19 @@ Conventions:
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 import random
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 from typing import Any, Callable, ClassVar, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from AGI_Evolutive.cognition.meta_cognition import OnlineLinear
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+LOGGER = logging.getLogger(__name__)
 
 # ---------- Types ----------
 Expr = Dict[str, Any]  # {"op":"and","args":[...]} | {"op":"atom","name":"has_commitment","args":[...]}
@@ -310,13 +316,121 @@ class MAI:
                     payload=payload,
                     evidence_refs=list(self.provenance_docs),
                 )
-            )
+                )
         if proposals:
             self._record_last_context(features, last_base, predictions, offsets, chosen_idx, last_adapted)
-        return proposals
+        enriched = self._enrich_bids_with_llm(proposals, state, features, predictions)
+        return enriched if enriched is not None else proposals
 
     def touch(self) -> None:
         self.updated_at = time.time()
+
+    def _enrich_bids_with_llm(
+        self,
+        proposals: List[Bid],
+        state: Mapping[str, Any],
+        features: Mapping[str, float],
+        predictions: Mapping[str, float],
+    ) -> Optional[List[Bid]]:
+        if not proposals:
+            return None
+
+        payload = {
+            "mai_id": self.id,
+            "state_features": dict(features),
+            "predictions": dict(predictions),
+            "bids": [
+                {
+                    "index": idx,
+                    "action_hint": bid.action_hint,
+                    "expected_info_gain": bid.expected_info_gain,
+                    "urgency": bid.urgency,
+                    "affect_value": bid.affect_value,
+                    "cost": bid.cost,
+                    "rationale": bid.rationale,
+                }
+                for idx, bid in enumerate(proposals)
+            ],
+            "recent_state_keys": sorted(list(state.keys()))[:20],
+        }
+        response = try_call_llm_dict(
+            "mai_bid_coach",
+            input_payload=json_sanitize(payload),
+            logger=LOGGER,
+            max_retries=2,
+        )
+        if not isinstance(response, Mapping):
+            return self._heuristic_bid_guidance(proposals)
+
+        prioritized = response.get("prioritized_bids")
+        if not isinstance(prioritized, list):
+            return self._heuristic_bid_guidance(proposals)
+
+        clones = [
+            replace(bid, payload=dict(bid.payload), evidence_refs=list(bid.evidence_refs))
+            for bid in proposals
+        ]
+        ordered: List[Bid] = []
+        seen: set[int] = set()
+        for entry in prioritized:
+            if not isinstance(entry, Mapping):
+                continue
+            idx = entry.get("index")
+            if not isinstance(idx, int) or not (0 <= idx < len(clones)):
+                continue
+            clone = clones[idx]
+            adjustments = entry.get("adjustments")
+            if isinstance(adjustments, Mapping):
+                if "expected_info_gain" in adjustments:
+                    clone.expected_info_gain = float(
+                        max(0.0, min(1.0, float(adjustments["expected_info_gain"])))
+                    )
+                if "urgency" in adjustments:
+                    clone.urgency = float(max(0.0, min(1.0, float(adjustments["urgency"]))))
+                if "affect_value" in adjustments:
+                    clone.affect_value = float(max(-1.0, min(1.0, float(adjustments["affect_value"]))))
+                if "cost" in adjustments:
+                    clone.cost = float(max(0.0, float(adjustments["cost"])))
+            reason = self._clean_text(entry.get("reason"))
+            if reason:
+                clone.payload.setdefault("annotations", {})
+                clone.payload["annotations"]["llm_reason"] = reason
+            notes = self._clean_text(entry.get("notes"))
+            if notes:
+                clone.payload.setdefault("annotations", {})
+                clone.payload["annotations"]["llm_notes"] = notes
+            ordered.append(clone)
+            seen.add(idx)
+
+        if not ordered:
+            return self._heuristic_bid_guidance(proposals)
+
+        for idx, clone in enumerate(clones):
+            if idx not in seen:
+                ordered.append(clone)
+
+        return ordered
+
+    def _heuristic_bid_guidance(self, proposals: List[Bid]) -> List[Bid]:
+        scored = []
+        for bid in proposals:
+            score = (
+                0.6 * bid.expected_info_gain
+                + 0.25 * bid.urgency
+                + 0.15 * max(0.0, bid.affect_value)
+                - 0.1 * max(0.0, bid.cost)
+            )
+            scored.append((score, bid))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [item[1] for item in scored]
+
+    @staticmethod
+    def _clean_text(value: Any) -> str:
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if cleaned:
+                return cleaned
+        return ""
 
     def update_from_feedback(self, delta: Mapping[str, float]) -> None:
         for key, value in delta.items():

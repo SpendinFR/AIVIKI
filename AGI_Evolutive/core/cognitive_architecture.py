@@ -60,6 +60,8 @@ from AGI_Evolutive.planning.htn import HTNPlanner
 from AGI_Evolutive.core.persistence import PersistenceManager
 from AGI_Evolutive.core.self_model import SelfModel
 from AGI_Evolutive.core.config import cfg
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 
 logger = logging.getLogger(__name__)
@@ -791,10 +793,104 @@ class CognitiveArchitecture:
         }
 
     def diagnostic_snapshot(self, tail: int = 30) -> Dict[str, Any]:
-        return {
+        snapshot = {
             "status": self.get_cognitive_status(),
             "tail": self.telemetry.tail(tail),
         }
+        analysis = self._llm_diagnostic(snapshot)
+        if analysis:
+            snapshot["analysis"] = analysis
+        return snapshot
+
+    def _llm_diagnostic(self, snapshot: Mapping[str, Any]) -> Dict[str, Any]:
+        fallback = self._fallback_diagnostic(snapshot)
+        payload = {
+            "status": snapshot.get("status", {}),
+            "tail": list(snapshot.get("tail", []))[:15],
+            "recent_reply": self.last_output_text,
+        }
+        response = try_call_llm_dict(
+            "cognitive_state_summary",
+            input_payload=json_sanitize(payload),
+            logger=getattr(self, "logger", logger),
+            max_retries=2,
+        )
+        if not isinstance(response, Mapping):
+            return fallback
+
+        summary = self._clean_text(response.get("summary")) or fallback.get("summary", "")
+        notes = self._clean_text(response.get("notes")) or fallback.get("notes", "")
+        alerts = self._clean_list(response.get("alerts"))
+        recommendations = self._clean_list(response.get("recommended_actions"))
+        confidence = fallback.get("confidence", 0.6)
+        try:
+            confidence = float(response.get("confidence", confidence))
+        except Exception:
+            confidence = float(confidence)
+
+        enriched = dict(fallback)
+        enriched.update(
+            {
+                "source": "llm",
+                "summary": summary,
+                "alerts": alerts,
+                "recommended_actions": recommendations or fallback.get("recommended_actions", []),
+                "confidence": max(0.0, min(1.0, confidence)),
+                "notes": notes,
+            }
+        )
+        return enriched
+
+    def _fallback_diagnostic(self, snapshot: Mapping[str, Any]) -> Dict[str, Any]:
+        status = snapshot.get("status", {})
+        activation = float(status.get("global_activation", 0.0) or 0.0)
+        wm_load = float(status.get("working_memory_load", 0.0) or 0.0)
+        subsystems = status.get("subsystems", {}) if isinstance(status, Mapping) else {}
+        missing = [name for name, present in subsystems.items() if not present]
+        alerts: List[str] = []
+        if activation < 0.25:
+            alerts.append("Activation globale faible : risque de léthargie cognitive.")
+        if wm_load > 0.8:
+            alerts.append("Charge mémoire de travail élevée : envisager un vidage.")
+        for name in missing:
+            alerts.append(f"Sous-système absent : {name}")
+        recommendations: List[str] = []
+        if activation < 0.25:
+            recommendations.append("Initier un cycle d'exploration légère pour relancer l'activation.")
+        if wm_load > 0.8:
+            recommendations.append("Archiver ou résumer le contenu mémoire non critique.")
+        if missing:
+            recommendations.append("Vérifier l'initialisation des sous-systèmes manquants.")
+
+        summary = "État cognitif stable." if not alerts else "État cognitif à surveiller."
+        notes = "Analyse heuristique basée sur les métriques disponibles."
+        return {
+            "source": "heuristic",
+            "summary": summary,
+            "alerts": alerts,
+            "recommended_actions": recommendations or ["Continuer la surveillance standard."],
+            "confidence": 0.58 if alerts else 0.7,
+            "notes": notes,
+        }
+
+    @staticmethod
+    def _clean_text(value: Any) -> str:
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if cleaned:
+                return cleaned
+        return ""
+
+    @staticmethod
+    def _clean_list(value: Any) -> List[str]:
+        if not isinstance(value, (list, tuple)):
+            return []
+        results: List[str] = []
+        for item in value:
+            text = CognitiveArchitecture._clean_text(item)
+            if text:
+                results.append(text)
+        return results
 
     def summarize_beliefs(self, timeframe: str = "daily") -> Dict[str, Any]:
         beliefs = getattr(self, "beliefs", None)
