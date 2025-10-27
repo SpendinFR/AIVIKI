@@ -10,6 +10,11 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping,
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
 
+try:  # pragma: no cover - optional import during bootstrap
+    from .embedding_adapters import AdaptiveSemanticEmbedder
+except Exception:  # pragma: no cover - fallback when module unavailable
+    AdaptiveSemanticEmbedder = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 
@@ -119,7 +124,16 @@ class MemoryStore:
         }
         self._dirty = 0
         self._hooks: Dict[str, Callable[[str, Dict[str, Any]], None]] = {}
-        self._index = _VectorIndex(embed_fn)
+
+        if embed_fn is not None:
+            self._embedder = embed_fn
+        elif AdaptiveSemanticEmbedder is not None:
+            self._embedder = AdaptiveSemanticEmbedder()
+        else:  # pragma: no cover - theoretical fallback path
+            self._embedder = None
+
+        effective_embed = embed_fn or getattr(self, "_embedder", None)
+        self._index = _VectorIndex(effective_embed)
         self._load()
         self._index.rebuild(self.state.get("memories", []))
 

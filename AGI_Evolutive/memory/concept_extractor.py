@@ -10,7 +10,7 @@ import re
 import time
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
 from AGI_Evolutive.utils.llm_service import (
@@ -45,6 +45,46 @@ def _llm_manager():
 
 CAP_WORD = re.compile(r"\b[A-ZÉÈÀÂÎÔÙÛÇ][\w\-']+\b")
 TOKEN = re.compile(r"[a-z0-9àâäéèêëîïôöùûüç']{3,}")
+
+_RELATION_SYNONYMS = {
+    "support": "supports",
+    "supports": "supports",
+    "soutien": "supports",
+    "soutient": "supports",
+    "renforce": "supports",
+    "encourage": "supports",
+    "favorise": "supports",
+    "cause": "causes",
+    "entraîne": "causes",
+    "provoque": "causes",
+    "leads": "causes",
+    "implies": "causes",
+    "contradiction": "contradicts",
+    "contredit": "contradicts",
+    "oppose": "contradicts",
+    "refers": "refers_to",
+    "reference": "refers_to",
+    "référence": "refers_to",
+    "associe": "related_to",
+    "relie": "related_to",
+    "related": "related_to",
+    "link": "related_to",
+    "appartient": "part_of",
+    "part": "part_of",
+}
+
+
+def _normalize_relation_label(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    lowered = str(value).strip().lower()
+    if not lowered:
+        return None
+    mapped = _RELATION_SYNONYMS.get(lowered)
+    if mapped:
+        return mapped
+    normalized = lowered.replace(" ", "_")
+    return normalized or None
 COPULA_PATTERN = re.compile(
     r"\b(est|étais|sera|sont|suis|serai|seront)\s+(?:un|une|le|la|l'|des|de la)\s+([\w\-']{3,})",
     re.IGNORECASE,
@@ -224,6 +264,7 @@ class ConceptExtractor:
         self._last_batch_score = 0.0
         self._last_llm_feedback: Optional[Mapping[str, Any]] = None
         self._last_llm_suggestions: Optional[List[Tuple[str, float]]] = None
+        self._last_llm_relations: Optional[List[Tuple[str, str, str, float]]] = None
 
     # ---------- binding ----------
     def bind(self, memory: Any = None, emotions=None, metacog=None, language=None) -> None:
@@ -257,6 +298,17 @@ class ConceptExtractor:
             for concept, score in aggregated
         ]
         return result
+
+    def process_memories(self, memories: Iterable[Mapping[str, Any]]) -> List[Tuple[str, float]]:
+        """Process a batch immediately (used by memory store hooks)."""
+
+        batch: List[Dict[str, Any]] = []
+        for memory in memories:
+            if isinstance(memory, Mapping):
+                batch.append(dict(memory))
+        if not batch:
+            return []
+        return self._run_batch(batch)
 
     # ---------- core processing ----------
     def _run_batch(self, memories: Iterable[Dict[str, Any]]) -> List[Tuple[str, float]]:
@@ -292,9 +344,10 @@ class ConceptExtractor:
                 aggregated[concept] += score
 
             self._update_index(top, mem_id, text, profile)
-            self._update_graph(top, profile)
+            relations_for_mem = list(self._last_llm_relations or [])
+            self._update_graph(top, profile, relations=relations_for_mem)
             self._log_event(mem_id, meta, top, profile, llm_feedback)
-            self._update_store(mem_id, top, profile)
+            self._update_store(mem_id, top, profile, relations=relations_for_mem)
             self._log_memory(mem_id, top)
             self._update_classifier(top)
 
@@ -302,6 +355,7 @@ class ConceptExtractor:
                 ids_in_batch.append(mem_id)
 
             self._last_llm_feedback = None
+            self._last_llm_relations = None
 
         self.state["processed_ids"] += ids_in_batch
         if len(self.state["processed_ids"]) > 5000:
@@ -319,6 +373,7 @@ class ConceptExtractor:
     def _extract_concepts(self, text: str, meta: Dict[str, Any], profile: Profile) -> List[str]:
         self._last_llm_feedback = None
         self._last_llm_suggestions = None
+        self._last_llm_relations = None
         lang = self._detect_language(text, meta)
         lowered = text.lower()
         dynamic_stop = self._language_stopwords(lang)
@@ -394,13 +449,37 @@ class ConceptExtractor:
             score = max(0.2, min(1.0, score))
             suggestions.append((term, score))
 
-        if not suggestions:
+        relations_payload: List[Tuple[str, str, str, float]] = []
+
+        relations_raw = response.get("relations")
+        if isinstance(relations_raw, Sequence):
+            for entry in relations_raw:
+                if not isinstance(entry, Mapping):
+                    continue
+                subject = str(entry.get("subject") or entry.get("from") or "").strip()
+                obj = str(entry.get("object") or entry.get("to") or "").strip()
+                rel = _normalize_relation_label(entry.get("verb") or entry.get("relation"))
+                if not subject or not obj:
+                    continue
+                try:
+                    confidence = float(entry.get("confidence", entry.get("weight", 0.6)))
+                except (TypeError, ValueError):
+                    confidence = 0.6
+                confidence = max(0.1, min(1.0, confidence))
+                relations_payload.append((subject.lower(), rel or "related_to", obj.lower(), confidence))
+
+        if not suggestions and not relations_payload:
             self._last_llm_feedback = dict(response)
             return
 
-        self._last_llm_suggestions = suggestions
+        self._last_llm_suggestions = suggestions or None
+        self._last_llm_relations = relations_payload or None
+
         feedback = dict(response)
-        feedback.setdefault("suggestions", suggestions)
+        if suggestions:
+            feedback.setdefault("suggestions", suggestions)
+        if relations_payload:
+            feedback.setdefault("relations", relations_payload)
         self._last_llm_feedback = feedback
 
         base_weight = max(1, int(round(profile.support_gain or 1.0)))
@@ -456,7 +535,13 @@ class ConceptExtractor:
         with open(self.paths["concept_index"], "w", encoding="utf-8") as handle:
             json.dump(json_sanitize(self.concept_index), handle, ensure_ascii=False, indent=2)
 
-    def _update_graph(self, top: List[Tuple[str, float]], profile: Profile) -> None:
+    def _update_graph(
+        self,
+        top: List[Tuple[str, float]],
+        profile: Profile,
+        *,
+        relations: Optional[Sequence[Tuple[str, str, str, float]]] = None,
+    ) -> None:
         if not top:
             return
         for concept, _ in top:
@@ -470,6 +555,24 @@ class ConceptExtractor:
                 key = f"{concepts[i]}|||{concepts[j]}"
                 edge = self.graph["edges"].get(key, {"w": 0.0})
                 edge["w"] += profile.relation_gain
+                self.graph["edges"][key] = edge
+
+        if relations:
+            for subject, rel, obj, confidence in relations:
+                if not subject or not obj:
+                    continue
+                label = rel or "related_to"
+                key = f"{subject}|||{label}|||{obj}"
+                edge = self.graph["edges"].get(key, {"w": 0.0})
+                gain = profile.relation_gain * (1.0 + 0.5 * confidence)
+                edge.update(
+                    {
+                        "w": edge.get("w", 0.0) + gain,
+                        "type": label,
+                        "directed": True,
+                        "confidence": confidence,
+                    }
+                )
                 self.graph["edges"][key] = edge
 
         with open(self.paths["concept_graph"], "w", encoding="utf-8") as handle:
@@ -510,14 +613,24 @@ class ConceptExtractor:
             except Exception:
                 pass
 
-    def _update_store(self, mem_id: Optional[str], top: List[Tuple[str, float]], profile: Profile) -> None:
+    def _update_store(
+        self,
+        mem_id: Optional[str],
+        top: List[Tuple[str, float]],
+        profile: Profile,
+        *,
+        relations: Optional[Sequence[Tuple[str, str, str, float]]] = None,
+    ) -> None:
         if not self.store or not top:
             return
         max_score = top[0][1] if top else 1.0
+        emotion_boost = self._emotion_factor()
         concept_ids: Dict[str, str] = {}
         for concept, score in top:
             support_delta = profile.support_gain * (float(score / max_score) if max_score else 0.0)
-            salience_delta = profile.salience_gain * (float(score / max_score) if max_score else 0.0)
+            salience_delta = (
+                profile.salience_gain * (float(score / max_score) if max_score else 0.0) * emotion_boost
+            )
             obj = self.store.upsert_concept(
                 label=concept,
                 support_delta=support_delta,
@@ -527,17 +640,59 @@ class ConceptExtractor:
             )
             concept_ids[concept] = obj.id
         concepts = [concept for concept, _ in top]
+        relation_gain = profile.relation_gain * emotion_boost
         for i in range(len(concepts)):
             for j in range(i + 1, len(concepts)):
                 self.store.upsert_relation(
                     concept_ids.get(concepts[i]) or concepts[i],
                     concept_ids.get(concepts[j]) or concepts[j],
                     "related_to",
-                    weight_delta=profile.relation_gain,
+                    weight_delta=relation_gain,
                     mem_id=mem_id,
                     confidence=profile.confidence,
                 )
+        if relations:
+            def ensure(label: str, base_conf: float) -> str:
+                cached = concept_ids.get(label)
+                if cached:
+                    return cached
+                obj = self.store.upsert_concept(
+                    label=label,
+                    support_delta=profile.support_gain * 0.3,
+                    salience_delta=profile.salience_gain * 0.3 * emotion_boost,
+                    example_mem_id=mem_id,
+                    confidence=max(base_conf, 0.3),
+                )
+                concept_ids[label] = obj.id
+                return obj.id
+
+            for subject, rel, obj_label, confidence in relations:
+                if not subject or not obj_label:
+                    continue
+                src_id = ensure(subject, profile.confidence)
+                dst_id = ensure(obj_label, profile.confidence * 0.9)
+                weight = relation_gain * (0.5 + 0.5 * confidence)
+                self.store.upsert_relation(
+                    src_id,
+                    dst_id,
+                    rel or "related_to",
+                    weight_delta=weight,
+                    mem_id=mem_id,
+                    confidence=max(profile.confidence, confidence),
+                )
         self.store.save()
+
+    def _emotion_factor(self) -> float:
+        emotions = self.bound.get("emotions")
+        if emotions and hasattr(emotions, "get_state"):
+            try:
+                state = emotions.get_state() or {}
+                valence = float(state.get("valence", 0.0))
+                arousal = float(state.get("arousal", 0.0))
+                return max(0.6, min(1.6, 1.0 + 0.4 * valence + 0.2 * arousal))
+            except Exception:
+                return 1.0
+        return 1.0
 
     # ---------- persistence helpers ----------
     def _save_state(self) -> None:

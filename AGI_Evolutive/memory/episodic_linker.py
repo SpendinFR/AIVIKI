@@ -310,12 +310,24 @@ class EpisodicLinker:
     # ---------- core ----------
     def run_once(self, max_batch: int = 400):
         mems = self._fetch_recent_memories(limit=max_batch)
+        self._process_batch(mems, limit=max_batch)
+
+    def process_memories(self, memories: Iterable[Mapping[str, Any]]) -> None:
+        batch: List[Dict[str, Any]] = []
+        for memory in memories:
+            if isinstance(memory, Mapping):
+                batch.append(dict(memory))
+        if not batch:
+            return
+        self._process_batch(batch, limit=len(batch))
+
+    def _process_batch(self, mems: List[Dict[str, Any]], *, limit: Optional[int] = None) -> None:
         if not mems:
             return
 
         reward_signal = 0.0
         if hasattr(self, "_scheduler") and isinstance(self._scheduler, _AdaptiveScheduler):
-            load_signal = min(1.0, len(mems) / float(max(1, max_batch)))
+            load_signal = min(1.0, len(mems) / float(max(1, limit or len(mems))))
             period, window, action = self._scheduler.select(load_signal)
             self.period_s = 0.7 * self.period_s + 0.3 * period
             self.window_s = 0.7 * self.window_s + 0.3 * window
