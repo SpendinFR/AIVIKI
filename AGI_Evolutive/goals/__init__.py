@@ -454,7 +454,13 @@ class GoalSystem:
         if not isinstance(response, dict):
             return provided_goal_type, list(criteria or []), 0.0, []
 
-        llm_confidence = float(response.get("confidence") or 0.0)
+        raw_confidence = response.get("confidence")
+        try:
+            llm_confidence = float(raw_confidence)
+        except (TypeError, ValueError):
+            llm_confidence = 0.0
+        else:
+            llm_confidence = max(0.0, min(1.0, llm_confidence))
         llm_goal_type = provided_goal_type
         raw_goal_type = response.get("goal_type")
         if isinstance(raw_goal_type, str):
