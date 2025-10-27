@@ -905,6 +905,41 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         },
     ),
     _spec(
+        "user_models_overview",
+        "AGI_Evolutive/models/__init__.py",
+        "Analyse l'état des modèles utilisateur et synthétise les signaux clés.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Résume le persona en une phrase courte dans 'persona_summary'.",
+            "Liste 3 à 5 traits clés dans 'key_traits' avec 'trait', 'confidence' (0-1) et 'evidence'.",
+            "Sélectionne les préférences saillantes dans 'preference_highlights' avec 'label' et 'probability'.",
+            "Ajoute jusqu'à 3 routines dans 'routine_insights' avec 'time_bucket', 'activity' et 'probability'.",
+            "Propose 1 à 2 actions dans 'recommended_actions' avec 'action' et 'reason'.",
+            "Décris la dynamique globale dans 'satisfaction_trend' (ex: hausse, stable, baisse).",
+        ),
+        example_output={
+            "persona_summary": "Utilisateur orienté performance qui valorise la transparence.",
+            "key_traits": [
+                {
+                    "trait": "orienté performance",
+                    "confidence": 0.78,
+                    "evidence": "références fréquentes aux SLA",
+                }
+            ],
+            "preference_highlights": [
+                {"label": "automatisation", "probability": 0.82}
+            ],
+            "routine_insights": [
+                {"time_bucket": "Tue:12", "activity": "revue métriques", "probability": 0.64}
+            ],
+            "recommended_actions": [
+                {"action": "proposer un suivi proactif", "reason": "apprécie la visibilité"}
+            ],
+            "satisfaction_trend": "stable",
+            "notes": "",
+        },
+    ),
+    _spec(
         "htn_planning",
         "AGI_Evolutive/planning/htn.py",
         "Décompose un objectif en sous-tâches HTN.",
