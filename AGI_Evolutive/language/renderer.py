@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Dict, Any, List, Tuple, Optional, Iterable
 
+import logging
 import random
 import re
 import time
@@ -15,10 +16,14 @@ from AGI_Evolutive.core.structures.mai import MAI
 from .nlg import NLGContext, apply_mai_bids_to_nlg, paraphrase_light, join_tokens
 from .style_critic import StyleCritic
 from AGI_Evolutive.runtime.response import humanize_reasoning_block
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 
 TOKEN_PATTERN = re.compile(r"[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’\-]{1,}")
 DIRECT_QUESTION_PATTERN = re.compile(r"\?\s*(?:$|[)\]»\"']?$)")
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _tokens(s: str) -> set:
@@ -310,6 +315,54 @@ class LanguageRenderer:
             text = "🙂 " + text
         return text
 
+    def _llm_refine_output(
+        self,
+        *,
+        base_text: str,
+        current_text: str,
+        semantics: Dict[str, Any],
+        ctx: Dict[str, Any],
+        applied_hints: List[Dict[str, Any]],
+        dry_run: bool,
+    ) -> str:
+        if dry_run:
+            return current_text
+        payload = {
+            "base_text": base_text,
+            "current_text": current_text,
+            "intent": semantics.get("intent") if isinstance(semantics, dict) else None,
+            "style": getattr(self.voice, "state", {}).get("style", {}),
+            "applied_hints": applied_hints,
+            "last_user_message": ctx.get("last_message"),
+            "topics": ctx.get("topics"),
+        }
+        response = try_call_llm_dict(
+            "language_renderer",
+            input_payload=payload,
+            logger=LOGGER,
+        )
+        if not response:
+            return current_text
+
+        revision = response.get("revision") or response.get("text")
+        if isinstance(revision, str) and revision.strip():
+            current_text = revision.strip()
+
+        lexicon_updates = response.get("lexicon_updates")
+        if isinstance(lexicon_updates, list) and hasattr(self.lex, "prefer"):
+            for entry in lexicon_updates:
+                if isinstance(entry, str) and entry.strip():
+                    try:
+                        self.lex.prefer(entry.strip())
+                    except Exception:
+                        LOGGER.debug("Failed to register lexicon update", exc_info=True)
+
+        notes = response.get("notes")
+        if isinstance(notes, str) and notes.strip():
+            ctx.setdefault("llm_renderer_notes", []).append(notes.strip())
+
+        return current_text
+
     def _normalize_semantic_value(self, value: Any) -> str:
         if value is None:
             return ""
@@ -599,6 +652,14 @@ class LanguageRenderer:
                             base += " Par exemple, on peut penser à une situation concrète pour l'illustrer."
 
         out = self._decorate_with_voice(base)
+        out = self._llm_refine_output(
+            base_text=base,
+            current_text=out,
+            semantics=semantics,
+            ctx=ctx,
+            applied_hints=applied_hints,
+            dry_run=dry_run,
+        )
         if use_past:
             snippet = f"\n\n↪ En lien : {past_txt}"
             if len(snippet) <= budget:
