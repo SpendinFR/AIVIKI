@@ -9,6 +9,7 @@ from collections import Counter
 from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Tuple
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 try:  # pragma: no cover - optional import during bootstrap
     from .embedding_adapters import AdaptiveSemanticEmbedder
@@ -187,6 +188,43 @@ class MemoryStore:
         data.setdefault("uses", int(data.get("uses", 0)))
         data.setdefault("tags", list(data.get("tags", [])))
         data.setdefault("metadata", dict(data.get("metadata", {})))
+        llm_payload = {
+            "memory": {
+                "kind": data.get("kind"),
+                "text": data.get("text"),
+                "tags": list(data.get("tags", [])),
+                "salience": data.get("salience"),
+                "metadata": {k: v for k, v in data.get("metadata", {}).items() if isinstance(k, str)},
+            }
+        }
+        llm_response = try_call_llm_dict(
+            "memory_store_strategy",
+            input_payload=llm_payload,
+            logger=logger,
+        )
+        if llm_response:
+            normalized_kind = llm_response.get("normalized_kind")
+            if isinstance(normalized_kind, str) and normalized_kind.strip():
+                data["kind"] = normalized_kind.strip()
+            suggested_tags = llm_response.get("tags")
+            if isinstance(suggested_tags, list):
+                existing = list(data.get("tags", []))
+                for tag in suggested_tags:
+                    if isinstance(tag, str) and tag not in existing:
+                        existing.append(tag)
+                data["tags"] = existing
+            metadata_updates = llm_response.get("metadata_updates")
+            if isinstance(metadata_updates, Mapping):
+                data.setdefault("metadata", {}).update(metadata_updates)
+            retention = llm_response.get("retention_priority")
+            if isinstance(retention, str) and retention:
+                data.setdefault("metadata", {}).setdefault("retention_priority", retention)
+            notes = llm_response.get("notes")
+            if notes:
+                metadata = data.setdefault("metadata", {})
+                notes_list = metadata.setdefault("llm_notes", [])
+                if isinstance(notes_list, list):
+                    notes_list.append(notes)
         self.state.setdefault("memories", []).append(data)
         if len(self.state["memories"]) > self.max_items:
             overflow = len(self.state["memories"]) - self.max_items

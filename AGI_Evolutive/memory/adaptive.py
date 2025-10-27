@@ -5,6 +5,7 @@ online learning and Thompson Sampling controllers for critical parameters.
 """
 from __future__ import annotations
 
+import logging
 import math
 import random
 from collections.abc import MutableMapping
@@ -75,6 +76,10 @@ except Exception:  # pragma: no cover - lightweight fallback for tests
             return _FallbackArray(array)
 
     np = _FallbackNumpy()  # type: ignore
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _sigmoid(x: float) -> float:
@@ -282,6 +287,49 @@ class AdaptiveMemoryParameters(MutableMapping):
             if abs(delta) > max_step:
                 capped = previous + float(np.clip(delta, -max_step, max_step))
                 controller.force_value(capped)
+            self._values[name] = controller.current_value
+
+        payload_context = {key: float(value) for key, value in context.items()}
+        payload_parameters = {
+            name: float(value) for name, value in self._values.items()
+        }
+        llm_payload = {
+            "reward": reward,
+            "context": payload_context,
+            "parameters": payload_parameters,
+        }
+        response = try_call_llm_dict(
+            "memory_adaptive_guidance",
+            input_payload=llm_payload,
+            logger=LOGGER,
+        )
+        if not response:
+            return
+        updates = response.get("parameter_updates", [])
+        if not isinstance(updates, Iterable):
+            return
+        for update in updates:
+            if not isinstance(update, Mapping):
+                continue
+            name = update.get("name")
+            if not isinstance(name, str) or name not in self._values:
+                continue
+            suggested = update.get("suggested_value")
+            if not isinstance(suggested, (int, float)):
+                continue
+            controller = self._adaptive.get(name)
+            if controller is None:
+                self._values[name] = float(suggested)
+                continue
+            blend = update.get("confidence")
+            try:
+                blend_f = max(0.0, min(1.0, float(blend)))
+            except Exception:
+                blend_f = 0.5
+            current = controller.current_value
+            target = float(suggested)
+            new_value = current + (target - current) * blend_f
+            controller.force_value(new_value)
             self._values[name] = controller.current_value
 
     def snapshot(self) -> Dict[str, float]:

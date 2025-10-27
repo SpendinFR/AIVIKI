@@ -498,6 +498,230 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         },
     ),
     _spec(
+        "memory_retrieval_ranking",
+        "AGI_Evolutive/memory/retrieval.py",
+        "Réévalue les souvenirs candidats pour une requête et renvoie un classement justifié.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Classe les candidats du plus pertinent au moins pertinent.",
+            "Fixe 'adjusted_score' entre 0 et 1 (float).",
+            "Ajoute un champ 'rationale' concis expliquant la décision.",
+            "Attribue 'priority' parmi {haut, moyen, bas} selon l'urgence de remonter le souvenir.",
+        ),
+        example_output={
+            "rankings": [
+                {
+                    "id": 12,
+                    "adjusted_score": 0.84,
+                    "rationale": "Répond directement à la question sur l'incident API.",
+                    "priority": "haut",
+                },
+                {
+                    "id": 7,
+                    "adjusted_score": 0.55,
+                    "rationale": "Contexte utile mais partiellement daté.",
+                    "priority": "moyen",
+                },
+            ],
+            "notes": "",
+        },
+    ),
+    _spec(
+        "memory_system_narrative",
+        "AGI_Evolutive/memory/__init__.py",
+        "Transforme les statistiques autobiographiques en récit synthétique et dégage les leçons clés.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Fournis un champ 'enhanced_narrative' en français clair.",
+            "Donne 1 à 3 'insights' concis avec un niveau d'importance.",
+            "Calcule 'coherence' entre 0 et 1 si tu ajustes la valeur initiale.",
+        ),
+        example_output={
+            "enhanced_narrative": "L'agent a surmonté une panne API avant de stabiliser la plateforme.",
+            "coherence": 0.78,
+            "insights": [
+                {"title": "Résilience opérationnelle", "importance": "haute", "detail": "Interventions rapides sur incidents critiques."}
+            ],
+            "notes": "",
+        },
+    ),
+    _spec(
+        "memory_adaptive_guidance",
+        "AGI_Evolutive/memory/adaptive.py",
+        "Analyse les paramètres adaptatifs et suggère des ajustements prudents.",
+        AVAILABLE_MODELS["fast"],
+        extra_instructions=(
+            "Retourne des 'parameter_updates' avec 'name', 'suggested_value', 'confidence' (0-1) et 'rationale'.",
+            "Si aucun ajustement n'est pertinent, renvoie une liste vide et explique dans 'notes'.",
+        ),
+        example_output={
+            "parameter_updates": [
+                {
+                    "name": "recall_threshold",
+                    "suggested_value": 0.62,
+                    "confidence": 0.7,
+                    "rationale": "Réduire les faux négatifs observés sur les requêtes longues.",
+                }
+            ],
+            "notes": "",
+        },
+    ),
+    _spec(
+        "memory_long_term_digest",
+        "AGI_Evolutive/memory/alltime.py",
+        "Résume une période historique et signale les faits marquants ou risques.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Produis un champ 'summary' (3 phrases max).",
+            "Ajoute 'highlights' (liste) et 'risks' éventuels avec sévérité.",
+        ),
+        example_output={
+            "summary": "Semaine dominée par la résolution d'un incident API et l'onboarding d'un client.",
+            "highlights": [
+                {"item": "Incident API stabilisé", "impact": "haut"},
+                {"item": "Nouveau playbook documenté", "impact": "moyen"},
+            ],
+            "risks": [
+                {"item": "Dette technique monitoring", "severity": "modéré"}
+            ],
+            "notes": "",
+        },
+    ),
+    _spec(
+        "memory_concept_curation",
+        "AGI_Evolutive/memory/concept_store.py",
+        "Évalue la pertinence des concepts et propose les priorités de consolidation.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Retourne une liste 'concepts' où chaque entrée contient 'id', 'priority' (haut/moyen/bas) et 'action'.",
+            "Ajoute des suggestions pour les relations critiques dans 'relations'.",
+        ),
+        example_output={
+            "concepts": [
+                {"id": "proxy", "priority": "haut", "action": "Renforcer les exemples récents."}
+            ],
+            "relations": [
+                {"id": "proxy::cause::incident", "priority": "moyen", "action": "Vérifier poids après dernier incident."}
+            ],
+            "notes": "",
+        },
+    ),
+    _spec(
+        "memory_index_optimizer",
+        "AGI_Evolutive/memory/indexing.py",
+        "Recommande des ajustements de classement pour les correspondances mémoire.",
+        AVAILABLE_MODELS["fast"],
+        extra_instructions=(
+            "Renvoie 'reranked' trié par pertinence avec 'id', 'boost' (float -0.5 à 0.5) et 'justification'.",
+        ),
+        example_output={
+            "reranked": [
+                {"id": 42, "boost": 0.18, "justification": "Mention directe de la panne actuelle."}
+            ],
+            "notes": "",
+        },
+    ),
+    _spec(
+        "memory_janitor_triage",
+        "AGI_Evolutive/memory/janitor.py",
+        "Valide la suppression ou l'archivage des souvenirs expirés en tenant compte du contexte.",
+        AVAILABLE_MODELS["fast"],
+        extra_instructions=(
+            "Chaque entrée dans 'decisions' doit contenir 'id', 'action' (delete|soft_keep) et 'reason'.",
+        ),
+        example_output={
+            "decisions": [
+                {"id": "mem_12", "action": "delete", "reason": "Redondant avec digest hebdomadaire."}
+            ],
+            "notes": "",
+        },
+    ),
+    _spec(
+        "memory_store_strategy",
+        "AGI_Evolutive/memory/memory_store.py",
+        "Analyse un souvenir entrant et recommande tags, métadonnées et priorité de conservation.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Propose 'retention_priority' (haut/moyen/bas).",
+            "Ajoute 'metadata_updates' (dict) pour compléter les informations utiles.",
+        ),
+        example_output={
+            "normalized_kind": "incident_report",
+            "tags": ["incident", "api"],
+            "retention_priority": "haut",
+            "metadata_updates": {"related_service": "api-gateway"},
+            "notes": "",
+        },
+    ),
+    _spec(
+        "memory_preferences_guidance",
+        "AGI_Evolutive/memory/prefs_bridge.py",
+        "Affiner l'affinité utilisateur en expliquant les signaux likes/dislikes.",
+        AVAILABLE_MODELS["fast"],
+        extra_instructions=(
+            "Retourne 'adjusted_affinity' (0-1) et 'reason'.",
+            "Liste 'suggested_concepts' si des éléments proches sont détectés.",
+        ),
+        example_output={
+            "adjusted_affinity": 0.74,
+            "reason": "Plusieurs tags positifs récents sur le thème.",
+            "suggested_concepts": ["monitoring proactif"],
+            "notes": "",
+        },
+    ),
+    _spec(
+        "memory_semantic_bridge",
+        "AGI_Evolutive/memory/semantic_bridge.py",
+        "Résume un lot de souvenirs entrants et signale les suivis urgents.",
+        AVAILABLE_MODELS["fast"],
+        extra_instructions=(
+            "Retourne 'batch_annotations' (liste) avec 'id', 'priority' et 'topics'.",
+            "Marque 'alerts' si une action immédiate est recommandée.",
+        ),
+        example_output={
+            "batch_annotations": [
+                {"id": "mem_9", "priority": "haut", "topics": ["incident", "client premium"]}
+            ],
+            "alerts": ["Escalader incident client premium"],
+            "notes": "",
+        },
+    ),
+    _spec(
+        "memory_summarizer_guidance",
+        "AGI_Evolutive/memory/summarizer.py",
+        "Produit un digest concis à partir d'un lot de souvenirs hiérarchiques.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Synthétise en moins de 120 mots.",
+            "Liste 'key_events' avec leur importance.",
+            "Ajoute 'alerts' si des risques doivent être remontés.",
+        ),
+        example_output={
+            "summary": "La période retrace la résolution de l'incident API et la mise à jour des procédures.",
+            "key_events": [
+                {"label": "Incident API", "importance": "haute"},
+                {"label": "Rétroaction client", "importance": "moyenne"},
+            ],
+            "alerts": ["Prévoir suivi monitoring"],
+            "notes": "",
+        },
+    ),
+    _spec(
+        "memory_vector_guidance",
+        "AGI_Evolutive/memory/vector_store.py",
+        "Ajuste le classement vectoriel en expliquant les choix prioritaires.",
+        AVAILABLE_MODELS["fast"],
+        extra_instructions=(
+            "Renvoie 'reranked' avec 'id', 'boost' (-0.5 à 0.5) et 'comment'.",
+        ),
+        example_output={
+            "reranked": [
+                {"id": "doc_15", "boost": 0.22, "comment": "Correspond exactement au symptôme signalé."}
+            ],
+            "notes": "",
+        },
+    ),
+    _spec(
         "perception_preprocess",
         "AGI_Evolutive/io/perception_interface.py",
         "Pré-analyse l'entrée capteur pour fournir des métadonnées utiles.",

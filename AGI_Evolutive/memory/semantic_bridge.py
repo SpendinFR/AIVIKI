@@ -9,6 +9,8 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 
 LOGGER = logging.getLogger(__name__)
 
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
 
 class SemanticMemoryBridge:
     """Background worker that forwards new memories to semantic components."""
@@ -91,6 +93,28 @@ class SemanticMemoryBridge:
                     self._concept.process_memories(memories)
                 if self._episodic and hasattr(self._episodic, "process_memories"):
                     self._episodic.process_memories(memories)
+            llm_payload = {
+                "memories": [
+                    {
+                        "id": item.get("id"),
+                        "kind": item.get("kind"),
+                        "text": item.get("text"),
+                        "tags": item.get("tags"),
+                        "salience": item.get("salience"),
+                    }
+                    for item in memories
+                ]
+            }
+            llm_response = try_call_llm_dict(
+                "memory_semantic_bridge",
+                input_payload=llm_payload,
+                logger=LOGGER,
+            )
+            if llm_response and self._manager and hasattr(self._manager, "on_llm_annotations"):
+                try:
+                    self._manager.on_llm_annotations(llm_response)
+                except Exception:
+                    LOGGER.debug("Semantic manager annotations hook failed", exc_info=True)
         except Exception:
             LOGGER.debug("Semantic processing hook failed", exc_info=True)
 

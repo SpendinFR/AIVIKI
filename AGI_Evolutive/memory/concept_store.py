@@ -1,5 +1,6 @@
 from dataclasses import dataclass, asdict, field
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+import logging
 import os
 import json
 import time
@@ -9,6 +10,9 @@ import random
 from collections import deque
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+LOGGER = logging.getLogger(__name__)
 
 
 class OnlineLinearModel:
@@ -208,6 +212,8 @@ class ConceptStore:
         os.makedirs(os.path.dirname(self.path_concepts), exist_ok=True)
         self.concepts: Dict[str, Concept] = {}
         self.relations: Dict[str, Relation] = {}
+        self._concept_guidance: Dict[str, Dict[str, Any]] = {}
+        self._relation_guidance: Dict[str, Dict[str, Any]] = {}
         # Adaptive scoring and decay configuration
         concept_feature_names = [
             "support",
@@ -275,6 +281,37 @@ class ConceptStore:
         self.concept_score_model.update(features, target)
         reward = self._concept_reward(support_delta, salience_delta)
         self.concept_half_life_sampler.update(half_life, reward)
+        payload = {
+            "concept": {
+                "id": concept.id,
+                "label": concept.label,
+                "support": concept.support,
+                "salience": concept.salience,
+                "confidence": concept.confidence,
+                "examples": list(concept.examples),
+            },
+            "delta": {
+                "support": support_delta,
+                "salience": salience_delta,
+                "confidence": confidence,
+            },
+        }
+        guidance = try_call_llm_dict(
+            "memory_concept_curation",
+            input_payload=payload,
+            logger=LOGGER,
+        )
+        if guidance:
+            for item in guidance.get("concepts", []):
+                if not isinstance(item, Mapping):
+                    continue
+                identifier = item.get("id")
+                if identifier in {concept.id, concept.label}:
+                    self._concept_guidance[concept.id] = dict(item)
+                    break
+            for rel in guidance.get("relations", []):
+                if isinstance(rel, Mapping) and rel.get("id"):
+                    self._relation_guidance[str(rel["id"])] = dict(rel)
         return concept
 
     def upsert_relation(
@@ -302,6 +339,33 @@ class ConceptStore:
             relation.evidence.append(mem_id)
         reward = self._relation_reward(weight_delta)
         self.relation_half_life_sampler.update(half_life, reward)
+        payload = {
+            "relation": {
+                "id": relation.id,
+                "src": relation.src,
+                "dst": relation.dst,
+                "rtype": relation.rtype,
+                "weight": relation.weight,
+                "confidence": relation.confidence,
+            },
+            "delta": {
+                "weight": weight_delta,
+                "confidence": confidence,
+            },
+        }
+        guidance = try_call_llm_dict(
+            "memory_concept_curation",
+            input_payload=payload,
+            logger=LOGGER,
+        )
+        if guidance:
+            for rel in guidance.get("relations", []):
+                if not isinstance(rel, Mapping):
+                    continue
+                identifier = str(rel.get("id"))
+                if identifier in {relation.id, f"{relation.src}::{relation.rtype}::{relation.dst}"}:
+                    self._relation_guidance[relation.id] = dict(rel)
+                    break
         return relation
 
     def get_top_concepts(self, k: int = 20) -> List[Concept]:
@@ -381,6 +445,16 @@ class ConceptStore:
                     queue.append((relation.dst, depth + 1))
 
         return results
+
+    def concept_guidance(self, concept_id: Optional[str] = None) -> Dict[str, Any]:
+        if concept_id is not None:
+            return dict(self._concept_guidance.get(concept_id, {}))
+        return {cid: dict(payload) for cid, payload in self._concept_guidance.items()}
+
+    def relation_guidance(self, relation_id: Optional[str] = None) -> Dict[str, Any]:
+        if relation_id is not None:
+            return dict(self._relation_guidance.get(relation_id, {}))
+        return {rid: dict(payload) for rid, payload in self._relation_guidance.items()}
 
     def find_by_label_prefix(self, prefix: str, k: int = 10) -> List[Concept]:
         lower_prefix = prefix.lower()

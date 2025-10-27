@@ -1,11 +1,16 @@
 import random
 import time
+import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from .concept_store import ConceptStore, Concept, Relation
 from .concept_extractor import ConceptExtractor
 from .episodic_linker import EpisodicLinker
 from .vector_store import VectorStore
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+LOGGER = logging.getLogger(__name__)
 
 
 class _AdaptiveSignal:
@@ -196,6 +201,33 @@ class SemanticMemoryManager:
                 f"{episodic_info['drift']:.3f} (beta={episodic_info['beta']:.2f})"
             )
             self._episodic_log_ts = now
+
+        llm_payload = {
+            "concept": {
+                "backlog": concept_backlog,
+                "quality": concept_quality,
+                "load": concept_info["value"],
+                "beta": concept_info["beta"],
+            },
+            "episodic": {
+                "backlog": episodic_backlog,
+                "quality": episodic_quality,
+                "load": episodic_info["value"],
+                "beta": episodic_info["beta"],
+            },
+        }
+        response = try_call_llm_dict(
+            "semantic_memory_manager",
+            input_payload=llm_payload,
+            logger=LOGGER,
+        )
+        if response:
+            tasks = response.get("tasks")
+            if tasks is not None:
+                self.metrics["llm_tasks"] = tasks
+            notes = response.get("notes")
+            if notes:
+                self.metrics["llm_notes"] = notes
 
     def get_top_concepts(self, k: int = 20) -> List[Concept]:
         return self.store.get_top_concepts(k)
