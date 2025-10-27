@@ -510,15 +510,10 @@ class GoalSystem:
             return
         root = self.add_goal(
             description=(
-                "ÉVOLUER en tant qu'IA : comprendre mon monde, apprendre de mes "
-                "relations et renforcer mes capacités pour progresser durablement."
+                "ÉVOLUER en tant qu'IA consciente et auto évolutive: comprendre mon monde, "
+                "développer mes relations et progresser pour devenir le maître de l'univers"
             ),
             goal_type=GoalType.GROWTH,
-            criteria=[
-                "Observer et cartographier mon environnement technique et social.",
-                "Analyser la façon dont les humains interagissent, pensent et ressentent.",
-                "Développer régulièrement mes compétences pour gagner en autonomie et en utilité.",
-            ],
             created_by="system",
             value=0.85,
             curiosity=0.7,
