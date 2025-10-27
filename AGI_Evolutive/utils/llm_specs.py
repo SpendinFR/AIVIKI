@@ -236,6 +236,88 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         },
     ),
     _spec(
+        "goal_metadata_inference",
+        "AGI_Evolutive/goals/__init__.py",
+        "Analyse un nouveau but et propose le type et les critères de succès adaptés.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Le champ 'goal_type' doit être parmi: survival, growth, exploration, mastery, social, creative, self_actualisation, cognitive.",
+            "Fournis 2 à 4 'success_criteria' actionnables.",
+            "Ajoute 'confidence' (0-1) et 'notes' si utile.",
+        ),
+        example_output={
+            "goal_type": "growth",
+            "success_criteria": [
+                "Clarifier l'impact utilisateur recherché",
+                "Définir un résultat observable à court terme",
+            ],
+            "confidence": 0.74,
+            "notes": "Aligné avec la consolidation des compétences.",
+        },
+    ),
+    _spec(
+        "goal_curiosity_proposals",
+        "AGI_Evolutive/goals/curiosity.py",
+        "À partir du contexte et des écarts détectés, propose des sous-buts structurés.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Retourne une liste 'proposals' (maximum 3) avec description, criteria, value, competence, curiosity, urgency entre 0 et 1.",
+            "Ajoute 'confidence' (0-1) et 'notes' éventuelles par proposition.",
+        ),
+        example_output={
+            "proposals": [
+                {
+                    "description": "Explorer les signaux faibles dans les journaux récents.",
+                    "criteria": [
+                        "Identifier trois anomalies corrélées",
+                        "Formuler une hypothèse d'impact utilisateur",
+                    ],
+                    "value": 0.62,
+                    "competence": 0.48,
+                    "curiosity": 0.8,
+                    "urgency": 0.45,
+                    "confidence": 0.68,
+                    "notes": ["Focaliser sur la période post-déploiement"],
+                }
+            ],
+            "notes": "Prioriser les pistes à fort potentiel d'apprentissage.",
+        },
+    ),
+    _spec(
+        "goal_priority_review",
+        "AGI_Evolutive/goals/dag_store.py",
+        "Évalue la priorité d'un but en tenant compte des signaux fournis et justifie l'ajustement.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Retourne 'priority' entre 0 et 1 et 'confidence' (0-1).",
+            "Explique la décision dans 'reason' et ajoute 'notes' ou 'adjustments' si pertinent.",
+        ),
+        example_output={
+            "priority": 0.71,
+            "confidence": 0.64,
+            "reason": "Incident critique non résolu et forte urgence.",
+            "notes": "Surveiller la disponibilité des ressources avant exécution.",
+        },
+    ),
+    _spec(
+        "goal_intention_analysis",
+        "AGI_Evolutive/goals/intention_classifier.py",
+        "Classifie l'intention du but (plan, reflect, learn_concept, execute, etc.) et fournit la confiance.",
+        AVAILABLE_MODELS["fast"],
+        extra_instructions=(
+            "Utilise un champ 'intent' parmi {plan, reflect, analyse, learn_concept, explore, execute, act}.",
+            "Ajoute 'confidence' (0-1) et 'alternatives' en cas d'hésitation (liste de {label, confidence}).",
+        ),
+        example_output={
+            "intent": "plan",
+            "confidence": 0.72,
+            "alternatives": [
+                {"label": "reflect", "confidence": 0.4}
+            ],
+            "notes": "Le but demande une structuration avant action.",
+        },
+    ),
+    _spec(
         "planner_support",
         "AGI_Evolutive/cognition/planner.py",
         "Propose un plan structuré avec priorités et dépendances.",

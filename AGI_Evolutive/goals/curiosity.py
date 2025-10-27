@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import random
 import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class OnlineLinear:
@@ -179,6 +185,85 @@ class CuriosityEngine:
         self._explore_rate = 0.2
 
     # ------------------------------------------------------------------
+    def _llm_suggest_subgoals(
+        self,
+        parent_goal: Optional[Dict[str, Any]],
+        context: Dict[str, Any],
+        context_stats: Dict[str, Any],
+        gaps: List[Dict[str, Any]],
+        k: int,
+    ) -> List[Dict[str, Any]]:
+        payload = {
+            "parent_goal": parent_goal or {},
+            "context_snapshot": context,
+            "context_stats": context_stats,
+            "identified_gaps": gaps,
+            "requested": int(max(1, k)),
+        }
+
+        response = try_call_llm_dict(
+            "goal_curiosity_proposals",
+            input_payload=payload,
+            logger=LOGGER,
+        )
+        if not isinstance(response, dict):
+            return []
+
+        proposals_payload = response.get("proposals")
+        if not isinstance(proposals_payload, list):
+            return []
+
+        proposals: List[Dict[str, Any]] = []
+
+        def clamp_float(value: Any, default: float = 0.5) -> float:
+            try:
+                return float(max(0.0, min(1.0, float(value))))
+            except (TypeError, ValueError):
+                return default
+
+        for entry in proposals_payload:
+            if not isinstance(entry, dict):
+                continue
+            description = (entry.get("description") or "").strip()
+            if not description:
+                continue
+            candidate: Dict[str, Any] = {
+                "description": description,
+                "criteria": [
+                    item.strip()
+                    for item in entry.get("criteria", [])
+                    if isinstance(item, str) and item.strip()
+                ],
+                "value": clamp_float(entry.get("value"), 0.55),
+                "competence": clamp_float(entry.get("competence"), 0.5),
+                "curiosity": clamp_float(entry.get("curiosity"), 0.7),
+                "urgency": clamp_float(entry.get("urgency"), 0.4),
+                "created_by": entry.get("created_by", "curiosity_llm"),
+                "parent_ids": [
+                    pid
+                    for pid in (entry.get("parent_ids") or [])
+                    if isinstance(pid, str) and pid.strip()
+                ]
+                or ([parent_goal.get("id")] if parent_goal and parent_goal.get("id") else []),
+            }
+
+            confidence = entry.get("confidence")
+            if confidence is not None:
+                candidate["llm_confidence"] = clamp_float(confidence, 0.6)
+
+            notes = entry.get("notes")
+            if isinstance(notes, str) and notes.strip():
+                candidate["llm_notes"] = [notes.strip()]
+            elif isinstance(notes, (list, tuple)):
+                extracted = [n.strip() for n in notes if isinstance(n, str) and n.strip()]
+                if extracted:
+                    candidate["llm_notes"] = extracted
+
+            proposals.append(candidate)
+
+        return proposals
+
+    # ------------------------------------------------------------------
     def suggest_subgoals(
         self,
         parent_goal: Optional[Dict[str, Any]] = None,
@@ -193,7 +278,16 @@ class CuriosityEngine:
             gaps = [{"domain": "exploration", "score": 0.5, "severity": 0.4}]
 
         proposals: List[Dict[str, Any]] = []
+        llm_candidates = self._llm_suggest_subgoals(parent_goal, context, context_stats, gaps, k)
+        for candidate in llm_candidates:
+            proposals.append(candidate)
+            if len(proposals) >= k:
+                break
+
         self._pending_proposals = []
+
+        if len(proposals) >= k:
+            return proposals[:k]
 
         bandit_arm, bandit_config = self._bandit.sample()
 

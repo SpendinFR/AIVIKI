@@ -15,9 +15,13 @@ from .curiosity import CuriosityEngine
 from .dag_store import DagStore, GoalNode
 from .heuristics import HeuristicRegistry, default_heuristics
 from .intention_classifier import IntentionModel
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 
 logger = logging.getLogger(__name__)
+
+
+_LLM_METADATA_CONFIDENCE_THRESHOLD = 0.55
 
 
 class GoalType(Enum):
@@ -48,12 +52,19 @@ class GoalMetadata:
     updated_at: float = field(default_factory=time.time)
     depth: int = 0
     structural_seeded: bool = False
+    llm_notes: List[str] = field(default_factory=list)
+    llm_confidence: float = 0.0
 
     def to_payload(self) -> Dict[str, Any]:
-        return {
+        payload = {
             "goal_type": self.goal_type.value,
             "success_criteria": list(self.success_criteria),
         }
+        if self.llm_confidence:
+            payload["llm_confidence"] = float(self.llm_confidence)
+        if self.llm_notes:
+            payload["llm_notes"] = list(self.llm_notes)
+        return payload
 
 
 class GoalSystem:
@@ -171,9 +182,30 @@ class GoalSystem:
         structural_seeded: bool = False,
     ) -> GoalNode:
         parent_ids_list = list(parent_ids or [])
+        initial_criteria = list(criteria or [])
+
+        if created_by == "structure":
+            enriched_goal_type, enriched_criteria, llm_confidence, llm_notes = (
+                goal_type,
+                initial_criteria,
+                0.0,
+                [],
+            )
+        else:
+            enriched_goal_type, enriched_criteria, llm_confidence, llm_notes = (
+                self._llm_enrich_goal_metadata(
+                    description,
+                    goal_type,
+                    initial_criteria,
+                    parent_ids_list,
+                )
+            )
+
+        criteria_payload = enriched_criteria or initial_criteria
+
         node = self.store.add_goal(
             description=description,
-            criteria=list(criteria or []),
+            criteria=list(criteria_payload),
             created_by=created_by,
             value=value,
             competence=competence,
@@ -183,11 +215,13 @@ class GoalSystem:
         )
         depth = self._compute_depth(parent_ids_list)
         metadata = GoalMetadata(
-            goal_type=goal_type,
-            success_criteria=list(criteria or []),
+            goal_type=enriched_goal_type,
+            success_criteria=list(criteria_payload),
             depth=depth,
         )
         metadata.structural_seeded = structural_seeded
+        metadata.llm_confidence = llm_confidence
+        metadata.llm_notes = list(llm_notes)
         self.metadata[node.id] = metadata
         return node
 
@@ -370,6 +404,87 @@ class GoalSystem:
             else:
                 depths.append(self._infer_depth(pid, memo))
         return (min(depths) + 1) if depths else 0
+
+    def _normalize_goal_type(self, value: str) -> Optional[GoalType]:
+        normalized = (value or "").strip().lower().replace("-", "_")
+        for goal_type in GoalType:
+            if normalized == goal_type.value:
+                return goal_type
+        return None
+
+    def _llm_enrich_goal_metadata(
+        self,
+        description: str,
+        provided_goal_type: GoalType,
+        criteria: Iterable[str] | None,
+        parent_ids: List[str],
+    ) -> Tuple[GoalType, List[str], float, List[str]]:
+        description = (description or "").strip()
+        if not description:
+            return provided_goal_type, list(criteria or []), 0.0, []
+
+        parent_context: List[Dict[str, Any]] = []
+        for pid in parent_ids:
+            parent = self.store.nodes.get(pid)
+            if not parent:
+                continue
+            meta = self.metadata.get(pid)
+            parent_context.append(
+                {
+                    "id": pid,
+                    "description": parent.description,
+                    "goal_type": meta.goal_type.value if meta else None,
+                    "status": parent.status,
+                }
+            )
+
+        payload = {
+            "description": description,
+            "provided_goal_type": provided_goal_type.value,
+            "existing_criteria": [str(item).strip() for item in criteria or [] if str(item).strip()],
+            "parent_context": parent_context,
+            "active_goal_id": self.active_goal_id,
+        }
+
+        response = try_call_llm_dict(
+            "goal_metadata_inference",
+            input_payload=payload,
+            logger=logger,
+        )
+        if not isinstance(response, dict):
+            return provided_goal_type, list(criteria or []), 0.0, []
+
+        llm_confidence = float(response.get("confidence") or 0.0)
+        llm_goal_type = provided_goal_type
+        raw_goal_type = response.get("goal_type")
+        if isinstance(raw_goal_type, str):
+            candidate = self._normalize_goal_type(raw_goal_type)
+            if candidate and (
+                llm_confidence >= _LLM_METADATA_CONFIDENCE_THRESHOLD
+                or provided_goal_type == GoalType.GROWTH
+            ):
+                llm_goal_type = candidate
+
+        llm_criteria: List[str] = []
+        raw_criteria = response.get("success_criteria")
+        if isinstance(raw_criteria, (list, tuple)):
+            for item in raw_criteria:
+                if isinstance(item, str) and item.strip():
+                    llm_criteria.append(item.strip())
+
+        notes: List[str] = []
+        raw_notes = response.get("notes")
+        if isinstance(raw_notes, str) and raw_notes.strip():
+            notes.append(raw_notes.strip())
+        elif isinstance(raw_notes, (list, tuple)):
+            for entry in raw_notes:
+                if isinstance(entry, str) and entry.strip():
+                    notes.append(entry.strip())
+
+        if not llm_criteria:
+            llm_criteria = list(criteria or [])
+
+        return llm_goal_type, llm_criteria, llm_confidence, notes
 
     def _infer_depth(self, goal_id: str, memo: Optional[Dict[str, int]] = None) -> int:
         memo = memo or {}
