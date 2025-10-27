@@ -1,8 +1,9 @@
 from __future__ import annotations
-from typing import Dict, Any, Optional, Iterable
+from typing import Dict, Any, Optional, Iterable, Mapping, Sequence
 from dataclasses import dataclass, asdict, field
 from collections import deque
 from copy import deepcopy
+import logging
 import random
 import statistics
 import json
@@ -11,6 +12,10 @@ import time
 import uuid
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _now():
@@ -77,16 +82,32 @@ class MetacognitionExperimenter:
             if baseline >= threshold:
                 continue
 
-            plan_cfg = self._select_plan(metric)
-            if not plan_cfg:
+            llm_proposal = self._propose_experiment_with_llm(metric, baseline, threshold)
+            if llm_proposal and llm_proposal.get("skip"):
                 continue
 
-            adaptive_change = self._adaptive_target_change(metric, baseline, plan_cfg)
+            if llm_proposal and "plan" in llm_proposal:
+                plan_payload = deepcopy(llm_proposal["plan"])
+                parameters = deepcopy(llm_proposal.get("parameters", {}))
+                if parameters:
+                    plan_payload.setdefault("parameters", parameters)
+                adaptive_change = float(llm_proposal["target_change"])
+                plan_id = llm_proposal.get("plan_id", plan_payload.get("strategy", ""))
+                duration_cycles = int(llm_proposal.get("duration_cycles", 3))
+                notes = llm_proposal.get("notes", "")
+            else:
+                plan_cfg = self._select_plan(metric)
+                if not plan_cfg:
+                    continue
 
-            plan_payload = deepcopy(plan_cfg.get("plan", {}))
-            parameters = deepcopy(plan_cfg.get("parameters", {}))
-            if parameters:
-                plan_payload.setdefault("parameters", parameters)
+                adaptive_change = self._adaptive_target_change(metric, baseline, plan_cfg)
+                plan_payload = deepcopy(plan_cfg.get("plan", {}))
+                parameters = deepcopy(plan_cfg.get("parameters", {}))
+                if parameters:
+                    plan_payload.setdefault("parameters", parameters)
+                plan_id = plan_cfg.get("id", plan_payload.get("strategy", ""))
+                duration_cycles = int(plan_cfg.get("duration", 3))
+                notes = ""
 
             exp = Experiment(
                 exp_id=str(uuid.uuid4())[:8],
@@ -94,11 +115,12 @@ class MetacognitionExperimenter:
                 baseline=float(baseline),
                 target_change=float(adaptive_change),
                 plan=plan_payload,
-                plan_id=plan_cfg.get("id", plan_payload.get("strategy", "")),
+                plan_id=plan_id,
                 parameters=parameters,
-                duration_cycles=int(plan_cfg.get("duration", 3)),
+                duration_cycles=duration_cycles,
                 created_at=_now(),
                 status="scheduled",
+                notes=notes,
             )
 
             self._append_jsonl(EXPERIMENTS_LOG, exp.to_jsonl())
@@ -295,6 +317,128 @@ class MetacognitionExperimenter:
         if delta >= 0:
             return 0.0
         return max(-0.08, min(0.08, -delta * 0.5))
+
+    def _plan_candidates(self, metric: str) -> Sequence[Mapping[str, Any]]:
+        return PLAN_LIBRARY.get(metric, [])
+
+    @staticmethod
+    def _sanitize_plan_for_prompt(plan: Mapping[str, Any]) -> Mapping[str, Any]:
+        return {
+            "id": plan.get("id", ""),
+            "plan": plan.get("plan", {}),
+            "parameters": plan.get("parameters", {}),
+            "duration": plan.get("duration", 3),
+            "base_improve": plan.get("base_improve", 0.08),
+            "aggressiveness": plan.get("aggressiveness", 1.0),
+        }
+
+    @staticmethod
+    def _sanitize_plan_payload(plan: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(plan, Mapping):
+            return None
+        strategy = str(plan.get("strategy", "")).strip()
+        details = str(plan.get("details", "")).strip()
+        if not strategy and not details:
+            return None
+        payload: Dict[str, Any] = {}
+        payload["strategy"] = strategy or "custom_strategy"
+        payload["details"] = details or ""
+        if "domain" in plan:
+            payload["domain"] = str(plan.get("domain", "")).strip() or None
+        return {k: v for k, v in payload.items() if v is not None}
+
+    def _propose_experiment_with_llm(
+        self,
+        metric: str,
+        baseline: float,
+        threshold: float,
+    ) -> Optional[Dict[str, Any]]:
+        plan_candidates = list(self._plan_candidates(metric))
+        payload = {
+            "metric": metric,
+            "baseline": baseline,
+            "threshold": threshold,
+            "recent_stats": self.metric_stats.get(metric, {}),
+            "plan_history": self.plan_stats.get(metric, {}),
+            "plan_candidates": [
+                self._sanitize_plan_for_prompt(plan) for plan in plan_candidates
+            ],
+        }
+
+        response = try_call_llm_dict(
+            "metacognition_experiment_planner",
+            input_payload=json_sanitize(payload),
+            logger=LOGGER,
+        )
+
+        if not response:
+            return None
+
+        should_plan = response.get("should_plan", True)
+        if isinstance(should_plan, str):
+            should_plan = should_plan.strip().lower() not in {"", "false", "no", "0"}
+        if not bool(should_plan):
+            return {"skip": True}
+
+        plan_payload = self._sanitize_plan_payload(response.get("plan"))
+        if not plan_payload:
+            return None
+
+        plan_id_raw = response.get("plan_id") or plan_payload.get("strategy", "")
+        plan_id = str(plan_id_raw).strip() or plan_payload.get("strategy", "custom")
+
+        parameters_raw = response.get("parameters", {})
+        parameters: Dict[str, Any]
+        if isinstance(parameters_raw, Mapping):
+            parameters = {str(k): v for k, v in parameters_raw.items()}
+        else:
+            parameters = {}
+
+        duration_raw = response.get("duration_cycles", 3)
+        try:
+            duration_cycles = max(1, int(duration_raw))
+        except (TypeError, ValueError):
+            duration_cycles = 3
+
+        try:
+            target_change = float(response.get("target_change", 0.0))
+        except (TypeError, ValueError):
+            target_change = 0.0
+
+        reference_plan = next(
+            (plan for plan in plan_candidates if plan.get("id") == plan_id),
+            plan_candidates[0] if plan_candidates else None,
+        )
+
+        if target_change <= 0.0:
+            reference_cfg = reference_plan or {
+                "base_improve": 0.08,
+                "aggressiveness": 1.0,
+            }
+            target_change = self._adaptive_target_change(
+                metric,
+                baseline,
+                reference_cfg,
+            )
+
+        target_change = max(0.02, min(0.4, float(target_change)))
+
+        notes = str(response.get("notes", "")).strip()
+        try:
+            confidence = float(response.get("confidence", None))
+        except (TypeError, ValueError):
+            confidence = None
+        if confidence is not None:
+            notes = (notes + " " if notes else "") + f"(confiance LLM={confidence:.2f})"
+
+        return {
+            "plan": plan_payload,
+            "plan_id": plan_id,
+            "parameters": parameters,
+            "target_change": target_change,
+            "duration_cycles": duration_cycles,
+            "notes": notes,
+        }
 
     def _select_plan(self, metric: str) -> Optional[Dict[str, Any]]:
         plans = PLAN_LIBRARY.get(metric)
