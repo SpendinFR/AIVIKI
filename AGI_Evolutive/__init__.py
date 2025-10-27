@@ -11,9 +11,8 @@ deterministic heuristic profile so callers always receive a consistent shape.
 from __future__ import annotations
 
 import logging
-import pkgutil
 from pathlib import Path
-from typing import List, Mapping, MutableMapping, Sequence
+from typing import List, Mapping, MutableMapping, Sequence, Tuple
 
 from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
@@ -58,8 +57,21 @@ def package_overview(*, extra_notes: Sequence[str] | None = None) -> MutableMapp
 
 def _collect_package_stats() -> MutableMapping[str, object]:
     modules: List[str] = []
-    for module_info in pkgutil.walk_packages([str(_PACKAGE_ROOT)], prefix=f"{_PACKAGE_NAME}."):
-        modules.append(module_info.name)
+
+    stack: List[Tuple[Path, str]] = [(_PACKAGE_ROOT, _PACKAGE_NAME)]
+    while stack:
+        current_path, current_package = stack.pop()
+
+        if current_path != _PACKAGE_ROOT and (current_path / "__init__.py").exists():
+            modules.append(current_package)
+
+        for child in sorted(current_path.iterdir(), key=lambda path: path.name):
+            if child.name == "__pycache__":
+                continue
+            if child.is_file() and child.suffix == ".py" and child.name != "__init__.py":
+                modules.append(f"{current_package}.{child.stem}")
+            elif child.is_dir() and (child / "__init__.py").exists():
+                stack.append((child, f"{current_package}.{child.name}"))
 
     subpackages: List[MutableMapping[str, object]] = []
     for child in sorted(_PACKAGE_ROOT.iterdir()):
