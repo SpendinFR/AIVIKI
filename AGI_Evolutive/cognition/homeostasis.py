@@ -4,9 +4,10 @@ import math
 import os
 import random
 import time
-from typing import Any, Dict, Iterable, List, MutableMapping, Optional, Tuple
+from typing import Any, Dict, Iterable, List, MutableMapping, Optional, Tuple, Mapping
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 from AGI_Evolutive.core.config import cfg
 
@@ -351,11 +352,76 @@ class Homeostasis:
         score = max(-1.0, min(1.0, math.tanh(score)))
         return score
 
+    def _llm_adjust_from_feedback(
+        self,
+        text: str,
+        tokens: Iterable[str],
+        baseline_reward: float,
+    ) -> Dict[str, Any]:
+        payload = {
+            "feedback": text,
+            "tokens": list(tokens)[:50],
+            "current_drives": self.state.get("drives", {}),
+            "recent_rewards": {
+                "intrinsic": self.state.get("intrinsic_reward"),
+                "extrinsic": self.state.get("extrinsic_reward"),
+                "hedonic": self.state.get("hedonic_reward"),
+            },
+            "baseline_reward": baseline_reward,
+        }
+
+        llm_result = try_call_llm_dict(
+            "homeostasis",
+            input_payload=payload,
+            logger=logger,
+        )
+
+        report: Dict[str, Any] = {}
+        if isinstance(llm_result, Dict):
+            drive_updates = llm_result.get("drive_updates")
+            if isinstance(drive_updates, Mapping):
+                applied: Dict[str, float] = {}
+                for drive, delta in drive_updates.items():
+                    try:
+                        adjustment = float(delta)
+                    except (TypeError, ValueError):
+                        continue
+                    if drive not in self.state.get("drives", {}):
+                        continue
+                    self._apply_drive_update(drive, adjustment, max_step=0.12)
+                    applied[drive] = float(self.state["drives"].get(drive, 0.5))
+                if applied:
+                    report["drive_updates"] = applied
+            reward_signal = llm_result.get("reward_signal")
+            try:
+                if reward_signal is not None:
+                    reward_value = max(-1.0, min(1.0, float(reward_signal)))
+                    report["reward_signal"] = reward_value
+            except (TypeError, ValueError):
+                pass
+            notes = llm_result.get("notes")
+            if isinstance(notes, str) and notes.strip():
+                report["notes"] = notes.strip()
+        return report
+
     def compute_extrinsic_reward_from_memories(self, recent_feedback: str) -> float:
         text = (recent_feedback or "").strip()
         tokens = self._normalise_text(text)
         bonus = self._sentiment_score(tokens)
-        self.state["extrinsic_reward"] = bonus
+        llm_report = self._llm_adjust_from_feedback(text, tokens, bonus)
+        reward_value = bonus
+        if isinstance(llm_report, Mapping) and "reward_signal" in llm_report:
+            reward_value = float(llm_report["reward_signal"])
+        self.state["extrinsic_reward"] = max(-1.0, min(1.0, reward_value))
+        if isinstance(llm_report, Mapping):
+            feedback_meta = self.state.setdefault("meta", {}).setdefault("llm_feedback", {})
+            feedback_meta.update(
+                {
+                    "last_report": llm_report,
+                    "text": text[:200],
+                    "ts": _now(),
+                }
+            )
         self._save()
         return self.state["extrinsic_reward"]
 

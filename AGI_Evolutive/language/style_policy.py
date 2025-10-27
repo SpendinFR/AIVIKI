@@ -9,6 +9,8 @@ import time
 from dataclasses import dataclass, field
 from typing import ClassVar, Dict, List, Optional, Tuple
 
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
 
 logger = logging.getLogger(__name__)
 
@@ -224,6 +226,35 @@ class StylePolicy:
         t = (text or "").lower()
         hints: Dict[str, float] = {}
 
+        llm_response = try_call_llm_dict(
+            "style_policy",
+            input_payload={
+                "instruction": text,
+                "mode": self.current_mode,
+                "persona_tone": self.persona_tone,
+                "current": {
+                    "chaleur": float(self.params.get("warmth", 0.5)),
+                    "directivite": float(self.params.get("directness", 0.5)),
+                    "questionnement": float(self.params.get("asking_rate", 0.4)),
+                },
+            },
+            logger=logger,
+        )
+        if llm_response and isinstance(llm_response.get("directives"), dict):
+            directives = llm_response["directives"]
+            chaleur = directives.get("chaleur")
+            directivite = directives.get("directivite")
+            questionnement = directives.get("questionnement")
+            try:
+                if chaleur is not None:
+                    hints["warmth"] = self._clip(float(chaleur))
+                if directivite is not None:
+                    hints["directness"] = self._clip(float(directivite))
+                if questionnement is not None:
+                    hints["asking_rate"] = self._clip(float(questionnement))
+            except (TypeError, ValueError):
+                logger.debug("StylePolicy LLM directives invalid: %r", directives)
+
         maybe_mode = self._detect_mode_keyword(t)
         if maybe_mode:
             self.set_mode(maybe_mode, persona_tone=self.persona_tone)
@@ -251,7 +282,7 @@ class StylePolicy:
         if hints:
             logger.debug(
                 "StylePolicy.adapt_from_instruction",
-                extra={"text": text, "hints": hints},
+                extra={"text": text, "hints": hints, "llm": bool(llm_response)},
             )
 
         return hints
