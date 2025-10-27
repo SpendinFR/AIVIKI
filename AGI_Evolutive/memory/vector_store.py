@@ -10,18 +10,22 @@ strategy.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import random
 import time
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from AGI_Evolutive.core.config import cfg
 from AGI_Evolutive.memory.encoders import TinyEncoder, cosine as cosine_similarity
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 _DIR = cfg()["VECTOR_DIR"]
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _clamp(value: float, bounds: Tuple[float, float]) -> float:
@@ -144,6 +148,7 @@ class VectorStore:
         self._last_matches: Dict[str, _MatchContext] = {}
         self._last_candidate: Optional[int] = None
         self._load()
+        self._last_llm_ranking: Dict[str, Any] = {}
 
     # ------------------------------------------------------------------
     # Persistence helpers
@@ -247,12 +252,55 @@ class VectorStore:
         self._last_candidate = candidate_idx
 
         top_hits: List[Tuple[str, float]] = []
+        hit_details: List[Dict[str, Any]] = []
         for doc_id, score in scores[: max(1, k)]:
             data = self._documents.get(doc_id)
             if not data:
                 continue
             data["usage"] = int(data.get("usage", 0)) + 1
-            top_hits.append((doc_id, float(round(score, 6))))
+            rounded = float(round(score, 6))
+            top_hits.append((doc_id, rounded))
+            context = self._last_matches.get(doc_id)
+            hit_details.append(
+                {
+                    "id": doc_id,
+                    "score": rounded,
+                    "text": data.get("text", ""),
+                    "features": context.features if context else {},
+                }
+            )
+        llm_response = try_call_llm_dict(
+            "memory_vector_guidance",
+            input_payload={"query": query, "candidates": hit_details},
+            logger=LOGGER,
+        )
+        if llm_response:
+            self._last_llm_ranking = dict(llm_response)
+            adjustments: Dict[str, Dict[str, Any]] = {}
+            for entry in llm_response.get("reranked", []):
+                if isinstance(entry, Mapping) and entry.get("id"):
+                    adjustments[str(entry["id"])] = dict(entry)
+            if adjustments:
+                augmented: List[Tuple[str, float]] = []
+                for detail in hit_details:
+                    doc_id = detail["id"]
+                    boost = 0.0
+                    comment = None
+                    if doc_id in adjustments:
+                        boost = float(adjustments[doc_id].get("boost", 0.0))
+                        comment = adjustments[doc_id].get("comment")
+                    new_score = float(round(detail["score"] + boost, 6))
+                    detail["score"] = new_score
+                    if comment:
+                        context = self._documents.get(doc_id, {})
+                        notes = context.setdefault("llm_comments", [])
+                        if isinstance(notes, list):
+                            notes.append(comment)
+                    augmented.append((doc_id, new_score))
+                augmented.sort(key=lambda item: item[1], reverse=True)
+                top_hits = augmented
+        else:
+            self._last_llm_ranking = {}
         self._save()
         return top_hits
 

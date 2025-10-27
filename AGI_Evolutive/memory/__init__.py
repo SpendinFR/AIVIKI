@@ -4,6 +4,7 @@ Système de Mémoire Complet de l'AGI Évolutive
 Intègre mémoire de travail, épisodique, sémantique, procédurale et consolidation
 """
 
+import logging
 import math
 import random
 from typing import Any, Iterable
@@ -98,6 +99,9 @@ from .semantic_memory_manager import (
 )
 from .semantic_manager import SemanticMemoryManager as _ConceptMemoryManager
 from .alltime import LongTermMemoryHub
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+LOGGER = logging.getLogger(__name__)
 
 __all__ = [
     "MemorySystem",
@@ -1628,12 +1632,39 @@ class MemorySystem:
         self.consolidation_process["last_consolidation_time"] = time.time()
         
         print(f"🔄 Consolidation: {consolidated_count} mémoires consolidées, {forgotten_count} oubliées")
-        
-        return {
+
+        result = {
             "consolidated": consolidated_count,
             "forgotten": forgotten_count,
-            "duration": time.time() - consolidation_start
+            "duration": time.time() - consolidation_start,
         }
+
+        llm_payload = {
+            "consolidated": consolidated_count,
+            "forgotten": forgotten_count,
+            "intensity": float(consolidation_intensity),
+            "queues": {
+                "active": len(self.consolidation_process.get("active_consolidation", [])),
+                "pending": len(self.consolidation_process.get("pending", [])),
+            },
+            "inventory": {
+                memory_type.value: len(bucket)
+                for memory_type, bucket in self.long_term_memory.items()
+            },
+        }
+
+        llm_response = try_call_llm_dict(
+            "memory_consolidator",
+            input_payload=llm_payload,
+            logger=LOGGER,
+        )
+        if llm_response:
+            if llm_response.get("lessons"):
+                result["llm_lessons"] = list(llm_response.get("lessons", []))
+            if llm_response.get("notes"):
+                result["llm_notes"] = llm_response.get("notes")
+
+        return result
     
     def _consolidate_single_memory(self, memory: MemoryTrace, intensity: float) -> bool:
         """Consolide une mémoire individuelle"""
@@ -1744,13 +1775,49 @@ class MemorySystem:
         average_coherence = total_coherence / (len(significant_events) - 1) if len(significant_events) > 1 else 1.0
         
         narrative = " • ".join(narrative_parts)
-        
-        return {
+
+        result = {
             "narrative": narrative,
             "coherence": average_coherence,
             "significant_events": len(significant_events),
-            "timespan": episodic_memories[-1].timestamp - episodic_memories[0].timestamp
+            "timespan": episodic_memories[-1].timestamp - episodic_memories[0].timestamp,
         }
+
+        if significant_events:
+            llm_payload = {
+                "base_narrative": narrative,
+                "initial_coherence": average_coherence,
+                "events": [
+                    {
+                        "id": event.id,
+                        "timestamp": event.timestamp,
+                        "strength": event.strength,
+                        "valence": event.valence,
+                        "description": self._describe_memory_event(event),
+                    }
+                    for event in significant_events[:10]
+                ],
+            }
+            llm_response = try_call_llm_dict(
+                "memory_system_narrative",
+                input_payload=llm_payload,
+                logger=LOGGER,
+            )
+            if llm_response:
+                enhanced = llm_response.get("enhanced_narrative")
+                if enhanced:
+                    result["llm_enhanced_narrative"] = str(enhanced)
+                if "coherence" in llm_response:
+                    try:
+                        result["coherence"] = float(llm_response["coherence"])
+                    except Exception:
+                        pass
+                if llm_response.get("insights"):
+                    result["llm_insights"] = list(llm_response.get("insights", []))
+                if llm_response.get("notes"):
+                    result["llm_notes"] = llm_response.get("notes")
+
+        return result
     
     def _describe_memory_event(self, memory: MemoryTrace) -> str:
         """Génère une description textuelle d'un événement mémoire"""

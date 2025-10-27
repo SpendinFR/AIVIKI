@@ -64,6 +64,7 @@ scoring heuristic. You can plug an LLM by passing `llm_summarize_fn` if desired.
 from __future__ import annotations
 
 
+import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -72,6 +73,10 @@ import math
 import random
 from typing import Callable, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 import time
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+LOGGER = logging.getLogger(__name__)
 
 
 DAY_SECONDS = 24 * 3600
@@ -314,6 +319,7 @@ class ProgressiveSummarizer:
         self.ttl_strategy = AdaptiveTTLStrategy(self.config.adaptive_ttl)
         self._hydrate_fingerprint_cache()
         self._ingest_feedback_history()
+        self.last_llm_summary: Optional[Mapping[str, object]] = None
 
     # ------------------------------------------------------------------
     def step(self, now: Optional[float] = None) -> MutableMapping[str, object]:
@@ -568,6 +574,29 @@ class ProgressiveSummarizer:
         structured_items = [item for item in structured_items if item["text"]]
         if not structured_items:
             return ""
+        llm_payload = {
+            "level": level,
+            "period": {"start_ts": start_ts, "end_ts": end_ts},
+            "items": [
+                {
+                    "id": entry.get("id"),
+                    "text": entry["text"],
+                    "score": entry["score"],
+                    "kind": entry.get("kind"),
+                }
+                for entry in structured_items[:20]
+            ],
+        }
+        llm_response = try_call_llm_dict(
+            "memory_summarizer_guidance",
+            input_payload=llm_payload,
+            logger=LOGGER,
+        )
+        if llm_response:
+            self.last_llm_summary = llm_response
+            summary_text = llm_response.get("summary")
+            if summary_text:
+                return str(summary_text)
         if self.llm_summarize_fn is not None:
             try:
                 return str(self.llm_summarize_fn(level, structured_items))
