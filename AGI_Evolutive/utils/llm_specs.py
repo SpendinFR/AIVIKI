@@ -375,6 +375,35 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         },
     ),
     _spec(
+        "emotional_system_appraisal",
+        "AGI_Evolutive/emotions/__init__.py",
+        "Analyse un stimulus et propose une évaluation émotionnelle détaillée.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Retourne un objet 'appraisal' avec desirability (-1 à 1), certainty, urgency, impact et controllability (0 à 1).",
+            "Indique 'primary_emotion' (en français) et 'primary_intensity' entre 0 et 1.",
+            "Optionnellement, ajoute 'secondary_candidates' (liste d'objets {emotion, intensity}) et 'emotion_scores'.",
+        ),
+        example_output={
+            "appraisal": {
+                "desirability": -0.4,
+                "certainty": 0.7,
+                "urgency": 0.6,
+                "impact": 0.8,
+                "controllability": 0.3,
+            },
+            "primary_emotion": "tristesse",
+            "primary_intensity": 0.75,
+            "secondary_candidates": [
+                {"emotion": "anxiété", "intensity": 0.5},
+                {"emotion": "frustration", "intensity": 0.35},
+            ],
+            "emotion_scores": {"tristesse": 0.75, "anxiété": 0.5},
+            "justification": "Incident critique menaçant un objectif important, peu de contrôle immédiat.",
+            "notes": "",
+        },
+    ),
+    _spec(
         "autonomy_core",
         "AGI_Evolutive/autonomy/core.py",
         "Propose des micro-actions adaptées au contexte d'autonomie.",
