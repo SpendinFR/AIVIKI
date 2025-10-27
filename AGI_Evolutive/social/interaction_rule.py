@@ -1,11 +1,15 @@
 # Représentation robuste d'un "pattern d’interaction" comme règle sociale testable
 # Forme : ⟨ Contexte → Tactique → Effets_attendus ⟩ + incertitude (postérieurs Beta par effet)
-# Aucun appel LLM. 100% JSON-sérialisable. N’abîme pas votre architecture.
+# Intègre un appel LLM optionnel (fallback heuristique conservé). 100% JSON-sérialisable.
 
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional, Tuple
-import time, math, hashlib, json
+import time, math, hashlib, json, logging
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+LOGGER = logging.getLogger(__name__)
 
 
 class OnlineLinear:
@@ -552,6 +556,107 @@ class ContextBuilder:
     pas le confondre avec :class:`AGI_Evolutive.conversation.context.ContextBuilder`
     qui, lui, assemble un résumé narratif pour l'interface de conversation.
     """
+
+    @staticmethod
+    def _sanitize_mapping(data: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not isinstance(data, dict):
+            return None
+        sanitized: Dict[str, Any] = {}
+        for key, value in data.items():
+            if not isinstance(key, str):
+                continue
+            if isinstance(value, (str, float, int, bool)) or value is None:
+                sanitized[key] = value
+            elif isinstance(value, (list, tuple)):
+                collected: List[Any] = []
+                for item in list(value)[:6]:
+                    if isinstance(item, (str, float, int, bool)):
+                        collected.append(item)
+                if collected:
+                    sanitized[key] = collected
+            elif isinstance(value, dict):
+                nested = ContextBuilder._sanitize_mapping(value)
+                if nested:
+                    sanitized[key] = nested
+        return sanitized or None
+
+    @staticmethod
+    def _recent_history(arch) -> List[Dict[str, str]]:
+        state = getattr(arch, "conversation_state", None)
+        turns = getattr(state, "recent_turns", None)
+        history: List[Dict[str, str]] = []
+        if isinstance(turns, list):
+            for turn in turns[-6:]:
+                if not isinstance(turn, dict):
+                    continue
+                speaker = turn.get("speaker")
+                text = turn.get("text")
+                if isinstance(speaker, str) and isinstance(text, str):
+                    sp = speaker.strip()
+                    tx = text.strip()
+                    if sp and tx:
+                        history.append({"speaker": sp, "text": tx})
+        return history
+
+    @staticmethod
+    def _last_text(source: Any, candidates: Tuple[str, ...]) -> Optional[str]:
+        if source is None:
+            return None
+        for name in candidates:
+            value = getattr(source, name, None)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    @staticmethod
+    def _llm_payload(arch, baseline: Dict[str, Any], extra: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        state = getattr(arch, "conversation_state", None)
+        last_user = ContextBuilder._last_text(
+            state,
+            ("last_user_message", "last_user_text", "last_user", "last_user_msg"),
+        )
+        if not last_user:
+            candidate = getattr(arch, "last_user_msg", None)
+            if isinstance(candidate, str) and candidate.strip():
+                last_user = candidate.strip()
+        last_agent = ContextBuilder._last_text(
+            state,
+            ("last_agent_reply", "last_response", "last_agent_message", "last_rendered_reply"),
+        )
+        history = ContextBuilder._recent_history(arch)
+        payload: Dict[str, Any] = {
+            "baseline": ContextBuilder._sanitize_mapping(baseline),
+            "extra": ContextBuilder._sanitize_mapping(extra) if isinstance(extra, dict) else None,
+            "recent_messages": {
+                "user": last_user,
+                "assistant": last_agent,
+            },
+            "history": history or None,
+            "user_id": getattr(arch, "last_user_id", None) or getattr(arch, "user_id", None),
+        }
+        recent = {
+            key: value for key, value in payload["recent_messages"].items() if isinstance(value, str) and value
+        }
+        if recent:
+            payload["recent_messages"] = recent
+        else:
+            payload.pop("recent_messages")
+        if payload.get("extra") is None:
+            payload.pop("extra")
+        if payload.get("history") is None:
+            payload.pop("history")
+        return {k: v for k, v in payload.items() if v}
+
+    @staticmethod
+    def _llm_enrich(arch, baseline: Dict[str, Any], extra: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        payload = ContextBuilder._llm_payload(arch, baseline, extra)
+        response = try_call_llm_dict(
+            "social_interaction_context",
+            input_payload=payload,
+            logger=LOGGER,
+        )
+        return dict(response) if isinstance(response, dict) else None
+
     @staticmethod
     def build(arch, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         ctx: Dict[str, Any] = {
@@ -573,8 +678,34 @@ class ContextBuilder:
             # goal parent actif le plus saillant
             "parent_goal": ContextBuilder._active_parent_goal(arch),
         }
+        baseline_copy = dict(ctx)
         if extra:
             ctx.update(extra)
+        llm_response = ContextBuilder._llm_enrich(arch, baseline_copy, extra)
+        if llm_response:
+            context_updates = llm_response.get("context")
+            if isinstance(context_updates, dict):
+                for key, value in context_updates.items():
+                    if key == "topics" and isinstance(value, list):
+                        topics = [str(v) for v in value if isinstance(v, str)]
+                        if topics:
+                            ctx["topics"] = topics
+                        continue
+                    if isinstance(value, (str, float, int, bool)):
+                        ctx[key] = value
+                    elif isinstance(value, dict):
+                        ctx[key] = value
+            meta: Dict[str, Any] = {}
+            if "confidence" in llm_response:
+                try:
+                    meta["confidence"] = float(llm_response["confidence"])
+                except (TypeError, ValueError):
+                    pass
+            notes = llm_response.get("notes")
+            if isinstance(notes, str) and notes.strip():
+                meta["notes"] = notes.strip()
+            if meta:
+                ctx.setdefault("_llm_context", meta)
         return ctx
 
     @staticmethod

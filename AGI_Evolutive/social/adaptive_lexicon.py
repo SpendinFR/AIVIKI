@@ -7,7 +7,11 @@
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from typing import Dict, Any, List, Optional, Tuple
-import re, json, os, time, math, unicodedata, random
+import re, json, os, time, math, unicodedata, random, logging
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+LOGGER = logging.getLogger(__name__)
 
 # ----------------- utilitaires -----------------
 def _now(): return time.time()
@@ -409,6 +413,96 @@ class AdaptiveLexicon:
             if e.dormant and not was_dormant:
                 self._record_ttl_feedback(e, success=False)
 
+    def _llm_extract_markers(
+        self,
+        user_msg: str,
+        reward01: float,
+        confidence: float,
+        user_id: Optional[str],
+        candidate_ngrams: List[str],
+    ) -> Tuple[List[Tuple[str, Dict[str, Any]]], Optional[float], Optional[Dict[str, Any]]]:
+        """Ask the LLM to highlight salient markers present in ``user_msg``.
+
+        Returns the normalized markers along with their metadata, an optional
+        reward hint, and the raw response payload.  When the LLM integration is
+        disabled or fails, empty defaults are returned so the caller can rely
+        purely on the heuristic n-gram extraction.
+        """
+
+        if not user_msg:
+            return ([], None, None)
+
+        payload = {
+            "message": str(user_msg),
+            "reward": clamp(float(reward01), 0.0, 1.0),
+            "confidence": clamp(float(confidence), 0.0, 1.0),
+            "user_id": user_id or "default",
+            "candidate_markers": candidate_ngrams[:12],
+        }
+
+        response = try_call_llm_dict(
+            "social_adaptive_lexicon",
+            input_payload=payload,
+            logger=LOGGER,
+        )
+        if not isinstance(response, dict):
+            return ([], None, None)
+
+        markers: List[Tuple[str, Dict[str, Any]]] = []
+        raw_markers = response.get("markers")
+        if isinstance(raw_markers, list):
+            for entry in raw_markers:
+                if not isinstance(entry, dict):
+                    continue
+                phrase = _normalize(str(entry.get("phrase") or ""))
+                if not phrase or phrase in _STOPWORDS:
+                    continue
+                markers.append((phrase, entry))
+
+        reward_hint = response.get("reward_hint")
+        try:
+            reward_hint_value: Optional[float]
+            if reward_hint is None:
+                reward_hint_value = None
+            else:
+                reward_hint_value = clamp(float(reward_hint), 0.0, 1.0)
+        except (TypeError, ValueError):
+            reward_hint_value = None
+
+        try:
+            setattr(self.arch, "_lexicon_last_llm_response", response)
+        except Exception:
+            pass
+
+        return markers, reward_hint_value, response
+
+    @staticmethod
+    def _llm_marker_reward(markers: List[Tuple[str, Dict[str, Any]]]) -> Optional[float]:
+        if not markers:
+            return None
+        weight_sum = 0.0
+        score_sum = 0.0
+        for _phrase, meta in markers:
+            polarity = str(meta.get("polarity") or "").strip().lower()
+            if polarity not in {"positive", "negative", "neutral", "mixed"}:
+                continue
+            try:
+                confidence = clamp(float(meta.get("confidence", 0.6)), 0.0, 1.0)
+            except (TypeError, ValueError):
+                confidence = 0.6
+            base = 0.5
+            if polarity == "positive":
+                base = 0.85
+            elif polarity == "negative":
+                base = 0.15
+            elif polarity in {"neutral", "mixed"}:
+                base = 0.5
+            score_sum += base * confidence
+            weight_sum += confidence
+        if weight_sum <= 0.0:
+            return None
+        return clamp(score_sum / weight_sum, 0.0, 1.0)
+
     def _apply_decay_and_floor(self, e: LexEntry):
         decay = float(self.cfg["lexicon_retention"].get("decay", 0.995))
         floor = float(self.cfg["lexicon_retention"].get("floor_alpha_beta", 1.0))
@@ -444,6 +538,32 @@ class AdaptiveLexicon:
         # évite unigrams stopwords
         grams = [g for g in grams if not (len(g.split())==1 and g in _STOPWORDS)]
 
+        llm_markers, reward_hint, llm_response = self._llm_extract_markers(
+            user_msg,
+            reward01,
+            confidence,
+            user_id,
+            grams,
+        )
+        marker_reward = self._llm_marker_reward(llm_markers)
+        llm_confidence = None
+        if isinstance(llm_response, dict):
+            try:
+                llm_confidence = clamp(float(llm_response.get("confidence", 0.0)), 0.0, 1.0)
+            except (TypeError, ValueError):
+                llm_confidence = None
+
+        merged: List[str] = []
+        seen = set()
+        for candidate in grams + [phrase for phrase, _ in llm_markers]:
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            merged.append(candidate)
+        grams = merged
+
+        marker_meta: Dict[str, Dict[str, Any]] = {phrase: meta for phrase, meta in llm_markers}
+
         now = _now()
         for g in grams:
             e = self._ensure_active(g)
@@ -461,6 +581,11 @@ class AdaptiveLexicon:
             # update ACTIVE selon reward
             r = clamp(float(reward01), 0.0, 1.0)
             conf = clamp(float(confidence), 0.0, 1.0)
+            if llm_confidence is not None:
+                conf = clamp(0.6 * conf + 0.4 * llm_confidence, 0.0, 1.0)
+            blended_hint = reward_hint if reward_hint is not None else marker_reward
+            if blended_hint is not None:
+                r = clamp(0.65 * r + 0.35 * blended_hint, 0.0, 1.0)
 
             prob = self.calibrator.score(
                 entry=e,
@@ -472,6 +597,22 @@ class AdaptiveLexicon:
             )
             pos_factor = 0.6 + 0.4 * prob
             neg_factor = 0.6 + 0.4 * (1.0 - prob)
+
+            meta = marker_meta.get(g)
+            if meta:
+                tags = list(e.tags or [])
+                if "source:llm" not in tags:
+                    tags.append("source:llm")
+                polarity = str(meta.get("polarity") or "").strip().lower()
+                if polarity:
+                    tags = [t for t in tags if not t.startswith("polarity:")]
+                    tags.append(f"polarity:{polarity}")
+                rationale = str(meta.get("rationale") or "").strip()
+                if rationale:
+                    short = rationale[:60]
+                    if short and f"hint:{short}" not in tags:
+                        tags.append(f"hint:{short}")
+                e.tags = tags
 
             if r >= 0.6:
                 e.alpha_pos += conf * pos_factor
