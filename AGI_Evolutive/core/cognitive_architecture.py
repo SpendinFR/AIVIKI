@@ -370,6 +370,9 @@ class CognitiveArchitecture:
             simulator=self.simulator,
             jobs=self.jobs,
             arch=self,
+            interface=self.action_interface,
+            question_manager=getattr(self, "question_manager", None),
+            perception=self.perception_interface,
         )
 
         # Bind helper components
