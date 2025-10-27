@@ -1388,6 +1388,92 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
             "notes": "",
         },
     ),
+    _spec(
+        "autonomy_seed_proposals",
+        "AGI_Evolutive/autonomy/__init__.py",
+        "Analyse l'état interne de l'autonomie et propose des items d'agenda priorisés.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Retourne 2 à 5 éléments dans 'proposals'.",
+            "Chaque élément doit inclure title, kind, priority (0-1), rationale et payload.action.",
+            "Autorise uniquement les types: learning, reasoning, intake, alignment, meta.",
+        ),
+        example_output={
+            "proposals": [
+                {
+                    "title": "Renforcer la capacité reasoning",
+                    "kind": "learning",
+                    "priority": 0.82,
+                    "rationale": "La métrique 'reasoning' montre une tendance baissière.",
+                    "payload": {"action": "improve_metric", "metric": "reasoning"},
+                    "dedupe_key": "metric:reasoning",
+                }
+            ],
+            "notes": "",
+        },
+    ),
+    _spec(
+        "autonomy_clarifying_question",
+        "AGI_Evolutive/autonomy/__init__.py",
+        "Formule une question de clarification unique tenant compte des incertitudes actuelles.",
+        AVAILABLE_MODELS["fast"],
+        extra_instructions=(
+            "Retourne un champ 'question' adressé directement à l'utilisateur.",
+            "Optionnellement, ajoute 'alternatives' (liste courte) classées par priorité.",
+        ),
+        example_output={
+            "question": "Avant d'avancer, quelle livraison souhaites-tu prioriser et pour quand ?",
+            "alternatives": [
+                "As-tu des contraintes de format ou de ton à respecter ?",
+                "Dois-je privilégier l'exploration ou la fiabilité immédiate ?",
+            ],
+            "notes": "",
+        },
+    ),
+    _spec(
+        "autonomy_intention_evaluation",
+        "AGI_Evolutive/autonomy/auto_evolution.py",
+        "Évalue l'intérêt d'une intention autonome et décide de sa promotion.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Fixe 'accepted' à true ou false selon la promotion recommandée.",
+            "Fournis 'significance', 'alignment' et 'emotional_drive' entre 0 et 1.",
+            "Liste les risques critiques dans 'risks' (peut être vide).",
+        ),
+        example_output={
+            "accepted": True,
+            "significance": 0.74,
+            "alignment": 0.68,
+            "emotional_drive": 0.52,
+            "risks": ["dépendance à une source unique"],
+            "recommended_actions": ["prévoir une vérification humaine"],
+            "notes": "",
+        },
+    ),
+    _spec(
+        "autonomy_signal_derivation",
+        "AGI_Evolutive/autonomy/auto_signals.py",
+        "Propose des signaux de suivi autonomes adaptés à l'action décrite.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Chaque signal doit inclure name, metric, target (0-1), direction ('above' ou 'below') et weight.",
+            "Appuie chaque signal sur un mot-clé ou une justification concise.",
+        ),
+        example_output={
+            "signals": [
+                {
+                    "name": "analyse_inbox__latency",
+                    "metric": "latency_index",
+                    "target": 0.65,
+                    "direction": "below",
+                    "weight": 1.2,
+                    "source_keyword": "latency",
+                    "rationale": "Limiter le temps de traitement des nouveaux fichiers.",
+                }
+            ],
+            "notes": "",
+        },
+    ),
 )
 
 
