@@ -4,6 +4,7 @@ Language v2: NLU à cadres + état de dialogue + self-ask
 - Génère des questions ciblées si incertitude élevée.
 - Retourne une frame riche + propose une réponse non-générique.
 """
+import logging
 import math
 import random
 import re
@@ -12,9 +13,19 @@ import unicodedata
 from collections import Counter, defaultdict, deque
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+from AGI_Evolutive.utils.llm_service import (
+    LLMIntegrationError,
+    LLMUnavailableError,
+    get_llm_manager,
+    is_llm_enabled,
+)
+
 from AGI_Evolutive.models.intent import IntentModel
 from .dialogue_state import DialogueState
 from .frames import DialogueAct, UtteranceFrame
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _normalize(text: str) -> str:
@@ -30,6 +41,13 @@ def _strip_accents(text: str) -> str:
 
 def _canonicalize(text: str) -> str:
     return _strip_accents(text).lower().strip()
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _pearson(xs: List[float], ys: List[float]) -> Optional[float]:
@@ -76,6 +94,14 @@ STOPWORDS = {
         "stp",
     }
 }
+
+
+def _llm_enabled() -> bool:
+    return is_llm_enabled()
+
+
+def _llm_manager():
+    return get_llm_manager()
 
 
 RE_HEDGES = re.compile(r"\b(peut[- ]?etre|peux[- ]?etre|je crois|je pense|il me semble|maybe)\b", re.IGNORECASE)
@@ -256,17 +282,97 @@ class SemanticUnderstanding:
         self.uncertainty_tracker = AdaptiveEMA()
         self._uncertainty_history: deque = deque(maxlen=64)
         self.uncertainty_correlation: Optional[float] = None
+        self._last_llm_understanding: Optional[Mapping[str, Any]] = None
 
     # ---------- PUBLIC API ----------
+    def _invoke_llm_understanding(
+        self,
+        text: str,
+        context: Optional[Dict[str, Any]],
+        norm: str,
+        canonical: str,
+    ) -> Optional[Mapping[str, Any]]:
+        if not _llm_enabled():
+            return None
+
+        try:
+            state_snapshot = self.state.to_dict()
+        except Exception:
+            state_snapshot = {}
+
+        payload = {
+            "utterance": text,
+            "normalized": norm,
+            "canonical": canonical,
+            "dialogue_state": state_snapshot,
+            "context": context or {},
+            "recent_unknown_terms": list(self.state.user_profile.get("unknown_terms", []))[-10:],
+        }
+
+        try:
+            response = _llm_manager().call_dict(
+                "language_understanding",
+                input_payload=payload,
+            )
+        except (LLMUnavailableError, LLMIntegrationError):
+            LOGGER.debug("LLM understanding unavailable", exc_info=True)
+            return None
+
+        if not isinstance(response, Mapping):
+            return None
+
+        self._last_llm_understanding = dict(response)
+        return self._last_llm_understanding
+
     def parse_utterance(self, text: str, context: Optional[Dict[str, Any]] = None) -> UtteranceFrame:
         context = context or {}
         raw = text or ""
         norm = _normalize(raw)
         canonical = _canonicalize(raw)
 
+        llm_bundle = self._invoke_llm_understanding(raw, context, norm, canonical)
+        llm_confidence = 0.0
+        if llm_bundle:
+            llm_confidence = _safe_float(
+                llm_bundle.get("confidence", llm_bundle.get("confidence_score", 0.0)),
+                0.0,
+            )
+
         intent, conf = self._classify_intent(raw, norm, canonical)
+        if llm_bundle:
+            llm_intent = llm_bundle.get("intent")
+            if isinstance(llm_intent, str) and llm_intent.strip():
+                intent = llm_intent.strip()
+                if llm_confidence <= 0.0:
+                    llm_confidence = 0.72
+                conf = max(conf, max(0.0, min(1.0, llm_confidence)))
+
         acts = self._guess_dialogue_acts(intent, norm)
         slots, unknowns = self._extract_slots(intent, norm, canonical)
+
+        llm_needs_buffer: List[str] = []
+        if llm_bundle:
+            llm_slots = llm_bundle.get("slots")
+            if isinstance(llm_slots, Mapping):
+                for key, value in llm_slots.items():
+                    if value is not None:
+                        slots.setdefault(key, value)
+            llm_entities = llm_bundle.get("entities")
+            if isinstance(llm_entities, list) and llm_entities:
+                slots.setdefault("entities", llm_entities)
+            follow_ups = llm_bundle.get("follow_up_questions")
+            if isinstance(follow_ups, list):
+                for question in follow_ups:
+                    if isinstance(question, str) and question.strip():
+                        self.state.add_pending_question(question.strip())
+            llm_unknowns = llm_bundle.get("unknown_terms")
+            if isinstance(llm_unknowns, list):
+                for term in llm_unknowns:
+                    if isinstance(term, str) and term and term not in unknowns:
+                        unknowns.append(term)
+            llm_needs = llm_bundle.get("needs")
+            if isinstance(llm_needs, list):
+                llm_needs_buffer.extend(str(item) for item in llm_needs if isinstance(item, str))
 
         # Signaux d'incertitude
         uncertainty = self._compute_uncertainty(conf, unknowns, norm, canonical)
@@ -293,6 +399,17 @@ class SemanticUnderstanding:
             needs=[],
         )
 
+        if llm_bundle:
+            frame.meta["llm_understanding"] = llm_bundle
+            canonical_query = llm_bundle.get("canonical_query")
+            if isinstance(canonical_query, str) and canonical_query:
+                frame.meta.setdefault("canonical_query", canonical_query)
+            tone = llm_bundle.get("tone")
+            if isinstance(tone, str) and tone:
+                frame.meta.setdefault("tone", tone)
+            if llm_needs_buffer:
+                frame.needs.extend(llm_needs_buffer)
+
         # Mettre à jour l'état de dialogue
         self.state.update_with_frame(frame.to_dict())
         for t in unknowns:
@@ -300,6 +417,10 @@ class SemanticUnderstanding:
 
         # Besoins d'info (explicites)
         frame.needs = self._derive_needs(frame)
+        if llm_needs_buffer:
+            merged = list(frame.needs)
+            merged.extend(item for item in llm_needs_buffer if item not in merged)
+            frame.needs = merged
 
         return frame
 

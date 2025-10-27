@@ -11,6 +11,13 @@ from collections import deque
 import re
 from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
 
+import logging
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+LOGGER = logging.getLogger(__name__)
+
 try:  # numpy may be unavailable in lightweight environments
     import numpy as np  # type: ignore
 except ImportError:  # pragma: no cover - runtime fallback
@@ -254,6 +261,8 @@ class QuestionManager:
             "severity": _clip(severity),
             "metadata": metadata or {},
         }
+        if explicit_question:
+            entry["explicit_question"] = explicit_question
         self.uncertainty_log.append(entry)
 
         base_meta = {**(metadata or {})}
@@ -263,25 +272,105 @@ class QuestionManager:
         if focus:
             base_meta["focus"] = focus
 
+        llm_questions = self._llm_suggest_questions(
+            topic,
+            severity=entry["severity"],
+            base_meta=base_meta,
+            explicit_question=explicit_question,
+        )
+
+        if llm_questions:
+            for suggestion in llm_questions:
+                self._add_llm_question(entry, base_meta, suggestion)
+            return
+
         question_text = (explicit_question or "").strip()
         if not question_text:
             question_text = self._design_question(topic, base_meta, focus_override=focus)
         if not question_text:
             return
+        self._add_llm_question(
+            entry,
+            base_meta,
+            {"text": question_text, "reason": base_meta.get("focus")},
+        )
+
+    def _add_llm_question(
+        self,
+        base_entry: Dict[str, Any],
+        base_meta: Dict[str, Any],
+        suggestion: Dict[str, Any],
+    ) -> None:
+        text = str((suggestion or {}).get("text", "")).strip()
+        if not text:
+            return
+        severity = float(base_entry.get("severity", 0.0))
+        ts = float(base_entry.get("ts", time.time()))
         payload_meta = {
             **base_meta,
-            "severity": entry["severity"],
+            "severity": severity,
             "ts": ts,
-            "explicit": bool(explicit_question),
+            "explicit": bool(base_entry.get("explicit_question")),
         }
+        reason = suggestion.get("reason")
+        if reason:
+            payload_meta["llm_reason"] = reason
         payload = {
             "id": payload_meta.get("id") or str(uuid.uuid4()),
-            "type": payload_meta.get("type", topic),
-            "text": question_text,
-            "score": _clip(0.4 + 0.6 * entry["severity"]),
+            "type": payload_meta.get("type", base_meta.get("topic")),
+            "text": text,
+            "score": _clip(0.4 + 0.6 * severity),
             "meta": payload_meta,
         }
+        insights = suggestion.get("insights")
+        if isinstance(insights, list) and insights:
+            payload_meta["insights"] = [str(item) for item in insights if str(item).strip()]
         self._push_to_bank(payload)
+        if payload["text"] and not any(payload["text"] == q.get("text") for q in self.pending_questions):
+            self._enqueue_pending(payload)
+
+    def _llm_suggest_questions(
+        self,
+        topic: str,
+        *,
+        severity: float,
+        base_meta: Dict[str, Any],
+        explicit_question: Optional[str],
+    ) -> Optional[List[Dict[str, Any]]]:
+        payload = {
+            "topic": topic,
+            "severity": severity,
+            "metadata": base_meta,
+            "explicit_question": explicit_question,
+            "recent_questions": [
+                {
+                    "text": item.get("question"),
+                    "ts": item.get("ts"),
+                }
+                for item in list(self.question_history)[-10:]
+            ],
+            "pending": [q.get("text") for q in self.pending_questions],
+        }
+        response = try_call_llm_dict(
+            "question_manager",
+            input_payload=payload,
+            logger=LOGGER,
+            max_retries=2,
+        )
+        if not response:
+            return None
+        questions = response.get("questions")
+        if not isinstance(questions, list):
+            return None
+        cleaned: List[Dict[str, Any]] = []
+        for entry in questions:
+            if not isinstance(entry, dict):
+                continue
+            text = str(entry.get("text", "")).strip()
+            if not text:
+                continue
+            cleaned.append(entry)
+        return cleaned or None
 
     def maybe_generate_questions(self) -> None:
         """Sélectionne un petit lot de questions à proposer."""

@@ -1,5 +1,6 @@
 import argparse
 import json
+import logging
 import os
 import time
 from collections import Counter
@@ -10,7 +11,12 @@ from statistics import mean
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 from urllib.parse import parse_qs, urlparse
 
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
 JSONLike = Dict[str, Any]
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def read_jsonl(path: str) -> List[JSONLike]:
@@ -172,11 +178,27 @@ def compute_goal_metrics(goals: Sequence[JSONLike]) -> Dict[str, Any]:
 
 
 def compute_insights(data: Dict[str, List[JSONLike]]) -> Dict[str, Any]:
-    return {
+    base = {
         "reasoning": compute_reasoning_metrics(data.get("reasoning", [])),
         "experiments": compute_experiment_metrics(data.get("experiments", [])),
         "goals": compute_goal_metrics(data.get("goals", [])),
     }
+    llm_summary = try_call_llm_dict(
+        "runtime_dash",
+        input_payload={"metrics": base},
+        logger=LOGGER,
+    )
+    if llm_summary:
+        summary = llm_summary.get("daily_summary")
+        actions = llm_summary.get("recommended_actions")
+        if isinstance(summary, str):
+            base.setdefault("llm_report", {})["daily_summary"] = summary
+        if isinstance(actions, list):
+            base.setdefault("llm_report", {})["recommended_actions"] = actions
+        notes = llm_summary.get("notes")
+        if isinstance(notes, str):
+            base.setdefault("llm_report", {})["notes"] = notes
+    return base
 
 
 def format_metric(value: Optional[float]) -> str:

@@ -2,16 +2,34 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from collections import deque
 from dataclasses import dataclass
-from typing import Callable, Deque, Dict, Iterable, Optional, Pattern, List
+from typing import Any, Callable, Deque, Dict, Iterable, Mapping, Optional, Pattern, List
 
 from .dag_store import GoalNode
+from AGI_Evolutive.utils.llm_service import (
+    LLMIntegrationError,
+    LLMUnavailableError,
+    get_llm_manager,
+    is_llm_enabled,
+)
 
 
 ActionDeque = Deque[Dict[str, object]]
 HeuristicFn = Callable[[GoalNode, re.Match[str]], ActionDeque]
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _llm_enabled() -> bool:
+    return is_llm_enabled()
+
+
+def _llm_manager():
+    return get_llm_manager()
 
 
 def _topic_from_match(goal: GoalNode, match: re.Match[str]) -> str:
@@ -28,6 +46,105 @@ def _topic_from_match(goal: GoalNode, match: re.Match[str]) -> str:
     if inner:
         return inner.group(1).strip()
     return description.strip()
+
+
+def _goal_payload(goal: GoalNode) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {}
+    identifier = getattr(goal, "id", None) or getattr(goal, "goal_id", None)
+    if not identifier and isinstance(getattr(goal, "name", None), str):
+        identifier = getattr(goal, "name")
+    if identifier:
+        payload["id"] = identifier
+
+    description = getattr(goal, "description", None) or getattr(goal, "desc", None)
+    if isinstance(description, str):
+        payload["description"] = description
+
+    try:
+        payload["priority"] = float(getattr(goal, "priority", 0.5))
+    except (TypeError, ValueError):
+        payload["priority"] = 0.5
+
+    context = getattr(goal, "context", None)
+    if isinstance(context, Mapping):
+        payload["context"] = dict(context)
+    else:
+        payload["context"] = {}
+
+    tags = getattr(goal, "tags", None)
+    if isinstance(tags, (list, tuple, set)):
+        payload["tags"] = [str(tag) for tag in list(tags)[:10]]
+    else:
+        payload["tags"] = []
+
+    return payload
+
+
+def _goal_priority(goal: GoalNode, default: float = 0.5) -> float:
+    try:
+        value = getattr(goal, "priority", default)
+        return max(0.05, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _llm_suggest_actions(goal: GoalNode) -> Optional[ActionDeque]:
+    if not _llm_enabled():
+        return None
+
+    payload = _goal_payload(goal)
+
+    try:
+        response = _llm_manager().call_dict(
+            "goal_interpreter",
+            input_payload=payload,
+        )
+    except (LLMUnavailableError, LLMIntegrationError):
+        LOGGER.debug("LLM goal interpreter unavailable", exc_info=True)
+        return None
+
+    if not isinstance(response, Mapping):
+        return None
+
+    candidate_actions = response.get("candidate_actions")
+    if not isinstance(candidate_actions, list):
+        return None
+
+    actions: ActionDeque = deque()
+    base_priority = _goal_priority(goal)
+    normalized_goal = response.get("normalized_goal") or payload.get("description")
+
+    for idx, entry in enumerate(candidate_actions):
+        if not isinstance(entry, Mapping):
+            continue
+        action_label = entry.get("action")
+        if not isinstance(action_label, str) or not action_label.strip():
+            continue
+        rationale = entry.get("rationale")
+        priority = max(0.05, min(1.0, base_priority * (1.0 - 0.1 * idx)))
+        action_payload = {
+            "goal_id": payload.get("id"),
+            "source": "llm_goal_interpreter",
+            "rationale": rationale,
+            "normalized_goal": normalized_goal,
+            "raw": entry,
+        }
+        actions.append(
+            {
+                "type": action_label.strip(),
+                "payload": action_payload,
+                "priority": priority,
+            }
+        )
+
+    if not actions:
+        return None
+
+    notes = response.get("notes")
+    if isinstance(notes, str) and notes:
+        actions[0].setdefault("payload", {})["notes"] = notes
+
+    return actions
 
 
 @dataclass
@@ -53,6 +170,7 @@ class HeuristicRegistry:
 
     def __init__(self) -> None:
         self._heuristics: list[RegexHeuristic] = []
+        self._last_llm_actions: Optional[ActionDeque] = None
 
     def register_regex(
         self,
@@ -69,6 +187,11 @@ class HeuristicRegistry:
         self._heuristics.extend(heuristics)
 
     def match(self, goal: GoalNode) -> Optional[ActionDeque]:
+        llm_actions = _llm_suggest_actions(goal)
+        if llm_actions:
+            self._last_llm_actions = llm_actions
+            return llm_actions
+
         for heuristic in self._heuristics:
             try:
                 actions = heuristic.try_apply(goal)

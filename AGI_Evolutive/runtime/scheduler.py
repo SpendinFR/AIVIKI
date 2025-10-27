@@ -18,6 +18,7 @@ and using the fully qualified package path fixes the scheduler logic.
 """
 
 import json
+import logging
 import math
 import os
 import random
@@ -30,6 +31,10 @@ from AGI_Evolutive.utils.jsonsafe import json_sanitize
 from AGI_Evolutive.core.global_workspace import GlobalWorkspace
 from AGI_Evolutive.knowledge.mechanism_store import MechanismStore
 from AGI_Evolutive.cognition.principle_inducer import PrincipleInducer
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+logger = logging.getLogger(__name__)
 
 
 def _now() -> float:
@@ -525,6 +530,7 @@ class Scheduler:
         except Exception:
             return
         self.state["policies"][name] = policy.to_state()
+        self._apply_llm_policy(name, policy, reward, duration, ok)
 
     def _build_reflection_features(self) -> List[float]:
         outcome = self._last_planning_outcome or {}
@@ -573,6 +579,38 @@ class Scheduler:
             "calibrator": self._reflection_calibrator.to_state(),
         }
         self._pending_reflection_update = None
+
+    def _apply_llm_policy(
+        self,
+        name: str,
+        policy: AdaptiveTaskPolicy,
+        reward: float,
+        duration: float,
+        success: bool,
+    ) -> None:
+        payload = {
+            "job": name,
+            "current_interval": policy.current_interval,
+            "base_interval": policy.base_interval,
+            "reward": reward,
+            "duration": duration,
+            "success": success,
+        }
+        response = try_call_llm_dict(
+            "scheduler",
+            input_payload=payload,
+            logger=logger,
+        )
+        if not response:
+            policy.llm_last = None  # type: ignore[attr-defined]
+            return
+
+        decision = str(response.get("policy", "")).strip().lower()
+        if "accel" in decision:
+            policy.current_interval = max(policy.base_interval * 0.5, policy.current_interval * 0.8)
+        elif "ralent" in decision:
+            policy.current_interval = min(policy.base_interval * 3.0, policy.current_interval * 1.2)
+        policy.llm_last = dict(response)  # type: ignore[attr-defined]
 
     # ---------- run loop ----------
     def start(self):

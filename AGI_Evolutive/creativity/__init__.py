@@ -10,12 +10,13 @@ Implémente des gardes robustes + normalisation silencieuse pour éviter les err
 """
 from __future__ import annotations
 
+import logging
 import math
 import time
 import random
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Mapping
 from collections import defaultdict, deque
 
 try:
@@ -40,6 +41,10 @@ except Exception:  # fallback minimal si networkx indisponible
         def number_of_nodes(self): return len([k for k in self.keys() if k!="_edges"])
         def number_of_edges(self): return len(self.get("_edges", {}))
     nx = type("nx", (), {"Graph": _MiniGraph})
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+LOGGER = logging.getLogger(__name__)
 
 # -------------------- Types & Data --------------------
 
@@ -570,8 +575,9 @@ class CreativitySystem:
         crea_normalize(self)
         context_key = self._context_signature(topic, constraints)
         strategy_context = context_key
+        strategy_guidance = None
         if strategy == "auto":
-            strategy, strategy_context = self._select_strategy(topic, constraints)
+            strategy, strategy_context, strategy_guidance = self._select_strategy(topic, constraints)
         ttl_choice, ttl_context = self.ttl_selector.select(context_key)
         self._enforce_ttl(ttl_choice)
         func = self.idea_generation["generation_strategies"].get(strategy, self._strat_random_association)
@@ -584,17 +590,39 @@ class CreativitySystem:
             out.append(ci)
             self.idea_generation["idea_pool"].append(ci)
             self.creative_history["ideas_generated"].append(ci)
+        llm_new, llm_guidance = self._llm_generate_ideas(
+            topic,
+            constraints,
+            strategy,
+            out,
+            context_key,
+            ttl_choice,
+        )
+        if llm_new:
+            for idea in llm_new:
+                out.append(idea)
+                self.idea_generation["idea_pool"].append(idea)
+                self.creative_history["ideas_generated"].append(idea)
         stats = self._compute_generation_stats(out, strategy, generation_time, len(constraints), ttl_choice, context_key, strategy_context, ttl_context)
+        if strategy_guidance:
+            stats.setdefault("llm_strategy_guidance", strategy_guidance)
+        if llm_guidance:
+            stats.setdefault("llm_idea_guidance", llm_guidance)
         self._update_creative_metrics(stats)
         reward = stats.get("reward", 0.0)
         self.strategy_selector.update(strategy, strategy_context, reward)
         self.ttl_selector.update(ttl_choice, ttl_context, reward)
         return out
 
-    def _select_strategy(self, topic: str, constraints: List[str]) -> Tuple[str, str]:
+    def _select_strategy(self, topic: str, constraints: List[str]) -> Tuple[str, str, Optional[Mapping[str, Any]]]:
         context_key = self._context_signature(topic, constraints)
         strategy, ctx = self.strategy_selector.select(context_key)
-        return strategy, ctx
+        guidance = self._llm_select_strategy(topic, constraints, context_key, strategy, ctx)
+        if guidance and isinstance(guidance.get("strategy"), str):
+            strategy = guidance["strategy"]
+        if guidance and isinstance(guidance.get("variant"), str):
+            ctx = guidance["variant"]
+        return strategy, ctx, guidance
 
     def _context_signature(self, topic: str, constraints: List[str]) -> str:
         topic = topic or ""
@@ -605,6 +633,35 @@ class CreativitySystem:
         mode = "multi" if word_bucket > 1 else "mono"
         time_bucket = int((time.time() % 86400) // 3600) // 4
         return f"len:{char_bucket}|words:{word_bucket}|constraints:{constraint_bucket}|mode:{mode}|t:{time_bucket}"
+
+    def _llm_select_strategy(
+        self,
+        topic: str,
+        constraints: List[str],
+        context_key: str,
+        fallback_strategy: str,
+        fallback_context: str,
+    ) -> Optional[Mapping[str, Any]]:
+        payload = {
+            "topic": topic,
+            "constraints": constraints,
+            "context_key": context_key,
+            "fallback": {
+                "strategy": fallback_strategy,
+                "context": fallback_context,
+            },
+            "recent_metrics": getattr(self, "_last_generation_stats", {}),
+        }
+
+        response = try_call_llm_dict(
+            "creativity_strategy_selector",
+            input_payload=payload,
+            logger=LOGGER,
+        )
+
+        if isinstance(response, Mapping):
+            return dict(response)
+        return None
 
     def _enforce_ttl(self, ttl_days: int) -> None:
         ttl_seconds = max(1, ttl_days) * 86400
@@ -651,7 +708,7 @@ class CreativitySystem:
         metrics = self._aggregate_idea_metrics(ideas)
         efficiency = metrics["count"] / max(generation_time, 1e-6)
         reward = _clip(0.4 * metrics["avg_novelty"] + 0.4 * metrics["avg_usefulness"] + 0.2 * metrics["avg_feasibility"])
-        return {
+        stats = {
             "ideas_generated": metrics["count"],
             "generation_time": generation_time,
             "strategy": strategy,
@@ -668,6 +725,80 @@ class CreativitySystem:
             "ttl_context": ttl_context,
             "context": context_key,
         }
+        self._last_generation_stats = stats
+        return stats
+
+    def _llm_generate_ideas(
+        self,
+        topic: str,
+        constraints: List[str],
+        strategy: str,
+        current: List[CreativeIdea],
+        context_key: str,
+        ttl_days: int,
+    ) -> Tuple[List[CreativeIdea], Optional[Mapping[str, Any]]]:
+        payload = {
+            "topic": topic,
+            "constraints": constraints,
+            "strategy": strategy,
+            "existing_ideas": [
+                {
+                    "title": idea.concept_core,
+                    "novelty": getattr(idea, "novelty", 0.0),
+                    "usefulness": getattr(idea, "usefulness", 0.0),
+                }
+                for idea in current
+            ],
+            "context_key": context_key,
+            "ttl_days": ttl_days,
+        }
+
+        response = try_call_llm_dict(
+            "creativity_pipeline",
+            input_payload=payload,
+            logger=LOGGER,
+            extra_instructions=None,
+        )
+
+        ideas: List[CreativeIdea] = []
+        if isinstance(response, Mapping):
+            raw_ideas = response.get("ideas")
+            if isinstance(raw_ideas, list):
+                for idea_payload in raw_ideas:
+                    if not isinstance(idea_payload, Mapping):
+                        continue
+                    idea = self._idea_from_llm(idea_payload, topic, constraints)
+                    if idea:
+                        ideas.append(idea)
+        guidance = dict(response) if isinstance(response, Mapping) else None
+        return ideas, guidance
+
+    def _idea_from_llm(
+        self,
+        idea_payload: Mapping[str, Any],
+        topic: str,
+        constraints: List[str],
+    ) -> Optional[CreativeIdea]:
+        title = idea_payload.get("title") or idea_payload.get("name")
+        description = idea_payload.get("description") or title
+        if not isinstance(description, str):
+            return None
+        base = self._develop_raw_idea(description, topic, constraints)
+        if isinstance(title, str):
+            base.concept_core = title
+            base.description = f"Idée créative: {title} — {description}"
+        try:
+            if "novelty" in idea_payload:
+                base.novelty = _clip(float(idea_payload["novelty"]))
+            if "usefulness" in idea_payload:
+                base.usefulness = _clip(float(idea_payload["usefulness"]))
+            if "feasibility" in idea_payload:
+                base.feasibility = _clip(float(idea_payload.get("feasibility", base.feasibility)))
+            if "elaboration" in idea_payload:
+                base.elaboration = _clip(float(idea_payload.get("elaboration", base.elaboration)))
+        except Exception:
+            pass
+        return base
 
     # Strategies (return list[str])
     def _strat_random_association(self, topic: str, constraints: List[str], n: int) -> List[str]:

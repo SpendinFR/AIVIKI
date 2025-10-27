@@ -17,12 +17,22 @@ Dépendances : standard library only.
 """
 
 from __future__ import annotations
+import logging
 import math
 import time
 import random
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
+
+try:  # pragma: no cover - import guard for minimal environments
+    from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+except Exception:  # noqa: BLE001 - fallback keeps legacy behaviour when LLM disabled
+    def try_call_llm_dict(*_args: Any, **_kwargs: Any) -> Optional[Mapping[str, Any]]:
+        return None
+
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -636,6 +646,7 @@ class PhysicsEngine:
         self.events: List[str] = []
         self.target_decay: float = 0.05
         self.drift_log: List[Tuple[float, float]] = []
+        self.last_projection: Optional[Dict[str, Any]] = None
         self._dt_bandit = DiscreteThompsonSampler([
             ("slow", 0.02),
             ("baseline", 0.05),
@@ -688,6 +699,74 @@ class PhysicsEngine:
         if len(self.drift_log) >= 200:
             self.drift_log.pop(0)
         self.drift_log.append((self.last_step_ts, abs(decay_ratio)))
+        self._update_projection(decay_ratio, prev_energy, post_energy)
+
+    def _update_projection(self, decay_ratio: float, prev_energy: float, post_energy: float) -> None:
+        """Ask the LLM for an intervention suggestion when drift is high."""
+
+        drift_error = abs(decay_ratio - self.target_decay)
+        if drift_error < 0.15 and len(self.events) < 3:
+            self.last_projection = None
+            return
+
+        payload = {
+            "reason": "energy_drift" if drift_error >= 0.15 else "event_surge",
+            "decay_ratio": decay_ratio,
+            "target_decay": self.target_decay,
+            "drift_error": drift_error,
+            "recent_events": self.events[-10:],
+            "bodies": {
+                bid: {
+                    "x": round(body.x, 3),
+                    "y": round(body.y, 3),
+                    "vx": round(body.vx, 3),
+                    "vy": round(body.vy, 3),
+                    "tags": list(body.tags),
+                }
+                for bid, body in list(self.bodies.items())[:5]
+            },
+            "energy_before": prev_energy,
+            "energy_after": post_energy,
+        }
+
+        response = try_call_llm_dict(
+            "world_model",
+            input_payload=payload,
+            logger=logger,
+        )
+
+        if response:
+            self.last_projection = {
+                "action": response.get("action"),
+                "scenarios": response.get("scenarios", {}),
+                "probabilities": response.get("probabilities", {}),
+                "notes": response.get("notes", ""),
+            }
+            return
+
+        # Fallback heuristic when the LLM is unavailable
+        severity = min(1.0, drift_error * 4.0 + len(self.events[-5:]) * 0.1)
+        if severity > 0.8:
+            action = "ralentir_simulation"
+        elif severity > 0.4:
+            action = "réinitialiser_bandes"
+        else:
+            action = "inspecter_collisions"
+        base = {
+            "optimiste": "retour à la stabilité en quelques cycles",
+            "neutre": "stabilisation progressive après ajustements",
+            "pessimiste": "persistance des dérives sans action complémentaire",
+        }
+        self.last_projection = {
+            "action": action,
+            "scenarios": base,
+            "probabilities": {
+                "optimiste": round(max(0.0, 0.5 + 0.2 * (1 - severity)), 2),
+                "neutre": round(max(0.0, 0.3 + 0.3 * (1 - severity)), 2),
+                "pessimiste": round(min(1.0, 0.2 + severity * 0.5), 2),
+            },
+            "notes": "Heuristique faute de réponse LLM",
+        }
 
     def _integrate(self):
         xmin, ymin, xmax, ymax = self.bounds

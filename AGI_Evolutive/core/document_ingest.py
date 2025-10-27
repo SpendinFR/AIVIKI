@@ -6,6 +6,7 @@ DocumentIngest: intègre les documents de ./inbox dans la mémoire.
 - Crée des traces mnésiques épisodiques avec associations légères
 - Hook simple à appeler dans la boucle
 """
+import logging
 import os
 import time
 import glob
@@ -14,6 +15,10 @@ from typing import Dict, Any, Iterable
 from AGI_Evolutive.core.config import cfg
 from AGI_Evolutive.knowledge.concept_recognizer import ConceptRecognizer
 from AGI_Evolutive.memory import MemoryType
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+LOGGER = logging.getLogger(__name__)
 
 def _hash(s: str) -> str:
     import hashlib
@@ -175,11 +180,40 @@ class DocumentIngest:
             except Exception:
                 items = []
 
+            llm_response = try_call_llm_dict(
+                "document_ingest",
+                input_payload={
+                    "name": name,
+                    "content": content[:6000],
+                    "novelty": novelty_payload,
+                },
+                logger=LOGGER,
+                max_retries=2,
+            )
+            llm_summary = None
+            llm_tags = None
+            llm_sections = None
+            if llm_response:
+                llm_summary = llm_response.get("summary")
+                if isinstance(llm_summary, str) and llm_summary.strip():
+                    llm_summary = llm_summary.strip()
+                else:
+                    llm_summary = None
+                tags = llm_response.get("tags")
+                if isinstance(tags, list):
+                    llm_tags = [str(tag) for tag in tags if str(tag).strip()]
+                sections = llm_response.get("critical_sections")
+                if isinstance(sections, list):
+                    llm_sections = [str(section) for section in sections if str(section).strip()]
+
             ingest_mode = "full"
             text_to_store = content[:200000]
             if novelty_payload["candidates"] and novelty_payload["ratio"] < 0.25 and len(content) > 4000:
                 ingest_mode = "summary"
                 text_to_store = _summarize_text(content)
+            if llm_summary:
+                ingest_mode = "llm_summary"
+                text_to_store = llm_summary[:200000]
 
             trace_context = {
                 "source": "inbox",
@@ -187,6 +221,8 @@ class DocumentIngest:
                 "hash": h,
                 "ingest_mode": ingest_mode,
             }
+            if llm_sections:
+                trace_context["critical_sections"] = llm_sections
             trace_content = {
                 "text": text_to_store,
                 "title": name,
@@ -195,6 +231,10 @@ class DocumentIngest:
                 "original_length": len(content),
                 "ingest_mode": ingest_mode,
             }
+            if llm_tags:
+                trace_content.setdefault("metadata", {})["tags"] = llm_tags
+            if llm_response:
+                trace_content.setdefault("metadata", {})["llm"] = llm_response
             trace_content.setdefault("metadata", {})["hash"] = h
             trace_content["metadata"]["ingested_ts"] = time.time()
 

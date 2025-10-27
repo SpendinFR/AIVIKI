@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from contextlib import nullcontext
 from types import SimpleNamespace
 from collections import deque, defaultdict
-from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple, Mapping
 
 try:  # pragma: no cover - platform specific import
     import resource as _resource
@@ -63,9 +63,23 @@ from AGI_Evolutive.light_scheduler import LightScheduler
 from AGI_Evolutive.runtime.job_manager import JobManager
 from AGI_Evolutive.runtime.phenomenal_kernel import ModeManager, PhenomenalKernel
 from AGI_Evolutive.runtime.system_monitor import SystemMonitor
+from AGI_Evolutive.utils.llm_service import (
+    LLMIntegrationError,
+    LLMUnavailableError,
+    get_llm_manager,
+    is_llm_enabled,
+)
 
 
 logger = logging.getLogger(__name__)
+
+
+def _llm_enabled() -> bool:
+    return is_llm_enabled()
+
+
+def _llm_manager():
+    return get_llm_manager()
 
 
 # --- seuils / cadence (tunable) ---
@@ -1076,6 +1090,7 @@ class Orchestrator:
         }
         self._need_directives: List[Dict[str, Any]] = []
         self._need_directives_lock = threading.RLock()
+        self._last_llm_recommendations: Optional[Mapping[str, Any]] = None
 
         if isinstance(existing_interface, ActionInterface):
             bind_kwargs = {}
@@ -1877,6 +1892,24 @@ class Orchestrator:
                     {"kind": "error", "text": f"Proposal error: {exc}", "ts": time.time()}
                 )
 
+    def _llm_cycle_recommendations(self, payload: Dict[str, Any]) -> Optional[Mapping[str, Any]]:
+        if not _llm_enabled():
+            return None
+
+        try:
+            response = _llm_manager().call_dict(
+                "orchestrator_service",
+                input_payload=payload,
+            )
+        except (LLMUnavailableError, LLMIntegrationError):
+            logger.debug("LLM orchestrator recommendations unavailable", exc_info=True)
+            return None
+
+        if not isinstance(response, Mapping):
+            return None
+
+        return dict(response)
+
     def _collect_kernel_alerts_from_triggers(self, scored_triggers: Iterable["ScoredTrigger"]) -> None:
         for scored in scored_triggers:
             trigger = getattr(scored, "trigger", None)
@@ -2156,6 +2189,40 @@ class Orchestrator:
         self.planning_cycle()
         self.action_cycle()
         self.proposals_cycle()
+
+        selected_snapshot = []
+        for item in selected:
+            trigger = getattr(item, "trigger", None)
+            trigger_type = getattr(trigger, "type", None)
+            trigger_name = getattr(trigger_type, "name", str(trigger_type)) if trigger_type else None
+            selected_snapshot.append(
+                {
+                    "type": trigger_name,
+                    "priority": getattr(item, "priority", None),
+                }
+            )
+
+        llm_payload = {
+            "mode": self.current_mode,
+            "urgent": urgent,
+            "system_alerts": system_alerts,
+            "assessment": assessment,
+            "phenomenal_state": {
+                key: value
+                for key, value in self.phenomenal_kernel_state.items()
+                if isinstance(value, (int, float, str, bool))
+            },
+            "selected_triggers": selected_snapshot,
+            "contexts_count": len(contexts),
+            "uncertainty": assessment.get("uncertainty"),
+        }
+        llm_recommendations = self._llm_cycle_recommendations(llm_payload)
+        if llm_recommendations:
+            self._last_llm_recommendations = llm_recommendations
+            try:
+                self.telemetry.log("llm", "cycle_recommendations", llm_recommendations)
+            except Exception:
+                logger.debug("Telemetry logging for LLM recommendations failed", exc_info=True)
 
         learning_rate = 0.5
         self._evolution.log_cycle(

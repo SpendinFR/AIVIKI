@@ -1,6 +1,12 @@
 from __future__ import annotations
 import json, os, time, math, re
+import logging
 from typing import Dict, Any, List, Tuple, Iterable
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+logger = logging.getLogger(__name__)
 
 
 STYLE_KNOBS = (
@@ -487,6 +493,26 @@ class VoiceProfile:
         """Interprète feedback textuel avec inertie + classifieur."""
         now = time.time()
         normalized = self._normalize_text(feedback_text)
+        llm_response = try_call_llm_dict(
+            "language_voice",
+            input_payload={
+                "feedback": feedback_text,
+                "positive": positive,
+                "style": self.state.get("style", _default_style()),
+            },
+            logger=logger,
+        )
+        if llm_response and isinstance(llm_response.get("adjustments"), dict):
+            adjustments = llm_response["adjustments"]
+            for knob, delta in adjustments.items():
+                try:
+                    self._apply_signal(knob, float(delta), "llm_voice", now)
+                except (TypeError, ValueError):
+                    logger.debug("Invalid LLM adjustment for knob %s: %r", knob, delta)
+            self._log_event(
+                "llm_voice_guidance",
+                {"feedback": feedback_text, "adjustments": adjustments, "positive": positive},
+            )
         if not normalized:
             self._record_metric("feedback", positive, now)
             self.state["last_update"] = now

@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import logging
 import time
 from collections import defaultdict
 from copy import deepcopy
 from difflib import SequenceMatcher
 from typing import Dict, Iterable, List, Optional
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class TimelineManager:
@@ -59,6 +65,19 @@ class TimelineManager:
             "ts": time.time(),
         }
 
+        enrichment = try_call_llm_dict(
+            "timeline_manager",
+            input_payload={
+                "topic": topic,
+                "delta": event,
+                "previous_state": self._last_state.get(topic, {}),
+            },
+            logger=LOGGER,
+            max_retries=2,
+        )
+        if enrichment:
+            event["llm"] = dict(enrichment)
+
         self._last_delta[topic] = event
         self._record_event(topic, event)
         return event
@@ -67,6 +86,15 @@ class TimelineManager:
         delta = self._last_delta.get(topic)
         severity = self._score_delta(delta) if delta else 0.0
         prioritized = self._prioritize_gaps(gaps, delta)
+        llm_info = delta.get("llm") if isinstance(delta, dict) else None
+        missing = []
+        if isinstance(llm_info, dict):
+            missing = [str(item) for item in llm_info.get("missing_information", []) if item]
+            milestones = llm_info.get("milestones")
+        else:
+            milestones = None
+        if missing:
+            prioritized = missing + [gap for gap in prioritized if gap not in missing]
         return [
             {
                 "goal_kind": "LearnConcept",
@@ -74,6 +102,7 @@ class TimelineManager:
                 "concept": gap,
                 "priority": idx + 1,
                 "severity": severity,
+                "milestones": milestones if idx == 0 else None,
             }
             for idx, gap in enumerate(prioritized)
         ]

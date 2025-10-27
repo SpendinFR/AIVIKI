@@ -1,13 +1,20 @@
 import hashlib
+import logging
 import math
 import os
 import json
 import random
 import time
-from typing import List, Dict, Any, Optional, Iterable, Tuple
+from typing import List, Dict, Any, Optional, Iterable, Tuple, Mapping
 from collections import Counter
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import (
+    LLMIntegrationError,
+    LLMUnavailableError,
+    get_llm_manager,
+    is_llm_enabled,
+)
 
 
 STOPWORDS = {
@@ -49,6 +56,17 @@ DOMAIN_KEYWORDS = {
 }
 
 TTL_OPTIONS = (3, 7, 14, 30)
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _llm_enabled() -> bool:
+    return is_llm_enabled()
+
+
+def _llm_manager():
+    return get_llm_manager()
 
 
 class OnlineLinear:
@@ -187,6 +205,7 @@ class MetaCognition:
         self.state.setdefault("recent_goals", {})
         self.state.setdefault("last_logged_goal_digest", "")
         self._init_models()
+        self._last_llm_assessment: Optional[Mapping[str, Any]] = None
 
     def _load(self):
         if os.path.exists(self.path):
@@ -235,6 +254,25 @@ class MetaCognition:
             self.goal_model = OnlineLinear(goal_features, bounds=(0.0, 1.0), lr=0.05, l2=0.002, max_grad=0.3)
 
         self.domain_bandits = self.state.setdefault("bandits", {})
+
+    def _llm_assessment(self, payload: Dict[str, Any]) -> Optional[Mapping[str, Any]]:
+        if not _llm_enabled():
+            return None
+
+        try:
+            response = _llm_manager().call_dict(
+                "meta_cognition",
+                input_payload=payload,
+            )
+        except (LLMUnavailableError, LLMIntegrationError):
+            LOGGER.debug("LLM meta-cognition unavailable", exc_info=True)
+            return None
+
+        if not isinstance(response, Mapping):
+            return None
+
+        self._last_llm_assessment = dict(response)
+        return self._last_llm_assessment
 
     def _save(self):
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
@@ -508,8 +546,7 @@ class MetaCognition:
         self.state["last_assessment_ts"] = stats["now"]
         self.state["feature_stats"] = features
         self._save()
-
-        return {
+        assessment = {
             "uncertainty": float(uncertainty),
             "domains": domains,
             "stats": {
@@ -519,6 +556,28 @@ class MetaCognition:
                 "lessons": stats["lessons"],
             },
         }
+
+        llm_payload = {
+            "uncertainty": float(uncertainty),
+            "domains": domains,
+            "stats": assessment["stats"],
+        }
+        llm_bundle = self._llm_assessment(llm_payload)
+        if llm_bundle:
+            assessment["llm"] = llm_bundle
+            knowledge_gaps = llm_bundle.get("knowledge_gaps")
+            if isinstance(knowledge_gaps, list):
+                meta_domain = domains.setdefault(
+                    "llm_insights",
+                    {"confidence": 0.5, "gaps": [], "revision_ttl": TTL_OPTIONS[1], "hazard": 0.3},
+                )
+                for gap in knowledge_gaps:
+                    topic = gap.get("topic") if isinstance(gap, Mapping) else None
+                    if isinstance(topic, str) and topic and topic not in meta_domain["gaps"]:
+                        meta_domain["gaps"].append(topic)
+            self.state["domains"].update(domains)
+            self.state["last_llm_assessment"] = llm_bundle
+        return assessment
 
     # --------- Génération de learning goals ---------
     def propose_learning_goals(self, max_goals: int = 3) -> List[Dict[str, Any]]:
@@ -552,6 +611,36 @@ class MetaCognition:
                         "priority": prio,
                         "domain": domain,
                         "revision_ttl": ttl,
+                    }
+                )
+        llm_bundle = self._last_llm_assessment or assessment.get("llm")
+        if isinstance(llm_bundle, Mapping):
+            for entry in llm_bundle.get("learning_goals", []):
+                if not isinstance(entry, Mapping):
+                    continue
+                goal_text = entry.get("goal")
+                if not isinstance(goal_text, str) or not goal_text.strip():
+                    continue
+                impact = str(entry.get("impact", "")).lower()
+                impact_priority = {
+                    "haut": 0.9,
+                    "élevé": 0.9,
+                    "eleve": 0.9,
+                    "moyen": 0.65,
+                    "faible": 0.45,
+                    "bas": 0.45,
+                }.get(impact, 0.6)
+                goal_id = entry.get("id")
+                if not isinstance(goal_id, str) or not goal_id:
+                    goal_id = "llm_" + hashlib.sha1(goal_text.encode("utf-8")).hexdigest()[:10]
+                candidate_goals.append(
+                    {
+                        "id": goal_id,
+                        "desc": goal_text.strip(),
+                        "priority": max(0.05, min(1.0, impact_priority)),
+                        "domain": entry.get("domain") or entry.get("topic") or "llm",
+                        "revision_ttl": entry.get("revision_ttl", TTL_OPTIONS[1]),
+                        "source": "llm",
                     }
                 )
         candidate_goals.sort(key=lambda x: x["priority"], reverse=True)

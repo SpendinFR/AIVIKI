@@ -1,12 +1,19 @@
 import json
+import logging
 import math
 import os
 import random
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Mapping
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import (
+    LLMIntegrationError,
+    LLMUnavailableError,
+    get_llm_manager,
+    is_llm_enabled,
+)
 
 from AGI_Evolutive.core.config import cfg
 
@@ -34,6 +41,17 @@ DEFAULT_STOP_RULES: Dict[str, Any] = {"max_options": 3, "max_seconds": 900}
 
 _BANDIT_BETAS: Tuple[float, ...] = (0.2, 0.4, 0.6, 0.8)
 _MAX_DRIFTS = 32
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _llm_enabled() -> bool:
+    return is_llm_enabled()
+
+
+def _llm_manager():
+    return get_llm_manager()
 
 
 def _get_field(obj: Any, key: str, default: Any = None) -> Any:
@@ -72,6 +90,7 @@ class Planner:
         self.architecture: Optional[Any] = architecture
         self._load()
         self._ensure_metrics_structures()
+        self._last_llm_plan: Optional[Dict[str, Any]] = None
 
     # ------------------------------------------------------------------
     # Internal helpers for adaptive metrics / bandits
@@ -310,6 +329,105 @@ class Planner:
                 self._save()
             return plan
 
+    def _plan_with_llm(self, frame: Any) -> Optional[Dict[str, Any]]:
+        if not _llm_enabled():
+            return None
+
+        goal_id = _get_field(frame, "goal_id")
+        description = _get_field(frame, "description") or ""
+        payload = {
+            "goal": {"id": goal_id, "description": description},
+            "signals": _get_field(frame, "signals", {}),
+            "context": _get_field(frame, "context", {}),
+        }
+
+        try:
+            response = _llm_manager().call_dict(
+                "planner_support",
+                input_payload=payload,
+            )
+        except (LLMUnavailableError, LLMIntegrationError):
+            LOGGER.debug("LLM planner support unavailable", exc_info=True)
+            return None
+
+        if not isinstance(response, Mapping):
+            return None
+
+        steps_payload = response.get("plan")
+        if not isinstance(steps_payload, list):
+            return None
+
+        plan_steps: List[Dict[str, Any]] = []
+        for idx, entry in enumerate(steps_payload):
+            if not isinstance(entry, Mapping):
+                continue
+            desc = str(entry.get("description", "")).strip()
+            if not desc:
+                continue
+            step_id = entry.get("id")
+            if not isinstance(step_id, str) or not step_id:
+                step_id = f"llm_step_{idx + 1}"
+            depends_on = entry.get("depends_on") or []
+            if isinstance(depends_on, (list, tuple)):
+                deps_list = [str(dep).strip() for dep in depends_on if str(dep).strip()]
+            else:
+                deps_list = []
+            try:
+                priority = float(entry.get("priority", 0.5))
+            except (TypeError, ValueError):
+                priority = 0.5
+            priority = max(0.05, min(1.0, priority))
+            action_type = entry.get("action_type")
+            if not isinstance(action_type, str) or not action_type.strip():
+                action_type = self._infer_action_type(desc)
+            step_context = entry.get("context") if isinstance(entry.get("context"), Mapping) else None
+            action_payload = {
+                "goal_id": goal_id,
+                "step_id": step_id,
+                "llm": True,
+            }
+            if step_context:
+                action_payload["context"] = dict(step_context)
+            plan_steps.append(
+                {
+                    "id": step_id,
+                    "desc": desc,
+                    "status": "todo",
+                    "priority": priority,
+                    "depends_on": deps_list,
+                    "action": {"type": action_type, "payload": action_payload},
+                }
+            )
+
+        if not plan_steps:
+            return None
+
+        plan_dict: Dict[str, Any] = {
+            "type": "llm",
+            "goal_id": goal_id,
+            "description": description,
+            "steps": plan_steps,
+            "risks": response.get("risks"),
+            "notes": response.get("notes"),
+            "llm": response,
+        }
+
+        with self._lock:
+            if goal_id:
+                record = self.state["plans"].setdefault(
+                    goal_id,
+                    {"goal_id": goal_id, "description": description or "", "steps": []},
+                )
+                record["description"] = description or record.get("description", "")
+                record["steps"] = plan_steps
+                record["llm"] = response
+                record["source"] = "llm"
+                record["updated_at"] = time.time()
+                self._save()
+
+        self._last_llm_plan = plan_dict
+        return plan_dict
+
     def _normalise_stop_rules(self, stop_rules: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         rules = dict(DEFAULT_STOP_RULES)
         metrics = self.state.get("metrics", {}).get("outcomes", {})
@@ -476,6 +594,11 @@ class Planner:
                 _ensure_dict_field(frame, "signals_meta").update(meta)
 
         plan = _get_field(frame, "plan")
+        if not isinstance(plan, dict) or not plan.get("steps"):
+            llm_plan = self._plan_with_llm(frame)
+            if llm_plan:
+                _set_field(frame, "plan", llm_plan)
+                return llm_plan
         if isinstance(plan, dict):
             return plan
         return {}

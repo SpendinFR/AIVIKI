@@ -17,9 +17,14 @@ Points clés :
 """
 
 from __future__ import annotations
+import logging
 import time, math, random, hashlib
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+LOGGER = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -129,7 +134,64 @@ class ContextFeatureEncoder:
             emotion_valence,
             confidence_bias,
         ]
+        enriched = self._llm_enrich_features(
+            raw=raw,
+            reflections=list(reflections),
+            concepts=list(concepts),
+            features=features,
+            meta=meta,
+            emotional_valence=emotion_valence,
+            confidence_gain=confidence_gain,
+        )
+        if enriched:
+            features, meta = enriched
         return features, meta
+
+    def _llm_enrich_features(
+        self,
+        *,
+        raw: Mapping[str, Any],
+        reflections: List[str],
+        concepts: List[str],
+        features: List[float],
+        meta: Dict[str, Any],
+        emotional_valence: float,
+        confidence_gain: float,
+    ) -> Optional[Tuple[List[float], Dict[str, Any]]]:
+        payload = {
+            "summary": raw,
+            "reflections": reflections,
+            "concepts": concepts,
+            "features": features,
+            "emotional_valence": emotional_valence,
+            "confidence_gain": confidence_gain,
+        }
+
+        response = try_call_llm_dict(
+            "context_feature_encoder",
+            input_payload=payload,
+            logger=LOGGER,
+        )
+        if not isinstance(response, Mapping):
+            return None
+
+        llm_features = response.get("features")
+        merged = list(features)
+        if isinstance(llm_features, list) and len(llm_features) == len(features):
+            try:
+                merged = [
+                    float(a + float(b)) / 2.0
+                    for a, b in zip(features, llm_features)
+                ]
+            except Exception:
+                merged = list(features)
+        llm_tags = response.get("tags")
+        updated_meta = dict(meta)
+        if llm_tags:
+            updated_meta["llm_tags"] = llm_tags
+        if response.get("notes"):
+            updated_meta.setdefault("llm_notes", response.get("notes"))
+        return merged, updated_meta
 
 
 class OnlineLinearModel:
@@ -299,8 +361,32 @@ class ExperientialLearning:
         experiments = self._design_experiments(concepts)
         outcomes = self._execute_and_evaluate(experiments)
         emotional_valence = self._valence(outcomes)
-        confidence_gain = self._confidence(outcomes)
-        integration = self._integration(concepts, outcomes)
+       confidence_gain = self._confidence(outcomes)
+       integration = self._integration(concepts, outcomes)
+        llm_guidance = self._llm_summarise_experience(
+            raw,
+            reflections=reflections,
+            concepts=concepts,
+            experiments=experiments,
+            outcomes=outcomes,
+            emotional_valence=emotional_valence,
+            confidence_gain=confidence_gain,
+            integration=integration,
+        )
+        if llm_guidance:
+            add_refs = llm_guidance.get("reflections")
+            if isinstance(add_refs, list):
+                reflections.extend(str(r) for r in add_refs if r)
+            add_concepts = llm_guidance.get("concepts")
+            if isinstance(add_concepts, list):
+                concepts.extend(str(c) for c in add_concepts if c)
+            add_experiments = llm_guidance.get("experiments")
+            if isinstance(add_experiments, list):
+                for exp in add_experiments:
+                    if isinstance(exp, Mapping):
+                        experiments.append(dict(exp))
+            if isinstance(llm_guidance.get("integration_score"), (int, float)):
+                integration = float(llm_guidance["integration_score"])
         features, feature_meta = self.feature_encoder.encode(
             raw,
             reflections,
@@ -325,6 +411,8 @@ class ExperientialLearning:
             integration_level=integration, contextual_features=features,
             contextual_metadata=feature_meta,
         )
+        if llm_guidance:
+            episode.contextual_metadata.setdefault("llm_guidance", llm_guidance)
         self.learning_episodes.append(episode)
         self.metrics["episodes_completed"] += 1
         self.metrics["concepts_formed"] += len(concepts)
@@ -418,6 +506,38 @@ class ExperientialLearning:
             0.0,
             min(1.0, self.learning_states.get("engagement", 0.65) + delta * 0.5),
         )
+
+    def _llm_summarise_experience(
+        self,
+        raw: Mapping[str, Any],
+        *,
+        reflections: List[str],
+        concepts: List[str],
+        experiments: List[Mapping[str, Any]],
+        outcomes: Mapping[str, Mapping[str, float]],
+        emotional_valence: float,
+        confidence_gain: float,
+        integration: float,
+    ) -> Optional[Mapping[str, Any]]:
+        payload = {
+            "raw": raw,
+            "reflections": reflections,
+            "concepts": concepts,
+            "experiments": experiments,
+            "outcomes": outcomes,
+            "emotional_valence": emotional_valence,
+            "confidence_gain": confidence_gain,
+            "integration": integration,
+        }
+
+        response = try_call_llm_dict(
+            "learning_encoder",
+            input_payload=payload,
+            logger=LOGGER,
+        )
+        if isinstance(response, Mapping):
+            return dict(response)
+        return None
         # Ajuste légèrement les compétences en fonction de la qualité du modèle
         impact = max(-0.02, min(0.02, prediction - 0.5))
         for key in ("reflection", "abstraction", "experimentation"):

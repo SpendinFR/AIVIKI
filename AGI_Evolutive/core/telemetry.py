@@ -1,7 +1,15 @@
-import time, json, os
+import json
+import logging
+import os
+import time
 from collections import deque
+from typing import Optional
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class Telemetry:
@@ -25,6 +33,9 @@ class Telemetry:
             "level": level,
             "data": data or {}
         }
+        annotation = self._llm_annotate(e)
+        if annotation:
+            e["llm_annotation"] = annotation
         self.events.append(e)
         # disque
         if self._jsonl_path:
@@ -46,3 +57,25 @@ class Telemetry:
         for e in self.events:
             by_sub[e["subsystem"]] = by_sub.get(e["subsystem"], 0) + 1
         return {"events_count": len(self.events), "events_by_subsystem": by_sub}
+
+    def _llm_annotate(self, event: dict) -> Optional[dict]:
+        response = try_call_llm_dict(
+            "telemetry_annotation",
+            input_payload=event,
+            logger=LOGGER,
+        )
+        if not response:
+            return None
+        summary = response.get("summary")
+        severity = response.get("severity")
+        if not isinstance(summary, str):
+            return None
+        if severity is not None and not isinstance(severity, str):
+            severity = None
+        return {
+            "event_id": response.get("event_id", ""),
+            "summary": summary,
+            "severity": severity,
+            "routine": bool(response.get("routine", False)),
+            "notes": response.get("notes", ""),
+        }

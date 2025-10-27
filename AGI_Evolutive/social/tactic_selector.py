@@ -5,13 +5,24 @@
 from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 from collections import defaultdict
+import logging
 import time, math, random
 
 import numpy as np
 
+from AGI_Evolutive.utils.llm_service import (
+    LLMIntegrationError,
+    LLMUnavailableError,
+    get_llm_manager,
+    is_llm_enabled,
+)
+
 from AGI_Evolutive.social.interaction_rule import (
     InteractionRule, ContextBuilder, Predicate, TacticSpec, clamp
 )
+
+LOGGER = logging.getLogger(__name__)
+
 
 def _now() -> float: return time.time()
 
@@ -510,23 +521,70 @@ class TacticSelector:
             return (None, None)
 
         # 2) filtrage simple Policy/garde-fous + scoring
-        scored: List[Tuple[float, Dict[str, Any], Dict[str, Any]]] = []
+        candidates: List[Dict[str, Any]] = []
         for r in rules:
             allow, reason = self._allowed_by_policy(r, ctx)
             if not allow:
                 continue
-            s, why = self._score_rule(r, ctx)
-            if s <= 0.0:
+            components, meta, bandit_model, x = self._compute_score_components(r, ctx)
+            if not components:
                 continue
-            why["policy"] = reason
-            scored.append((s, r, why))
+            W = self.cfg["weights"]
+            linear_score = clamp(
+                float(W["match"]) * components["match"]
+                + float(W["utility"]) * components["utility"]
+                + float(W["ema_reward"]) * components["ema_reward"]
+                + float(W["bandit"]) * components["ucb"]
+                + float(W["recency"]) * components["recency"],
+                0.0,
+                1.0,
+            )
+            score = self._score_model.predict(components, fallback=linear_score)
+            meta["policy"] = reason
+            meta["score_linear"] = round(linear_score, 3)
+            candidate = {
+                "rule": r,
+                "score": float(score),
+                "components": components,
+                "meta": meta,
+                "bandit_model": bandit_model,
+                "context_vector": x,
+            }
+            candidates.append(candidate)
+
+        if not candidates:
+            return (None, None)
+
+        llm_priorities = self._llm_rank_tactics(ctx, candidates)
+
+        scored: List[Tuple[float, Dict[str, Any], Dict[str, Any]]] = []
+        for entry in candidates:
+            rule = entry["rule"]
+            meta = dict(entry["meta"])
+            base_score = float(entry["score"])
+            if llm_priorities:
+                llm_data = llm_priorities[0].get(rule.get("id"))
+                if not llm_data:
+                    tactic_name = (rule.get("tactic") or {}).get("name")
+                    if tactic_name:
+                        llm_data = llm_priorities[1].get(tactic_name)
+                if llm_data:
+                    priority = max(0.0, min(1.0, llm_data.get("priority", 0.0)))
+                    base_score = 0.6 * priority + 0.4 * base_score
+                    meta["llm"] = llm_data
+            scored.append((base_score, rule, meta))
 
         if not scored:
             return (None, None)
 
-        # 3) tri & epsilon-greedy
         scored.sort(key=lambda t: t[0], reverse=True)
         best_s, best_r, best_why = scored[0]
+
+        eps = float(self.cfg.get("epsilon", 0.08))
+        if len(scored) > 1 and random.random() < eps:
+            s2, r2, w2 = scored[1]
+            if s2 > float(self.cfg["thresholds"]["score_min"]):
+                best_s, best_r, best_why = s2, r2, {**w2, "explore": "epsilon"}
 
         # epsilon: si la 2e est proche, on peut explorer
         eps = float(self.cfg.get("epsilon", 0.08))
@@ -546,6 +604,70 @@ class TacticSelector:
         )
 
         return (best_r, best_why)
+
+    def _llm_rank_tactics(
+        self,
+        ctx: Dict[str, Any],
+        candidates: List[Dict[str, Any]],
+    ) -> Optional[Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]]:
+        if not candidates or not is_llm_enabled():
+            return None
+
+        payload = {
+            "context": {k: v for k, v in ctx.items() if isinstance(k, str)},
+            "candidates": [],
+        }
+        for entry in candidates[:8]:
+            rule = entry["rule"]
+            tactic = (rule.get("tactic") or {}).get("name")
+            payload["candidates"].append(
+                {
+                    "rule_id": rule.get("id"),
+                    "tactic": tactic,
+                    "components": entry["components"],
+                    "meta": entry["meta"],
+                }
+            )
+
+        if not payload["candidates"]:
+            return None
+
+        try:
+            response = get_llm_manager().call_dict(
+                "social_tactic_selector",
+                input_payload=payload,
+            )
+        except (LLMUnavailableError, LLMIntegrationError):
+            LOGGER.debug("LLM social tactic selector unavailable", exc_info=True)
+            return None
+
+        if not isinstance(response, dict):
+            return None
+
+        by_rule: Dict[str, Dict[str, Any]] = {}
+        by_name: Dict[str, Dict[str, Any]] = {}
+        for entry in response.get("tactics", []):
+            if not isinstance(entry, dict):
+                continue
+            info = {
+                "utility": float(entry.get("utility", 0.0) or 0.0),
+                "risk": float(entry.get("risk", 0.0) or 0.0),
+                "explanation": entry.get("explanation"),
+            }
+            priority = info["utility"] - info["risk"]
+            info["priority"] = max(0.0, min(1.0, (priority + 1.0) / 2.0))
+            rid = entry.get("rule_id")
+            if isinstance(rid, str):
+                by_rule[rid] = info
+            name = entry.get("name") or entry.get("tactic")
+            if isinstance(name, str):
+                by_name[name] = info
+
+        notes = response.get("notes")
+        if notes:
+            LOGGER.debug("LLM tactic selector notes: %s", notes)
+
+        return by_rule, by_name
 
     # ---------- Hook d'update bandit (appelé par Social Critic APRÈS feedback) ----------
     def bandit_update(self, rule_id: str, ctx: Dict[str, Any], reward01: float) -> Optional[Dict[str, Any]]:

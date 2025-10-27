@@ -5,6 +5,8 @@ import contextlib
 import difflib
 import importlib
 import json
+import logging
+import re
 import random
 import shutil
 import tempfile
@@ -15,8 +17,12 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 from .quality import QualityGateRunner
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -102,12 +108,14 @@ class _ScoreHeuristicTweaker(ast.NodeTransformer):
         learner: Optional[OnlineHeuristicLearner] = None,
         *,
         learner_key: Optional[str] = None,
+        forced_value: Optional[float] = None,
     ) -> None:
         self._context: List[str] = []
         self._changed: bool = False
         self._metadata: Dict[str, Any] = {}
         self._learner = learner
         self._learner_key = learner_key or (learner.key if learner else None)
+        self._forced_value = forced_value
 
     @property
     def metadata(self) -> Dict[str, Any]:
@@ -129,7 +137,11 @@ class _ScoreHeuristicTweaker(ast.NodeTransformer):
         original = float(node.value)
         if original <= 0.0 or original > 2.0:
             return node
-        if self._learner:
+        if self._forced_value is not None:
+            candidate = float(max(0.0, min(2.0, self._forced_value)))
+            self._forced_value = None
+            self._metadata["llm_override"] = True
+        elif self._learner:
             candidate = self._learner.propose(original)
         else:
             delta = random.uniform(-0.08, 0.08)
@@ -152,6 +164,25 @@ class _ScoreHeuristicTweaker(ast.NodeTransformer):
                 "candidate": round(candidate, 4),
             }
         return ast.copy_location(ast.Constant(value=rounded), node)
+
+
+def _extract_numeric_patch(diff_text: str) -> Optional[float]:
+    """Extract the first numeric literal from a unified diff snippet."""
+
+    if not diff_text:
+        return None
+    for line in diff_text.splitlines():
+        line = line.strip()
+        if not line.startswith("+"):
+            continue
+        tokens = [tok for tok in re.split(r"[^0-9.,-]", line[1:]) if tok]
+        for token in tokens:
+            cleaned = token.replace(",", ".")
+            try:
+                return float(cleaned)
+            except ValueError:
+                continue
+    return None
 
 
 class CodeEvolver:
@@ -327,8 +358,26 @@ class CodeEvolver:
     def _patch_source(self, source: str, target: Dict[str, str]) -> Optional[CodePatch]:
         tree = ast.parse(source)
         learner_key = target.get("learner_key")
+        forced_value: Optional[float] = None
+        llm_metadata: Dict[str, Any] = {}
+        payload = {
+            "target_id": target.get("id"),
+            "summary": target.get("summary"),
+            "module": target.get("module"),
+            "current_constant_values": re.findall(r"_score\s*\([^)]*\)", source),
+        }
+        response = try_call_llm_dict(
+            "code_evolver",
+            input_payload=payload,
+            logger=logger,
+        )
+        if response:
+            llm_metadata = dict(response)
+            forced_value = _extract_numeric_patch(str(response.get("suggested_patch", "")))
         mutator = _ScoreHeuristicTweaker(
-            self._learners.get(learner_key), learner_key=learner_key
+            self._learners.get(learner_key),
+            learner_key=learner_key,
+            forced_value=forced_value,
         )
         patched = mutator.visit(tree)
         if not mutator.metadata:
@@ -350,6 +399,8 @@ class CodeEvolver:
         patch.target_id = target.get("id", "")
         # Attach metadata onto object for reporting
         metadata = dict(mutator.metadata)
+        if llm_metadata:
+            metadata.setdefault("llm_suggestion", llm_metadata)
         if patch.target_id and "target_id" not in metadata:
             metadata["target_id"] = patch.target_id
         setattr(patch, "_metadata", metadata)

@@ -1,5 +1,6 @@
 import copy
 import json
+import logging
 import math
 import os
 import time
@@ -13,6 +14,10 @@ from AGI_Evolutive.core.life_story import (
     ensure_story_structure,
 )
 from AGI_Evolutive.utils import now_iso, safe_write_json
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+LOGGER = logging.getLogger(__name__)
 
 _DEFAULT_SELF: Dict[str, Any] = {
     "identity": {
@@ -653,6 +658,15 @@ class SelfModel:
         self._align_story_goals()
         self._sync_identity()
         self.save()
+        self._maybe_apply_llm_identity(
+            "stimulus",
+            {
+                "event": payload,
+                "affinity": genetics_result,
+                "story_event": event,
+                "identity": self._identity_snapshot_for_llm(),
+            },
+        )
         return {
             "stimulus": payload,
             "affinity": genetics_result,
@@ -683,6 +697,13 @@ class SelfModel:
         self._align_story_goals()
         self._sync_identity()
         self.save()
+        self._maybe_apply_llm_identity(
+            "story_event",
+            {
+                "event": {"description": description, "tags": tags, "impact": impact, "origin": origin},
+                "identity": self._identity_snapshot_for_llm(),
+            },
+        )
         return event
 
     def story_snapshot(self, max_events: int = 5) -> Dict[str, Any]:
@@ -724,6 +745,16 @@ class SelfModel:
         self.identity["last_update_ts"] = self._now_ts()
         self._sync_identity()
         self.save()
+        self._maybe_apply_llm_identity(
+            "selfhood",
+            {
+                "traits": traits,
+                "phase": phase,
+                "claims": claims,
+                "identity": self._identity_snapshot_for_llm(),
+                "evidence_refs": evidence_refs,
+            },
+        )
 
     def update_state(
         self,
@@ -1374,3 +1405,98 @@ class SelfModel:
         return summary
 
     # ===================== Fin du patch SelfIdentity v2 =====================
+
+    def _maybe_apply_llm_identity(self, source: str, payload: Dict[str, Any]) -> None:
+        try:
+            request = {"source": source, **payload, "snapshot": self._identity_snapshot_for_llm()}
+        except Exception:
+            request = {"source": source, "snapshot": {}, **payload}
+        response = try_call_llm_dict(
+            "self_model",
+            input_payload=request,
+            logger=LOGGER,
+            max_retries=2,
+        )
+        if not response:
+            return
+        self._apply_llm_identity_guidance(response, source=source)
+
+    def _identity_snapshot_for_llm(self) -> Dict[str, Any]:
+        self.ensure_identity_paths()
+        ident = self.identity if isinstance(self.identity, dict) else {}
+        preferences_payload = ident.get("preferences", {})
+        preferences = preferences_payload if isinstance(preferences_payload, Mapping) else {}
+        style = preferences.get("style", {}) if isinstance(preferences.get("style"), Mapping) else {}
+        purpose_payload = ident.get("purpose")
+        purpose = purpose_payload if isinstance(purpose_payload, Mapping) else {}
+        narrative_payload = ident.get("narrative")
+        narrative = narrative_payload if isinstance(narrative_payload, Mapping) else {}
+        self_judgment_payload = ident.get("self_judgment")
+        self_judgment = self_judgment_payload if isinstance(self_judgment_payload, Mapping) else {}
+        return {
+            "values": preferences.get("values"),
+            "tone": style.get("tone"),
+            "current_goal": purpose.get("current_goal"),
+            "near_term_goals": purpose.get("near_term_goals"),
+            "recent_memories": (narrative.get("recent_memories") or [])[:3],
+            "traits": self_judgment.get("traits"),
+        }
+
+    def _apply_llm_identity_guidance(
+        self, guidance: Mapping[str, Any], *, source: str
+    ) -> None:
+        updated = False
+        traits = guidance.get("traits")
+        if isinstance(traits, list):
+            self.ensure_identity_paths()
+            sj = self.identity.setdefault("self_judgment", {})
+            trait_map = sj.setdefault("traits", {})
+            for entry in traits:
+                if not isinstance(entry, Mapping):
+                    continue
+                name = entry.get("name")
+                if not name:
+                    continue
+                delta = self._parse_trait_delta(entry.get("change"))
+                if delta is None:
+                    continue
+                current = self._safe_float(trait_map.get(name), 0.5)
+                trait_map[name] = max(0.0, min(1.0, current + delta))
+                updated = True
+        stories = guidance.get("stories")
+        if isinstance(stories, list) and stories:
+            self.ensure_identity_paths()
+            narrative = self.identity.setdefault("narrative", {})
+            summaries = narrative.setdefault("summaries", [])
+            for entry in stories:
+                text = str(entry).strip()
+                if text and text not in summaries:
+                    summaries.append(text)
+                    updated = True
+            if len(summaries) > 40:
+                del summaries[:-40]
+        if updated:
+            self.identity.setdefault("history", []).append(
+                {"ts": now_iso(), "source": f"llm::{source}", "guidance": dict(guidance)}
+            )
+            self.identity["last_update_ts"] = self._now_ts()
+            self._sync_identity()
+            self.save()
+
+    @staticmethod
+    def _parse_trait_delta(change: Any) -> Optional[float]:
+        if isinstance(change, (int, float)):
+            return float(change)
+        if isinstance(change, str):
+            text = change.strip().replace(",", ".")
+            if not text:
+                return None
+            try:
+                return float(text)
+            except ValueError:
+                if text.startswith("+") or text.startswith("-"):
+                    try:
+                        return float(text)
+                    except ValueError:
+                        return None
+        return None

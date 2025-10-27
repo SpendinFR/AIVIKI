@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import logging
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, Dict, Iterable, Mapping
+from typing import Deque, Dict, Iterable, Mapping, Optional
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+logger = logging.getLogger(__name__)
 
 
 def _safe_clip(value: float, min_value: float = 0.0, max_value: float = 1.0) -> float:
@@ -105,6 +111,16 @@ class ThinkingMonitor:
         surprise = self._compute_surprise(score)
         flag = self._compute_flag(weighted_time, normalized, score, surprise)
 
+        llm_feedback = self._llm_review(weighted_time, normalized, score)
+        if llm_feedback:
+            try:
+                proposed = llm_feedback.get("score")
+                if proposed is not None:
+                    score = _safe_clip(float(proposed))
+            except (TypeError, ValueError):
+                logger.debug("Invalid LLM score override: %r", llm_feedback.get("score"))
+            flag = flag or score < 0.35
+
         snapshot_features = {
             "weighted_time": weighted_time,
             "hypotheses": self._hypotheses,
@@ -113,6 +129,8 @@ class ThinkingMonitor:
             "surprise": surprise,
             **{f"feature_{k}": v for k, v in features.items()},
         }
+        if llm_feedback:
+            snapshot_features["llm"] = llm_feedback
         self._history.append(snapshot_features)
         self._last_features = {"score": score, **features}
         return ThinkingSnapshot(
@@ -170,6 +188,25 @@ class ThinkingMonitor:
         })
         self._history.clear()
         self._last_features = None
+
+    def _llm_review(
+        self,
+        weighted_time: float,
+        normalized: Mapping[str, float],
+        score: float,
+    ) -> Optional[Dict[str, Any]]:
+        payload = {
+            "thinking_time": weighted_time,
+            "normalized": dict(normalized),
+            "score": score,
+            "history": list(self._history),
+        }
+        response = try_call_llm_dict(
+            "thinking_monitor",
+            input_payload=payload,
+            logger=logger,
+        )
+        return dict(response) if response else None
 
     # ---- internals ----
     def _normalize_metrics(

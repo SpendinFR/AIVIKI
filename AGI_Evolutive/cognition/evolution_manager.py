@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import random
 import statistics
@@ -9,6 +10,10 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 from AGI_Evolutive.core.structures.mai import MAI
 from AGI_Evolutive.knowledge.mechanism_store import MechanismStore
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+logger = logging.getLogger(__name__)
 
 
 def _now() -> float:
@@ -752,6 +757,14 @@ class EvolutionManager:
 
     def export_dashboard(self) -> Dict[str, Any]:
         dash = self._make_dashboard_snapshot()
+        response = try_call_llm_dict(
+            "evolution_manager",
+            input_payload={"snapshot": dash},
+            logger=logger,
+        )
+        if response:
+            dash["llm_analysis"] = dict(response)
+            self.state.setdefault("telemetry", {})["llm_trend"] = dash["llm_analysis"]
         _safe_write_json(self.paths["dashboard"], dash)
         return dash
 

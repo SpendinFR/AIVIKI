@@ -5,11 +5,16 @@ from dataclasses import asdict
 from math import sqrt
 from typing import Callable, Dict, Any, List, Optional, Tuple
 
+import logging
 import random, copy, json, os, time
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
 from AGI_Evolutive.knowledge.mechanism_store import MechanismStore
 from AGI_Evolutive.core.structures.mai import MAI, Bid
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def rag_quality_signal(signals: dict) -> float:
@@ -529,8 +534,8 @@ class PolicyEngine:
 
         priority_hint = self._extract_priority(ctx)
 
-        scored: List[Tuple[float, Dict[str, Any], Dict[str, Any], Dict[str, Any]]] = []
-        for p in proposals:
+        scored: List[Tuple[str, float, Dict[str, Any], Dict[str, Any], Dict[str, Any]]] = []
+        for idx, p in enumerate(proposals):
             gate = self.validate_proposal(p, self_state)  # conserve ta logique actuelle (allow/deny/needs_human)
             if gate.get("decision") == "deny":
                 continue
@@ -544,14 +549,28 @@ class PolicyEngine:
             if priority_hint is not None:
                 final = max(0.0, min(1.0, 0.65 * final + 0.35 * priority_hint))
 
-            scored.append((final, p, gate, {"conf": conf, "bonus": bonus, "priority_hint": priority_hint}))
+            proposal_id = self._proposal_id(p, idx)
+            scored.append((proposal_id, final, p, gate, {"conf": conf, "bonus": bonus, "priority_hint": priority_hint}))
 
         if not scored:
             self.last_decision = {"decision": "noop", "reason": "all denied", "confidence": 0.45}
             return self.last_decision
 
-        scored.sort(key=lambda t: t[0], reverse=True)
-        best_score, best_p, best_gate, meta = scored[0]
+        scored.sort(key=lambda t: t[1], reverse=True)
+        llm_selection = self._llm_select_proposal(scored, ctx=ctx, self_state=self_state)
+        if llm_selection is not None:
+            best_id, best_score, llm_meta = llm_selection
+            found = next((item for item in scored if item[0] == best_id), None)
+            if found is not None:
+                _, _, best_p, best_gate, meta = found
+                meta = dict(meta)
+                meta["llm"] = llm_meta
+            else:
+                _, best_score, best_p, best_gate, meta = scored[0]
+                meta = dict(meta)
+                meta.setdefault("llm", {}).update(llm_meta or {})
+        else:
+            _, best_score, best_p, best_gate, meta = scored[0]
 
         if best_gate.get("decision") == "needs_human":
             self.last_decision = {
@@ -585,6 +604,55 @@ class PolicyEngine:
             "meta": meta,
         }
         return self.last_decision
+
+    def _proposal_id(self, proposal: Dict[str, Any], idx: int) -> str:
+        for key in ("id", "proposal_id", "action", "name"):
+            value = proposal.get(key)
+            if isinstance(value, str) and value:
+                return value
+        return f"proposal_{idx}"
+
+    def _llm_select_proposal(
+        self,
+        scored: List[Tuple[str, float, Dict[str, Any], Dict[str, Any], Dict[str, Any]]],
+        *,
+        ctx: Optional[Dict[str, Any]],
+        self_state: Optional[Dict[str, Any]],
+    ) -> Optional[Tuple[str, float, Dict[str, Any]]]:
+        payload = {
+            "proposals": [
+                {
+                    "id": proposal_id,
+                    "heuristic_score": score,
+                    "gate": gate,
+                    "meta": meta,
+                    "proposal": proposal,
+                }
+                for proposal_id, score, proposal, gate, meta in scored
+            ],
+            "context": ctx or {},
+            "self_state": self_state or {},
+        }
+        response = try_call_llm_dict(
+            "policy_engine",
+            input_payload=payload,
+            logger=LOGGER,
+        )
+        if not response:
+            return None
+        proposal_id = response.get("proposal_id")
+        if not isinstance(proposal_id, str):
+            return None
+        value_estimate = response.get("value_estimate")
+        if not isinstance(value_estimate, (int, float)):
+            return None
+        stability = response.get("stability")
+        meta = {
+            "stability": float(stability) if isinstance(stability, (int, float)) else None,
+            "rationale": response.get("rationale", ""),
+            "notes": response.get("notes", ""),
+        }
+        return proposal_id, max(0.0, min(1.0, float(value_estimate))), meta
 
     def _extract_priority(self, ctx: Optional[Dict[str, Any]]) -> Optional[float]:
         if not isinstance(ctx, dict):

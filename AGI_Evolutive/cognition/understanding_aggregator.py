@@ -1,10 +1,28 @@
 from __future__ import annotations
 
 import random
+import logging
 from dataclasses import dataclass
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, Optional, Mapping
 
 from AGI_Evolutive.cognition.meta_cognition import OnlineLinear
+from AGI_Evolutive.utils.llm_service import (
+    LLMIntegrationError,
+    LLMUnavailableError,
+    get_llm_manager,
+    is_llm_enabled,
+)
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _llm_enabled() -> bool:
+    return is_llm_enabled()
+
+
+def _llm_manager():
+    return get_llm_manager()
 
 
 def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
@@ -87,6 +105,7 @@ class UnderstandingAggregator:
             warmup=24,
             init_weight=0.0,
         )
+        self._last_llm_summary: Optional[Mapping[str, Any]] = None
 
     @staticmethod
     def _ema(prev: float, x: float, alpha: float) -> float:
@@ -143,6 +162,25 @@ class UnderstandingAggregator:
         U_inst -= 0.05 * cg
         return _clamp(U_inst)
 
+    def _llm_assimilate(self, payload: Dict[str, Any]) -> Optional[Mapping[str, Any]]:
+        if not _llm_enabled():
+            return None
+
+        try:
+            response = _llm_manager().call_dict(
+                "understanding_aggregator",
+                input_payload=payload,
+            )
+        except (LLMUnavailableError, LLMIntegrationError):
+            LOGGER.debug("LLM understanding aggregator unavailable", exc_info=True)
+            return None
+
+        if not isinstance(response, Mapping):
+            return None
+
+        self._last_llm_summary = dict(response)
+        return self._last_llm_summary
+
     def compute(
         self,
         topic: Optional[str],
@@ -166,7 +204,34 @@ class UnderstandingAggregator:
         features = self._build_features(topic, pe, mc, tr, ex, sa, cp, cg)
         model_pred = self._model.predict(features)
         confidence = _clamp(self._model.confidence())
+        llm_payload = {
+            "topic": topic,
+            "prediction_error": pe,
+            "memory_consistency": mc,
+            "transfer_success": tr,
+            "explanatory_adequacy": ex,
+            "social_appraisal": sa,
+            "clarification_penalty": cp,
+            "calibration_gap": cg,
+        }
+        llm_summary = self._llm_assimilate(llm_payload)
+        llm_weight = 0.0
         blended = baseline * (1.0 - confidence) + model_pred * confidence
+        if llm_summary:
+            try:
+                llm_score = _clamp(float(llm_summary.get("assimilation_score", blended)))
+            except (TypeError, ValueError):
+                llm_score = blended
+            llm_weight = 0.3
+            total_weight = (1.0 - confidence) + confidence + llm_weight
+            if total_weight > 0:
+                blended = (
+                    baseline * (1.0 - confidence)
+                    + model_pred * confidence
+                    + llm_score * llm_weight
+                ) / total_weight
+            else:
+                blended = llm_score
 
         reward = _clamp(1.0 - pe - 0.5 * cp - 0.5 * cg)
 
@@ -212,6 +277,9 @@ class UnderstandingAggregator:
             "topic_drift": abs(U_topic - prev_topic) if topic else 0.0,
             "global_drift": abs(self._global_ema - prev_global),
         }
+        if llm_summary:
+            details["llm"] = llm_summary
+            details["llm_weight"] = llm_weight
 
         uncertainty = _clamp(1.0 - confidence)
 

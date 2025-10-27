@@ -5,7 +5,9 @@ import random
 import threading
 import time
 
-from typing import Any, Dict, List
+import logging
+
+from typing import Any, Dict, List, Mapping, Optional
 
 from AGI_Evolutive.goals.dag_store import GoalDAG
 from AGI_Evolutive.reasoning.structures import (
@@ -15,6 +17,9 @@ from AGI_Evolutive.reasoning.structures import (
     episode_record,
 )
 from AGI_Evolutive.runtime.logger import JSONLLogger
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+LOGGER = logging.getLogger(__name__)
 
 
 class AutonomyCore:
@@ -122,6 +127,16 @@ class AutonomyCore:
         prior = self._sigmoid(score)
         expected_info_gain = max(0.05, min(0.95, self._sigmoid(score + 0.35)))
 
+        llm_guidance = self._query_llm_guidance(
+            goal_id=goal_id,
+            features=features,
+            belief=belief,
+            novelty=novelty_fam,
+            progress=progress_smoothed,
+            evi=evi,
+            proposals=proposals,
+        )
+
         h = [
             Hypothesis(
                 content=f"Une micro-étape sur {goal_id} accélère la compréhension",
@@ -170,6 +185,10 @@ class AutonomyCore:
             except Exception as exc:
                 decision = {"decision": "error", "reason": str(exc), "confidence": 0.3}
                 self.logger.write("autonomy.warn", stage="policy_decide", error=str(exc))
+
+        if llm_guidance:
+            decision = dict(decision)
+            decision.setdefault("llm_guidance", llm_guidance)
 
         # 4) Mise à jour DAG + logs
         progress_step = max(0.002, min(0.02, prior * 0.02))
@@ -365,3 +384,34 @@ class AutonomyCore:
             params["alpha"] += 1.0
         else:
             params["beta"] += 1.0
+
+    def _query_llm_guidance(
+        self,
+        *,
+        goal_id: str,
+        features: Dict[str, float],
+        belief: float,
+        novelty: float,
+        progress: float,
+        evi: float,
+        proposals: List[Dict[str, Any]],
+    ) -> Optional[Mapping[str, Any]]:
+        payload = {
+            "goal_id": goal_id,
+            "features": features,
+            "belief": belief,
+            "novelty": novelty,
+            "progress": progress,
+            "evi": evi,
+            "proposals": proposals,
+        }
+
+        response = try_call_llm_dict(
+            "autonomy_core",
+            input_payload=payload,
+            logger=LOGGER,
+        )
+
+        if isinstance(response, Mapping):
+            return dict(response)
+        return None

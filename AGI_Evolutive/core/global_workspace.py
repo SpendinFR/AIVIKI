@@ -2,14 +2,19 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import random
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from AGI_Evolutive.cognition.meta_cognition import OnlineLinear
 from AGI_Evolutive.core.structures.mai import Bid
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _heuristic_info_gain(signals: Dict[str, float]) -> float:
@@ -319,6 +324,8 @@ class GlobalWorkspace:
 
         scored: List[Tuple[float, Bid]] = []
         self._decision_trace.clear()
+        llm_candidates: List[Dict[str, Any]] = []
+        scored_candidates: List[Dict[str, Any]] = []
         for hint, bids in groups.items():
             avg_gain = sum(max(0.0, x.expected_info_gain) for x in bids) / max(1, len(bids))
             avg_urg = sum(max(0.0, x.urgency) for x in bids) / max(1, len(bids))
@@ -331,7 +338,32 @@ class GlobalWorkspace:
             confidence = self._score_model.confidence()
             correction = (model_pred - 0.5) * (0.5 + 0.5 * confidence)
             score = base_score + correction
-            scored.append((score, bids[0]))
+            primary_bid = bids[0]
+            bid_id = primary_bid.payload.get("id") if isinstance(primary_bid.payload, Mapping) else None
+            if not bid_id:
+                bid_id = f"{primary_bid.source}:{primary_bid.action_hint}:{id(primary_bid)}"
+            scored.append((score, primary_bid))
+            candidate_payload = {
+                "id": bid_id,
+                "hint": hint,
+                "source": primary_bid.source,
+                "action_hint": primary_bid.action_hint,
+                "score": score,
+                "base_score": base_score,
+                "model_pred": model_pred,
+                "bandit_key": bandit_key,
+                "confidence": confidence,
+                "payload": _truncate_payload(primary_bid.payload),
+            }
+            llm_candidates.append(candidate_payload)
+            scored_candidates.append(
+                {
+                    "id": bid_id,
+                    "hint": hint,
+                    "score": score,
+                    "bid": primary_bid,
+                }
+            )
             self._decision_trace[hint] = {
                 "features": features,
                 "bandit_key": bandit_key,
@@ -339,8 +371,11 @@ class GlobalWorkspace:
                 "model_pred": model_pred,
                 "correction": correction,
                 "final_score": score,
+                "candidate_id": bid_id,
             }
 
+        ordered = self._apply_llm_ranking(llm_candidates, scored_candidates)
+        scored = [(entry["score"], entry["bid"]) for entry in ordered]
         scored.sort(key=lambda t: t[0], reverse=True)
         K = min(5, len(scored))
         self._trace_last_winners = [bid for _, bid in scored[:K]]
@@ -398,5 +433,75 @@ class GlobalWorkspace:
         trace = self._rag_trace.get(str(frame_id))
         if trace:
             self._rag_model.update(trace.get("features", {}), reward)
+
+    def _apply_llm_ranking(
+        self,
+        candidates: Sequence[Mapping[str, Any]],
+        scored_candidates: Sequence[Mapping[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Ask the LLM to rank bids and merge with heuristic scores."""
+
+        llm_payload = {
+            "candidates": [dict(candidate) for candidate in candidates],
+            "recent_winners": [
+                {
+                    "id": getattr(bid, "action_hint", None),
+                    "source": getattr(bid, "source", None),
+                }
+                for bid in self._trace_last_winners
+            ],
+        }
+        response = try_call_llm_dict(
+            "global_workspace",
+            input_payload=llm_payload,
+            logger=LOGGER,
+            max_retries=2,
+        )
+        candidate_by_id = {entry["id"]: dict(entry) for entry in scored_candidates if entry.get("id")}
+        if response:
+            self._decision_trace["llm_ranking"] = dict(response)
+        if not response:
+            return [dict(entry) for entry in scored_candidates]
+
+        ranking = response.get("ranking")
+        ordered: List[Dict[str, Any]] = []
+        if isinstance(ranking, Sequence):
+            for position, item in enumerate(ranking):
+                if not isinstance(item, Mapping):
+                    continue
+                candidate_id = item.get("id") or item.get("hint")
+                candidate = candidate_by_id.get(candidate_id)
+                if not candidate:
+                    continue
+                candidate = dict(candidate)
+                try:
+                    candidate["llm_score"] = float(item.get("score", 0.0))
+                except (TypeError, ValueError):
+                    candidate["llm_score"] = 0.0
+                candidate["llm_rank"] = position
+                candidate["llm_explanation"] = item.get("explanation")
+                ordered.append(candidate)
+        remaining = [
+            dict(entry)
+            for entry in scored_candidates
+            if entry.get("id") not in {item.get("id") for item in ordered}
+        ]
+        remaining.sort(key=lambda entry: entry.get("score", 0.0), reverse=True)
+        ordered.extend(remaining)
+        return ordered
+
+
+def _truncate_payload(payload: Mapping[str, Any] | None, *, max_items: int = 8) -> Dict[str, Any]:
+    if not isinstance(payload, Mapping):
+        return {}
+    result: Dict[str, Any] = {}
+    for idx, (key, value) in enumerate(payload.items()):
+        if idx >= max_items:
+            break
+        try:
+            result[str(key)] = value if isinstance(value, (str, int, float, bool)) else str(value)
+        except Exception:
+            result[str(key)] = "(unserializable)"
+    return result
             self._rag_trace.pop(str(frame_id), None)
             self._save_state()

@@ -8,7 +8,14 @@ import re
 import unicodedata
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+from AGI_Evolutive.utils.llm_service import (
+    LLMIntegrationError,
+    LLMUnavailableError,
+    get_llm_manager,
+    is_llm_enabled,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -16,7 +23,9 @@ _MODULE_DIR = Path(__file__).resolve().parent
 _PATTERNS_PATH = _MODULE_DIR / "intent_patterns_fr.json"
 _MODEL_PATH = _MODULE_DIR / "models" / "intent_classifier_fallback_fr.json"
 _FEEDBACK_LOG_PATH = _MODULE_DIR.parents[1] / "data" / "intent_classifier_feedback.log"
+_LLM_AUDIT_PATH = _MODULE_DIR.parents[1] / "data" / "intent_classifier_llm.jsonl"
 _ML_CONFIDENCE_THRESHOLD = 0.45
+_LLM_CONFIDENCE_THRESHOLD = 0.58
 
 
 def normalize_text(text: str) -> str:
@@ -47,6 +56,10 @@ def classify(text: str) -> str:
     normalized = normalize_text(text)
     patterns = _get_patterns()
 
+    llm_result = _classify_with_llm(text, normalized)
+    if llm_result is not None:
+        return llm_result
+
     if any(pattern.search(normalized) for pattern in patterns["THREAT"]):
         return "THREAT"
     if any(pattern.search(normalized) for pattern in patterns["QUESTION"]):
@@ -73,6 +86,76 @@ def log_uncertain_intent(original: str, normalized: str, predicted_label: str, s
             log_file.write("\n")
     except OSError:  # pragma: no cover - best effort logging
         LOGGER.debug("Unable to persist uncertain intent feedback", exc_info=True)
+
+
+def _llm_enabled() -> bool:
+    return is_llm_enabled()
+
+
+def _llm_manager():
+    return get_llm_manager()
+
+
+def _log_llm_decision(
+    original: str,
+    normalized: str,
+    label: str,
+    confidence: float,
+    response: Mapping[str, Any],
+) -> None:
+    audit_payload = {
+        "original": original,
+        "normalized": normalized,
+        "label": label,
+        "confidence": round(confidence, 4),
+        "class_probabilities": response.get("class_probabilities"),
+        "indices": response.get("indices"),
+        "notes": response.get("notes"),
+    }
+    try:
+        _LLM_AUDIT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _LLM_AUDIT_PATH.open("a", encoding="utf-8") as handle:
+            json.dump(audit_payload, handle, ensure_ascii=False)
+            handle.write("\n")
+    except OSError:  # pragma: no cover - best effort logging
+        LOGGER.debug("Unable to persist LLM audit payload", exc_info=True)
+
+
+def _classify_with_llm(original: str, normalized: str) -> Optional[str]:
+    if not _llm_enabled():
+        return None
+
+    payload = {"utterance": original, "normalized": normalized}
+    try:
+        response = _llm_manager().call_dict("intent_classification", input_payload=payload)
+    except (LLMUnavailableError, LLMIntegrationError):
+        LOGGER.debug("LLM intent classification unavailable", exc_info=True)
+        return None
+
+    if not isinstance(response, Mapping):
+        return None
+
+    intent = response.get("intent")
+    if not isinstance(intent, str):
+        return None
+
+    intent_label = intent.strip().upper()
+    if not intent_label:
+        return None
+
+    try:
+        confidence_raw = response.get("confidence", response.get("confidence_score", 0.0))
+        confidence = float(confidence_raw)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
+
+    if confidence < _LLM_CONFIDENCE_THRESHOLD:
+        log_uncertain_intent(original, normalized, intent_label, confidence)
+        return None
+
+    _log_llm_decision(original, normalized, intent_label, confidence, response)
+    return intent_label
 
 
 @lru_cache()

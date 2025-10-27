@@ -3,10 +3,16 @@ from __future__ import annotations
 
 import copy
 import math
+import logging
 import time
 import unicodedata
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+LOGGER = logging.getLogger(__name__)
 
 _DEFAULT_TRAITS: Dict[str, float] = {
     "curiosity": 0.7,
@@ -1182,6 +1188,24 @@ class LifeStoryManager:
                 tags=tags,
             )
         event["quest"] = quest
+        llm_response = try_call_llm_dict(
+            "life_story",
+            input_payload={
+                "event": event,
+                "quest": quest,
+                "recent_timeline": self.data.get("timeline", [])[-5:],
+            },
+            logger=LOGGER,
+            max_retries=2,
+        )
+        if llm_response:
+            episode = llm_response.get("episode")
+            if isinstance(episode, Mapping):
+                event["episode"] = dict(episode)
+                timeline = self.data.setdefault("timeline", [])
+                timeline.append(dict(episode))
+                if len(timeline) > self.MAX_TIMELINE:
+                    del timeline[:-self.MAX_TIMELINE]
         self._append_event(event)
         self._advance_arcs(tags, impact)
         return event

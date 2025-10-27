@@ -3,7 +3,12 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional, List, Deque, Tuple
-import time, threading, heapq, os, json, uuid, traceback, collections, math, random
+import time, threading, heapq, os, json, uuid, traceback, collections, math, random, logging
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _now() -> float:
@@ -267,12 +272,15 @@ class JobManager:
             job.metrics["base_priority"] = priority
             context_features = self._build_context_features_locked(job, priority)
             job.context_features = context_features
+            llm_overlay = self._llm_rescore(job, context_features)
             with self._model_lock:
                 model_pred = self._priority_model.predict(context_features)
                 confidence = self._priority_model.confidence
                 noise_scale = self._priority_model.noise_scale
             noise = random.uniform(-noise_scale, noise_scale) if noise_scale > 0 else 0.0
             adjusted_priority = self._blend_priority(priority, model_pred, confidence, noise)
+            if llm_overlay is not None:
+                adjusted_priority = max(0.0, min(1.0, float(llm_overlay)))
             job.predicted_priority = model_pred
             job.priority = adjusted_priority
             job.metrics.update(
@@ -284,6 +292,8 @@ class JobManager:
                     "context_size": len(context_features),
                 }
             )
+            if llm_overlay is not None:
+                job.metrics.setdefault("llm_guidance", {})["priority"] = adjusted_priority
             if context_features:
                 job.metrics["context_preview"] = dict(list(context_features.items())[:8])
             self._jobs[jid] = job
@@ -292,6 +302,32 @@ class JobManager:
             self._push_pq(job)
             self._log({"event": "submit", "job": self._job_view(job)})
             return jid
+
+    def _llm_rescore(self, job: Job, context_features: Dict[str, float]) -> Optional[float]:
+        payload = {
+            "job": {
+                "id": job.id,
+                "kind": job.kind,
+                "queue": job.queue,
+                "priority": job.priority,
+                "base_priority": job.base_priority,
+                "timeout_s": job.timeout_s,
+                "args_keys": sorted(list(job.args.keys())),
+            },
+            "context_features": context_features,
+        }
+        response = try_call_llm_dict(
+            "runtime_job_manager",
+            input_payload=payload,
+            logger=LOGGER,
+        )
+        if not response:
+            return None
+        priority = response.get("priority")
+        if isinstance(priority, (int, float)):
+            job.metrics.setdefault("llm_guidance", {})["justification"] = response.get("justification", "")
+            return float(max(0.0, min(1.0, priority)))
+        return None
 
     def cancel(self, job_id: str) -> bool:
         with self._lock:
