@@ -230,6 +230,63 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         },
     ),
     _spec(
+        "metacognition_reflection_synthesis",
+        "AGI_Evolutive/metacognition/__init__.py",
+        "Analyse la situation métacognitive et propose une synthèse exploitable.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Retourne toujours les champs insights, conclusions et action_plans.",
+            "Chaque plan d'action doit avoir type, description, priority, estimated_effort, expected_benefit et domain.",
+            "Ajoute quality_estimate (0-1) et optional_quality_notes.",
+        ),
+        example_output={
+            "insights": [
+                "Tension entre vitesse de raisonnement et précision détectée",
+                "Charge cognitive élevée liée aux interruptions récentes",
+            ],
+            "conclusions": [
+                "Stabiliser la prise de décision dans le domaine raisonnement",
+                "Planifier une réduction de charge cognitive",
+            ],
+            "action_plans": [
+                {
+                    "type": "strategy_adjustment",
+                    "description": "Introduire un cycle de vérification par pair pour les décisions critiques",
+                    "priority": "high",
+                    "estimated_effort": 0.5,
+                    "expected_benefit": 0.75,
+                    "domain": "raisonnement",
+                }
+            ],
+            "quality_estimate": 0.68,
+            "optional_quality_notes": "Réduire les interruptions avant la prochaine revue.",
+            "notes": "",
+        },
+    ),
+    _spec(
+        "metacognition_experiment_planner",
+        "AGI_Evolutive/metacognition/experimentation.py",
+        "Choisis ou compose un plan d'expérimentation ciblé pour améliorer la métrique.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Utilise should_plan pour indiquer s'il faut lancer un test.",
+            "Inclue plan_id, plan (dict), parameters (dict), target_change (0-1) et duration_cycles (entier).",
+            "Ajoute un champ notes pour les instructions complémentaires.",
+        ),
+        example_output={
+            "should_plan": True,
+            "plan_id": "meta_reflection",
+            "plan": {
+                "strategy": "meta_reflection",
+                "details": "1 question méta avant chaque session d'apprentissage",
+            },
+            "parameters": {"reflection_depth": 2},
+            "target_change": 0.11,
+            "duration_cycles": 3,
+            "notes": "Surveiller la fatigue cognitive pendant l'essai.",
+        },
+    ),
+    _spec(
         "memory_semantic_embedding",
         "AGI_Evolutive/memory/embedding_adapters.py",
         "Analyse un souvenir et fournis des mots-clés, thèmes et relations associées.",

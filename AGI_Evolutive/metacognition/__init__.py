@@ -4,6 +4,7 @@ Système de Métacognition Avancée de l'AGI Évolutive
 Capacité à réfléchir sur ses propres processus de pensée, à se comprendre et à s'auto-améliorer
 """
 
+import logging
 import numpy as np
 import time
 from datetime import datetime, timedelta
@@ -18,8 +19,12 @@ import inspect
 import re
 
 from AGI_Evolutive.cognition.meta_cognition import OnlineLinear
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 from .experimentation import MetacognitionExperimenter, calibrate_self_model
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _clip(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
@@ -960,34 +965,139 @@ class MetacognitiveSystem:
         self._register_reflection_outcome(reflection)
 
         return reflection
-    
+
+    @staticmethod
+    def _coerce_str_list(value: Any) -> List[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            text = value.strip()
+            return [text] if text else []
+        if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+            results: List[str] = []
+            for item in value:
+                if isinstance(item, str):
+                    text = item.strip()
+                    if text:
+                        results.append(text)
+            return results
+        return []
+
+    @staticmethod
+    def _coerce_action_plan_list(value: Any, domain: CognitiveDomain) -> List[Dict[str, Any]]:
+        if not isinstance(value, Sequence) or isinstance(value, (bytes, bytearray, str)):
+            return []
+        plans: List[Dict[str, Any]] = []
+        for item in value:
+            if not isinstance(item, Mapping):
+                continue
+            try:
+                estimated_effort = _clip(float(item.get("estimated_effort", 0.5)))
+            except (TypeError, ValueError):
+                estimated_effort = 0.5
+            try:
+                expected_benefit = _clip(float(item.get("expected_benefit", 0.5)))
+            except (TypeError, ValueError):
+                expected_benefit = 0.5
+            plan: Dict[str, Any] = {
+                "type": str(item.get("type", "")).strip() or "unspecified",
+                "description": str(item.get("description", "")).strip() or "",
+                "priority": str(item.get("priority", "medium")).strip() or "medium",
+                "estimated_effort": estimated_effort,
+                "expected_benefit": expected_benefit,
+                "domain": str(item.get("domain", domain.value)).strip() or domain.value,
+            }
+            if plan["description"]:
+                plans.append(plan)
+        return plans
+
+    def _call_reflection_llm(
+        self,
+        reflection: ReflectionSession,
+        situation_analysis: Mapping[str, Any],
+        evidence_review: Mapping[str, Any],
+        heuristic_bundle: Mapping[str, Any],
+    ) -> Optional[Mapping[str, Any]]:
+        payload = {
+            "trigger": reflection.trigger,
+            "domain": reflection.focus_domain.value,
+            "depth_level": reflection.depth_level,
+            "urgency": self._assess_reflection_urgency(reflection),
+            "situation_analysis": situation_analysis,
+            "evidence": evidence_review,
+            "heuristic_summary": heuristic_bundle,
+        }
+        return try_call_llm_dict(
+            "metacognition_reflection_synthesis",
+            input_payload=payload,
+            logger=LOGGER,
+        )
+
     def _execute_reflection_session(self, reflection: ReflectionSession):
         """Exécute une session de réflexion structurée"""
-        
+
         # Phase 1: Analyse de la situation déclencheuse
         situation_analysis = self._analyze_reflection_trigger(reflection)
-        
+
         # Phase 2: Examen des preuves et données
         evidence_review = self._gather_relevant_evidence(reflection.focus_domain)
-        
-        # Phase 3: Génération d'insights
-        insights = self._generate_insights(situation_analysis, evidence_review, reflection.depth_level)
-        reflection.insights.extend(insights)
-        
-        # Phase 4: Formulation de conclusions
-        conclusions = self._draw_conclusions(insights, reflection.focus_domain)
-        reflection.conclusions.extend(conclusions)
-        
-        # Phase 5: Planification d'actions
-        action_plans = self._develop_action_plans(conclusions, reflection.focus_domain)
-        reflection.action_plans.extend(action_plans)
-        
+
+        heuristic_insights = self._generate_insights(
+            situation_analysis, evidence_review, reflection.depth_level
+        )
+        heuristic_conclusions = self._draw_conclusions(
+            heuristic_insights, reflection.focus_domain
+        )
+        heuristic_action_plans = self._develop_action_plans(
+            heuristic_conclusions, reflection.focus_domain
+        )
+
+        llm_response = self._call_reflection_llm(
+            reflection,
+            situation_analysis,
+            evidence_review,
+            {
+                "insights": heuristic_insights,
+                "conclusions": heuristic_conclusions,
+                "action_plans": heuristic_action_plans,
+            },
+        )
+
+        if llm_response:
+            llm_insights = self._coerce_str_list(llm_response.get("insights"))
+            llm_conclusions = self._coerce_str_list(llm_response.get("conclusions"))
+            llm_plans = self._coerce_action_plan_list(
+                llm_response.get("action_plans"), reflection.focus_domain
+            )
+
+            reflection.insights.extend(llm_insights or heuristic_insights)
+            reflection.conclusions.extend(llm_conclusions or heuristic_conclusions)
+            reflection.action_plans.extend(llm_plans or heuristic_action_plans)
+
+            try:
+                quality_estimate = float(llm_response.get("quality_estimate", 0.0))
+                reflection.quality_score = max(reflection.quality_score, _clip(quality_estimate))
+            except (TypeError, ValueError):
+                pass
+
+            notes = llm_response.get("optional_quality_notes") or llm_response.get("notes")
+            if isinstance(notes, str) and notes.strip():
+                setattr(reflection, "llm_notes", notes.strip())
+        else:
+            reflection.insights.extend(heuristic_insights)
+            reflection.conclusions.extend(heuristic_conclusions)
+            reflection.action_plans.extend(heuristic_action_plans)
+
         # Phase 6: Évaluation de la session
         reflection.duration = time.time() - reflection.start_time
-        reflection.quality_score = self._evaluate_reflection_quality(reflection)
-        
+        heuristic_quality = self._evaluate_reflection_quality(reflection)
+        if reflection.quality_score:
+            reflection.quality_score = max(reflection.quality_score, heuristic_quality)
+        else:
+            reflection.quality_score = heuristic_quality
+
         # Enregistrement des insights
-        for insight in insights:
+        for insight in reflection.insights:
             self.metacognitive_history["insights"].append({
                 "timestamp": time.time(),
                 "insight": insight,
