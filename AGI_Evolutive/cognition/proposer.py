@@ -1,4 +1,10 @@
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Mapping
+import logging
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+logger = logging.getLogger(__name__)
 
 
 class Proposer:
@@ -25,4 +31,38 @@ class Proposer:
                     "value": ["growth", "truth", "help", "empathy"],
                 }
             )
+
+        payload = {
+            "drives": drives,
+            "recent_errors": error_count,
+            "recent_memories": [memo for memo in recent[:10] if isinstance(memo, Mapping)],
+            "fallback_proposals": proposals,
+        }
+
+        llm_result = try_call_llm_dict(
+            "cognition_proposer",
+            input_payload=payload,
+            logger=logger,
+        )
+
+        if isinstance(llm_result, Mapping):
+            suggestions = llm_result.get("suggestions")
+            if isinstance(suggestions, list):
+                enriched: List[Dict[str, Any]] = []
+                for item in suggestions:
+                    if not isinstance(item, Mapping):
+                        continue
+                    suggestion = {
+                        "type": item.get("type", "update"),
+                        "path": item.get("path") or item.get("target") or [],
+                        "value": item.get("value") or item.get("adjustment"),
+                        "cause": item.get("cause"),
+                    }
+                    enriched.append(suggestion)
+                if enriched:
+                    proposals = enriched
+            notes = llm_result.get("notes")
+            if isinstance(notes, str) and notes.strip():
+                proposals.append({"type": "note", "value": notes.strip()})
+
         return proposals

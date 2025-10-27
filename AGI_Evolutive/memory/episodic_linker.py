@@ -1,8 +1,9 @@
+import logging
 import os
 import json
 import time
 import glob
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Mapping
 
 try:
     from AGI_Evolutive.learning import OnlineLinearModel, ThompsonBandit
@@ -11,6 +12,10 @@ except Exception:  # pragma: no cover - learning module optional in some builds
     ThompsonBandit = None  # type: ignore[assignment]
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+logger = logging.getLogger(__name__)
 
 
 def _now():
@@ -35,6 +40,24 @@ REL_CAUSES = "CAUSES"
 REL_REFERS = "REFERS_TO"
 REL_SUPPORTS = "SUPPORTS"
 REL_CONTRADICTS = "CONTRADICTS"
+
+LLM_RELATION_MAP = {
+    "cause": REL_CAUSES,
+    "causal": REL_CAUSES,
+    "causation": REL_CAUSES,
+    "root_cause": REL_CAUSES,
+    "support": REL_SUPPORTS,
+    "soutien": REL_SUPPORTS,
+    "backing": REL_SUPPORTS,
+    "contradiction": REL_CONTRADICTS,
+    "oppose": REL_CONTRADICTS,
+    "ref": REL_REFERS,
+    "reference": REL_REFERS,
+    "cite": REL_REFERS,
+    "sequence": REL_NEXT,
+    "follow": REL_NEXT,
+    "suivi": REL_NEXT,
+}
 
 
 class _AdaptiveScheduler:
@@ -464,6 +487,28 @@ class EpisodicLinker:
         ids = [memory.get("id") or memory.get("_id") or memory.get("memory_id") for memory in mems]
         texts = [str(memory.get("content", "")) for memory in mems]
 
+        alias_map: Dict[str, str] = {}
+        id_to_alias: Dict[str, str] = {}
+        llm_memories: List[Dict[str, Any]] = []
+        sample_count = min(len(mems), 12)
+        for idx in range(sample_count):
+            mem_id = ids[idx]
+            if not mem_id:
+                continue
+            alias = f"m{idx}"
+            alias_map[alias] = mem_id
+            id_to_alias[mem_id] = alias
+            memory = mems[idx]
+            llm_memories.append(
+                {
+                    "alias": alias,
+                    "id": mem_id,
+                    "kind": memory.get("kind"),
+                    "timestamp": self._memory_timestamp(memory),
+                    "summary": (memory.get("content") or memory.get("text") or "")[:280],
+                }
+            )
+
         # NEXT relations (séquentiel)
         for i in range(len(ids) - 1):
             rels.append({"src": ids[i], "dst": ids[i + 1], "rel": REL_NEXT})
@@ -488,6 +533,100 @@ class EpisodicLinker:
                 rels.append({"src": ids[i], "dst": ids[i + 1], "rel": REL_CONTRADICTS})
             if ("appris" in b or "confirm" in b or "conclu" in b) and len(a) > 10:
                 rels.append({"src": ids[i], "dst": ids[i + 1], "rel": REL_SUPPORTS})
+
+        fallback_relations = list(rels)
+
+        llm_notes: Optional[str] = None
+        llm_added: List[Dict[str, Any]] = []
+        if llm_memories:
+            existing_for_llm: List[Dict[str, Any]] = []
+            for rel in fallback_relations:
+                src_alias = id_to_alias.get(rel.get("src"))
+                dst_alias = id_to_alias.get(rel.get("dst"))
+                if not src_alias or not dst_alias:
+                    continue
+                existing_for_llm.append(
+                    {
+                        "from": src_alias,
+                        "to": dst_alias,
+                        "relation": rel.get("rel"),
+                    }
+                )
+
+            llm_payload = {
+                "memories": llm_memories,
+                "existing_relations": existing_for_llm,
+            }
+
+            llm_result = try_call_llm_dict(
+                "episodic_linker",
+                input_payload=json_sanitize(llm_payload),
+                logger=logger,
+            )
+
+            if isinstance(llm_result, Mapping):
+                links = llm_result.get("links")
+                if isinstance(links, (list, tuple)):
+                    existing_keys = {
+                        (rel.get("src"), rel.get("dst"), rel.get("rel"))
+                        for rel in fallback_relations
+                    }
+                    for item in links:
+                        if not isinstance(item, Mapping):
+                            continue
+                        src_val = item.get("from") or item.get("src")
+                        dst_val = item.get("to") or item.get("dst")
+                        rel_val = item.get("type_lien") or item.get("relation") or item.get("rel")
+                        if not rel_val:
+                            continue
+                        rel_code = LLM_RELATION_MAP.get(str(rel_val).lower(), None)
+                        if rel_code is None:
+                            rel_code = str(rel_val).upper()
+                        src_candidate = str(src_val).strip() if src_val is not None else ""
+                        dst_candidate = str(dst_val).strip() if dst_val is not None else ""
+                        src_id = alias_map.get(src_candidate) if src_candidate else None
+                        if src_id is None and src_candidate in ids:
+                            src_id = src_candidate
+                        if src_id is None and src_val in ids:
+                            src_id = src_val  # type: ignore[arg-type]
+                        dst_id = alias_map.get(dst_candidate) if dst_candidate else None
+                        if dst_id is None and dst_candidate in ids:
+                            dst_id = dst_candidate
+                        if dst_id is None and dst_val in ids:
+                            dst_id = dst_val  # type: ignore[arg-type]
+                        if not src_id or not dst_id:
+                            continue
+                        key = (src_id, dst_id, rel_code)
+                        if key in existing_keys:
+                            continue
+                        confidence_val = item.get("confidence")
+                        confidence = None
+                        try:
+                            if confidence_val is not None:
+                                confidence = max(0.0, min(1.0, float(confidence_val)))
+                        except (TypeError, ValueError):
+                            confidence = None
+                        relation_entry: Dict[str, Any] = {
+                            "src": src_id,
+                            "dst": dst_id,
+                            "rel": rel_code,
+                        }
+                        if confidence is not None:
+                            relation_entry["confidence"] = confidence
+                        rels.append(relation_entry)
+                        existing_keys.add(key)
+                        llm_added.append(relation_entry)
+                notes_val = llm_result.get("notes")
+                if isinstance(notes_val, str) and notes_val.strip():
+                    llm_notes = notes_val.strip()
+
+        if (llm_added or llm_notes) and isinstance(self.state, dict):
+            llm_state = self.state.setdefault("llm", {})
+            llm_state["episodic_linker"] = {
+                "links": json_sanitize(llm_added),
+                "notes": llm_notes,
+                "timestamp": _now(),
+            }
 
         return rels
 

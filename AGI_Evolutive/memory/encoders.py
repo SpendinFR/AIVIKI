@@ -1,10 +1,17 @@
 import hashlib
+import logging
 import math
 import random
 import re
 from collections import Counter
+from collections.abc import Iterable as IterableABC
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+logger = logging.getLogger(__name__)
+
 
 _BASE_TOKEN_PATTERN = re.compile(
     r"(?:[#@][\wàâäéèêëîïôöùûüçœæ]+|[a-zàâäéèêëîïôöùûüçœæ0-9]+(?:['’`-][a-zàâäéèêëîïôöùûüçœæ0-9]+)*)",
@@ -194,21 +201,103 @@ class TinyEncoder:
         self.monitor = EncoderMonitor()
         self.doc_freq: Counter[str] = Counter()
         self.total_docs = 0
+        self._last_keywords: List[str] = []
 
     def encode(self, text: str, *, train: bool = True) -> List[float]:
         tokens, raw_tokens = self.tokenizer.tokenize(text, update=False)
-        if not tokens:
-            return [0.0] * self.dim
-        hash_vec = self._hash_features(tokens)
-        semantic_vec = self.semantic.encode(tokens, normalize=False)
+        hash_vec = self._hash_features(tokens) if tokens else [0.0] * self.dim
+        semantic_vec = (
+            self.semantic.encode(tokens, normalize=False) if tokens else [0.0] * self.dim
+        )
         combined = [
             (1.0 - self.semantic_weight) * h + self.semantic_weight * s
             for h, s in zip(hash_vec, semantic_vec)
         ]
-        encoded = l2_normalize(combined)
+        fallback_embedding = l2_normalize(combined) if tokens else [0.0] * self.dim
+        fallback_keywords = self._extract_keywords(tokens, raw_tokens)
+
+        llm_embedding: Optional[List[float]] = None
+        llm_keywords: Optional[List[str]] = None
+        if text.strip():
+            llm_response = try_call_llm_dict(
+                "memory_encoders",
+                input_payload={
+                    "text": text,
+                    "token_sample": tokens[:32],
+                    "dim": self.dim,
+                    "stats": {
+                        "token_count": len(tokens),
+                        "unique_tokens": len(set(tokens)),
+                    },
+                },
+                logger=logger,
+            )
+            if llm_response:
+                llm_embedding = self._coerce_embedding(llm_response.get("embedding"))
+                llm_keywords = self._normalize_keywords(llm_response.get("keywords"))
+
         if train:
             self._after_encode(tokens, raw_tokens, hash_vec, semantic_vec)
-        return encoded
+
+        if llm_embedding is not None:
+            self._last_keywords = llm_keywords or fallback_keywords
+            return llm_embedding
+
+        self._last_keywords = fallback_keywords
+        return fallback_embedding
+
+    @property
+    def last_keywords(self) -> List[str]:
+        return list(self._last_keywords)
+
+    def encode_with_keywords(self, text: str, *, train: bool = True) -> Dict[str, object]:
+        embedding = self.encode(text, train=train)
+        return {
+            "embedding": embedding,
+            "keywords": list(self._last_keywords),
+        }
+
+    def _extract_keywords(self, tokens: List[str], raw_tokens: List[str]) -> List[str]:
+        counts = Counter(token for token in tokens if len(token) >= 3)
+        keywords = [token.replace("_", " ") for token, _ in counts.most_common(6)]
+        if keywords:
+            return keywords
+        if raw_tokens:
+            fallback_counts = Counter(tok for tok in raw_tokens if len(tok) >= 3)
+            return [token for token, _ in fallback_counts.most_common(6)]
+        return []
+
+    def _normalize_keywords(self, value: object) -> List[str]:
+        if isinstance(value, str):
+            normalized = value.strip()
+            return [normalized] if normalized else []
+        if isinstance(value, IterableABC):
+            out: List[str] = []
+            for item in value:
+                if isinstance(item, str):
+                    cleaned = item.strip()
+                    if cleaned:
+                        out.append(cleaned)
+            return out
+        return []
+
+    def _coerce_embedding(self, value: object) -> Optional[List[float]]:
+        if not isinstance(value, IterableABC):
+            return None
+        numbers: List[float] = []
+        for item in value:  # type: ignore[assignment]
+            try:
+                numbers.append(float(item))
+            except (TypeError, ValueError):
+                return None
+        if not numbers:
+            return None
+        if len(numbers) < self.dim:
+            numbers.extend([0.0] * (self.dim - len(numbers)))
+        elif len(numbers) > self.dim:
+            numbers = numbers[: self.dim]
+        norm = math.sqrt(sum(v * v for v in numbers)) or 1.0
+        return [v / norm for v in numbers]
 
     def log_similarity(self, cosine_similarity: float) -> None:
         """Expose une API pour alimenter la boucle d'auto-évaluation."""

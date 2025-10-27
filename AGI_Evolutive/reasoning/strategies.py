@@ -6,9 +6,11 @@ import math
 import time
 import unicodedata
 from collections import defaultdict
-from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Tuple
 
 import re
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 
 logger = logging.getLogger(__name__)
@@ -391,3 +393,87 @@ class SelfCheckStrategy(ReasoningStrategy):
                 "time": time.time() - t0,
             }
         )
+
+
+def plan_reasoning_strategy(
+    prompt: str,
+    context: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Choisit une stratégie de raisonnement adaptée en combinant LLM et heuristiques."""
+
+    context_snapshot = {}
+    if isinstance(context, Mapping):
+        context_snapshot = {
+            key: value
+            for key, value in context.items()
+            if isinstance(value, (str, int, float, bool))
+        }
+
+    llm_plan = try_call_llm_dict(
+        "reasoning_strategies",
+        input_payload={"prompt": prompt, "context": context_snapshot},
+        logger=logger,
+    )
+    if llm_plan:
+        strategy = str(llm_plan.get("strategy") or "").strip()
+        steps_raw = llm_plan.get("steps")
+        steps: List[Dict[str, Any]] = []
+        if isinstance(steps_raw, list):
+            for item in steps_raw:
+                if not isinstance(item, Mapping):
+                    continue
+                description = str(item.get("description") or "").strip()
+                confidence = item.get("confidence")
+                try:
+                    numeric_conf = max(0.0, min(1.0, float(confidence)))
+                except (TypeError, ValueError):
+                    numeric_conf = 0.5
+                if description:
+                    steps.append({"description": description, "confidence": numeric_conf})
+        notes = str(llm_plan.get("notes") or "")
+        if strategy or steps:
+            return {
+                "strategy": strategy or _fallback_plan_key(prompt),
+                "steps": steps or _fallback_plan_steps(prompt),
+                "notes": notes,
+            }
+
+    return {
+        "strategy": _fallback_plan_key(prompt),
+        "steps": _fallback_plan_steps(prompt),
+        "notes": "plan issu des heuristiques locales",
+    }
+
+
+def _fallback_plan_key(prompt: str) -> str:
+    normalized = _normalize_text(prompt)
+    if any(token in normalized for token in ("pourquoi", "cause", "why")):
+        return "analyse_causale"
+    if any(token in normalized for token in ("comment", "plan", "how", "étapes", "etapes")):
+        return "planification"
+    if "verifier" in normalized or "check" in normalized:
+        return "auto_verification"
+    return "clarification"
+
+
+def _fallback_plan_steps(prompt: str) -> List[Dict[str, Any]]:
+    key = _fallback_plan_key(prompt)
+    if key == "analyse_causale":
+        return [
+            {"description": "Lister les causes plausibles", "confidence": 0.7},
+            {"description": "Comparer avec les observations connues", "confidence": 0.6},
+        ]
+    if key == "planification":
+        return [
+            {"description": "Décomposer la tâche en étapes", "confidence": 0.65},
+            {"description": "Identifier obstacles et ressources", "confidence": 0.55},
+        ]
+    if key == "auto_verification":
+        return [
+            {"description": "Comparer avec la réponse précédente", "confidence": 0.6},
+            {"description": "Chercher contradictions majeures", "confidence": 0.5},
+        ]
+    return [
+        {"description": "Clarifier l'objectif et les contraintes", "confidence": 0.6},
+        {"description": "Identifier les informations manquantes", "confidence": 0.5},
+    ]

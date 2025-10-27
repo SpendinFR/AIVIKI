@@ -1,8 +1,13 @@
 from __future__ import annotations
 from typing import Dict, Any, Optional, List, Tuple, Iterable, Callable
-import os, json, time, uuid, math, re
+import os, json, time, uuid, math, re, logging
 from collections import deque
 from statistics import mean
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+logger = logging.getLogger(__name__)
 
 
 def _sigmoid(x: float) -> float:
@@ -324,6 +329,7 @@ class CalibrationMeter:
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         self._calibrator_cache: Dict[str, Dict[str, Any]] = {}
         self.max_history = max_history if (isinstance(max_history, int) and max_history > 0) else None
+        self._last_llm_assessment: Optional[Dict[str, Any]] = None
 
     def _invalidate_cache(self) -> None:
         self._calibrator_cache.clear()
@@ -406,6 +412,60 @@ class CalibrationMeter:
         self._calibrator_cache[key] = {"count": current_count, "calibrator": calibrator}
         return calibrator
 
+    def _llm_calibration_assessment(
+        self,
+        domain: Optional[str],
+        confidence: float,
+        calibrated: float,
+        meta: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        payload = {
+            "domain": domain or "global",
+            "raw_confidence": confidence,
+            "calibrated_confidence": calibrated,
+            "meta": meta or {},
+            "stats": self.report(domain),
+        }
+
+        llm_result = try_call_llm_dict(
+            "metacog_calibration",
+            input_payload=payload,
+            logger=logger,
+        )
+
+        if isinstance(llm_result, Dict):
+            try:
+                perceived = max(0.0, min(1.0, float(llm_result.get("perceived_confidence", calibrated))))
+            except (TypeError, ValueError):
+                perceived = calibrated
+            bias = str(llm_result.get("calibration_bias") or "").strip()
+            advice = str(llm_result.get("adjustment_advice") or "").strip()
+            notes = llm_result.get("notes")
+            result = {
+                "perceived_confidence": round(perceived, 3),
+                "calibration_bias": bias or None,
+                "adjustment_advice": advice or None,
+            }
+            if isinstance(notes, str) and notes.strip():
+                result["notes"] = notes.strip()
+            return result
+
+        delta = calibrated - confidence
+        if delta > 0.05:
+            bias = "sous-confiance"
+            advice = "Tu peux affirmer avec un peu plus d'assurance."
+        elif delta < -0.05:
+            bias = "surconfiance"
+            advice = "Réduis légèrement la certitude exprimée."
+        else:
+            bias = "alignée"
+            advice = "La confiance exprimée est cohérente."
+        return {
+            "perceived_confidence": round(max(0.0, min(1.0, calibrated)), 3),
+            "calibration_bias": bias,
+            "adjustment_advice": advice,
+        }
+
     def report(self, domain: Optional[str] = None) -> Dict[str, Any]:
         rows = [r for r in self._iter() if "success" in r and (domain is None or r.get("domain")==domain)]
         if not rows:
@@ -465,8 +525,20 @@ class CalibrationMeter:
     ) -> float:
         calibrator = self._get_calibrator(domain)
         if calibrator is None:
-            return max(0.0, min(1.0, _safe_float(confidence, 0.0)))
-        return calibrator.predict(confidence, meta)
+            calibrated = max(0.0, min(1.0, _safe_float(confidence, 0.0)))
+        else:
+            calibrated = calibrator.predict(confidence, meta)
+        self._last_llm_assessment = self._llm_calibration_assessment(
+            domain,
+            max(0.0, min(1.0, _safe_float(confidence, 0.0))),
+            calibrated,
+            meta,
+        )
+        return calibrated
+
+    @property
+    def last_llm_assessment(self) -> Optional[Dict[str, Any]]:
+        return self._last_llm_assessment
 
     def should_abstain(
         self,
