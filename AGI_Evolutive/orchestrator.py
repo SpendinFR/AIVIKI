@@ -639,9 +639,22 @@ class _MemoryStoreAdapter:
 
 
 class _ConceptAdapter:
-    def __init__(self, extractor: ConceptExtractor, memory: MemoryStore):
+    def __init__(
+        self,
+        extractor: ConceptExtractor,
+        memory: MemoryStore,
+        *,
+        lock: Optional[threading.RLock] = None,
+    ):
         self._extractor = extractor
         self._memory = memory
+        self._lock = lock
+
+    def _call(self, func, *args, **kwargs):
+        if self._lock is None:
+            return func(*args, **kwargs)
+        with self._lock:
+            return func(*args, **kwargs)
 
     def extract(self, observation: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
         text = ""
@@ -651,11 +664,11 @@ class _ConceptAdapter:
             text = observation
         if text:
             try:
-                return self._extractor.extract_from_recent(n=32)
+                return self._call(self._extractor.extract_from_recent, n=32)
             except Exception:
                 return []
         try:
-            return self._extractor.extract_from_recent(n=32)
+            return self._call(self._extractor.extract_from_recent, n=32)
         except Exception:
             return []
 
@@ -664,10 +677,23 @@ class _ConceptAdapter:
 
 
 class _EpisodicAdapter:
-    def __init__(self, linker: EpisodicLinker, memory: MemoryStore):
+    def __init__(
+        self,
+        linker: EpisodicLinker,
+        memory: MemoryStore,
+        *,
+        lock: Optional[threading.RLock] = None,
+    ):
         self._linker = linker
         self._memory = memory
         self._buffer: List[Dict[str, Any]] = []
+        self._lock = lock
+
+    def _call(self, func, *args, **kwargs):
+        if self._lock is None:
+            return func(*args, **kwargs)
+        with self._lock:
+            return func(*args, **kwargs)
 
     def link(self, observation: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if observation:
@@ -679,7 +705,7 @@ class _EpisodicAdapter:
             self._memory.add_memory(record)
             self._buffer.append({"from": record.get("id"), "rel": "observed", "meta": observation})
         try:
-            stats = self._linker.link_recent(40)
+            stats = self._call(self._linker.link_recent, 40)
             if stats:
                 self._buffer.append({"kind": "episodic_stats", "stats": stats})
         except Exception:
@@ -1033,10 +1059,12 @@ class Orchestrator:
         self._episodic = EpisodicLinker(self._memory_store)
         self._concepts.bind(memory=self._memory_store)
         self._episodic.bind(memory=self._memory_store)
+        self._semantic_lock = threading.RLock()
         self._memory_bridge = SemanticMemoryBridge(
             self._memory_store,
             concept_extractor=self._concepts,
             episodic_linker=self._episodic,
+            synchronization_lock=self._semantic_lock,
         )
         self._homeostasis = Homeostasis()
         self._planner = Planner()
@@ -1158,8 +1186,16 @@ class Orchestrator:
         self.memory = SimpleNamespace(
             store=_MemoryStoreAdapter(self._memory_store),
             consolidator=_ConsolidatorAdapter(self._consolidator, self._memory_store),
-            concepts=_ConceptAdapter(self._concepts, self._memory_store),
-            episodic=_EpisodicAdapter(self._episodic, self._memory_store),
+            concepts=_ConceptAdapter(
+                self._concepts,
+                self._memory_store,
+                lock=self._semantic_lock,
+            ),
+            episodic=_EpisodicAdapter(
+                self._episodic,
+                self._memory_store,
+                lock=self._semantic_lock,
+            ),
         )
 
         self.thinking_monitor = getattr(self, "thinking_monitor", None) or ThinkingMonitor()
@@ -1275,12 +1311,25 @@ class Orchestrator:
         except Exception:
             pass
 
+    def _with_semantic_lock(self, func, *args, **kwargs):
+        lock = getattr(self, "_semantic_lock", None)
+        if lock is None:
+            return func(*args, **kwargs)
+        with lock:
+            return func(*args, **kwargs)
+
     def _register_jobs(self):
         self.scheduler.register_job("scan_inbox", 30, lambda: self.io.perception.scan_inbox())
         self.scheduler.register_job(
-            "concepts", 180, lambda: self._concepts.extract_from_recent(200)
+            "concepts",
+            180,
+            lambda: self._with_semantic_lock(self._concepts.extract_from_recent, 200),
         )
-        self.scheduler.register_job("episodic_links", 120, lambda: self._episodic.link_recent(80))
+        self.scheduler.register_job(
+            "episodic_links",
+            120,
+            lambda: self._with_semantic_lock(self._episodic.link_recent, 80),
+        )
 
     def _build_habit_action_payload(self, trigger_payload: Dict[str, Any]) -> Dict[str, Any]:
         data = dict(trigger_payload or {})

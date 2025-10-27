@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+from contextlib import nullcontext
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 LOGGER = logging.getLogger(__name__)
@@ -21,6 +22,7 @@ class SemanticMemoryBridge:
         semantic_manager: Optional[Any] = None,
         batch_size: int = 16,
         idle_sleep: float = 0.4,
+        synchronization_lock: Optional[Any] = None,
     ) -> None:
         self._memory = memory_store
         self._concept = concept_extractor
@@ -28,6 +30,7 @@ class SemanticMemoryBridge:
         self._manager = semantic_manager
         self._batch_size = max(1, int(batch_size))
         self._idle_sleep = max(0.05, float(idle_sleep))
+        self._lock = synchronization_lock
         self._queue: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=256)
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._worker, name="semantic-bridge", daemon=True)
@@ -82,16 +85,14 @@ class SemanticMemoryBridge:
             return
         try:
             memories = list(batch)
-            if self._concept and hasattr(self._concept, "process_memories"):
-                self._concept.process_memories(memories)
+            lock = self._lock if self._lock is not None else nullcontext()
+            with lock:
+                if self._concept and hasattr(self._concept, "process_memories"):
+                    self._concept.process_memories(memories)
+                if self._episodic and hasattr(self._episodic, "process_memories"):
+                    self._episodic.process_memories(memories)
         except Exception:
-            LOGGER.debug("Concept extractor hook failed", exc_info=True)
-
-        try:
-            if self._episodic and hasattr(self._episodic, "process_memories"):
-                self._episodic.process_memories(memories)
-        except Exception:
-            LOGGER.debug("Episodic linker hook failed", exc_info=True)
+            LOGGER.debug("Semantic processing hook failed", exc_info=True)
 
 
 __all__ = ["SemanticMemoryBridge"]
