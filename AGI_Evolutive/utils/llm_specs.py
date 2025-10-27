@@ -417,6 +417,48 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         },
     ),
     _spec(
+        "ontology_enrichment",
+        "AGI_Evolutive/beliefs/ontology.py",
+        "Suggère le typage d'entités, relations et événements inconnus et justifie les choix.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Attribue un champ 'confidence' entre 0 et 1 pour chaque proposition.",
+            "Explique brièvement la décision dans 'justification'.",
+            "Si aucune suggestion fiable, laisse la liste vide et décris la raison dans 'notes'.",
+        ),
+        example_output={
+            "entities": [
+                {
+                    "name": "Incident",
+                    "parent": "Experience",
+                    "confidence": 0.76,
+                    "justification": "désigne un événement vécu par l'agent",
+                }
+            ],
+            "relations": [
+                {
+                    "name": "impacte",
+                    "domain": ["Incident"],
+                    "range": ["Service", "Ressource"],
+                    "polarity_sensitive": True,
+                    "temporal": True,
+                    "stability": "episode",
+                    "confidence": 0.71,
+                    "justification": "relie un incident à la cible affectée",
+                }
+            ],
+            "events": [
+                {
+                    "name": "incident_critique",
+                    "roles": {"acteur": ["Agent"], "cible": ["Service"]},
+                    "confidence": 0.68,
+                    "justification": "structure habituelle pour un incident",
+                }
+            ],
+            "notes": "",
+        },
+    ),
+    _spec(
         "world_model",
         "AGI_Evolutive/world_model/__init__.py",
         "Projette les conséquences d'actions dans le modèle du monde.",
