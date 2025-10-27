@@ -141,6 +141,39 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         },
     ),
     _spec(
+        "memory_semantic_embedding",
+        "AGI_Evolutive/memory/embedding_adapters.py",
+        "Analyse un souvenir et fournis des mots-clés, thèmes et relations associées.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Retourne 5 à 8 mots-clés pondérés entre 0 et 1.",
+            "Ajoute des 'related_terms' si pertinent (synonymes, proximités).",
+            "Liste les relations orientées sujet->objet avec un verbe explicite.",
+        ),
+        example_output={
+            "keywords": [
+                {"term": "empathie", "weight": 0.92},
+                {"term": "écoute active", "weight": 0.74},
+            ],
+            "related_terms": [
+                {"term": "compassion", "weight": 0.68},
+                {"term": "validation émotionnelle", "weight": 0.55},
+            ],
+            "topics": [
+                {"label": "relations humaines", "weight": 0.7},
+            ],
+            "relations": [
+                {
+                    "subject": "empathie",
+                    "verb": "renforce",
+                    "object": "confiance",
+                    "confidence": 0.6,
+                }
+            ],
+            "notes": "",
+        },
+    ),
+    _spec(
         "perception_preprocess",
         "AGI_Evolutive/io/perception_interface.py",
         "Pré-analyse l'entrée capteur pour fournir des métadonnées utiles.",

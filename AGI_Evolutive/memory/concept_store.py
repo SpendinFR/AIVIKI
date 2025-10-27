@@ -1,11 +1,12 @@
 from dataclasses import dataclass, asdict, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 import os
 import json
 import time
 import math
 import uuid
 import random
+from collections import deque
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
 
@@ -322,6 +323,64 @@ class ConceptStore:
                 results.append((relation, dst))
         results.sort(key=lambda item: item[0].weight, reverse=True)
         return results[:k]
+
+    def walk_associations(
+        self,
+        start_label: str,
+        *,
+        max_depth: int = 2,
+        relation_types: Optional[Iterable[str]] = None,
+        limit: int = 30,
+    ) -> List[Dict[str, Any]]:
+        if not start_label:
+            return []
+        start_id = self._find_by_label(start_label)
+        if start_id is None:
+            if start_label in self.concepts:
+                start_id = start_label
+            else:
+                return []
+
+        allowed = None
+        if relation_types is not None:
+            allowed = {str(rel).lower() for rel in relation_types}
+
+        queue = deque([(start_id, 0)])
+        visited = {start_id}
+        results: List[Dict[str, Any]] = []
+
+        while queue and len(results) < limit:
+            cid, depth = queue.popleft()
+            if depth >= max_depth:
+                continue
+            concept = self.concepts.get(cid)
+            source_label = concept.label if concept else str(cid)
+            for relation in self.relations.values():
+                if relation.src != cid:
+                    continue
+                rtype = relation.rtype or "related_to"
+                if allowed and rtype.lower() not in allowed:
+                    continue
+                dst = self.concepts.get(relation.dst)
+                if not dst:
+                    continue
+                results.append(
+                    {
+                        "source": source_label,
+                        "target": dst.label,
+                        "relation": rtype,
+                        "weight": relation.weight,
+                        "confidence": relation.confidence,
+                        "depth": depth + 1,
+                    }
+                )
+                if len(results) >= limit:
+                    break
+                if relation.dst not in visited and depth + 1 < max_depth:
+                    visited.add(relation.dst)
+                    queue.append((relation.dst, depth + 1))
+
+        return results
 
     def find_by_label_prefix(self, prefix: str, k: int = 10) -> List[Concept]:
         lower_prefix = prefix.lower()

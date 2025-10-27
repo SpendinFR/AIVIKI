@@ -405,12 +405,32 @@ class SemanticMemoryManager:
                 entry["history"] = history
             tasks_info.append(entry)
 
+        concept_trails: list[Dict[str, Any]] = []
+        if self.c and hasattr(self.c, "get_top_concepts"):
+            try:
+                top_concepts = self.c.get_top_concepts(3)
+            except Exception:
+                top_concepts = []
+            if top_concepts and hasattr(self.c, "walk_associations"):
+                for concept in top_concepts:
+                    label = getattr(concept, "label", None)
+                    if not label:
+                        continue
+                    try:
+                        associations = self.c.walk_associations(label, max_depth=2, limit=12)
+                    except Exception:
+                        associations = []
+                    if associations:
+                        concept_trails.append({"concept": label, "associations": associations})
+
         payload: Dict[str, Any] = {
             "timestamp": now,
             "tasks": tasks_info,
             "drift_events": list(self.drift_events)[-5:],
             "recent_stats": stats,
         }
+        if concept_trails:
+            payload["concept_trails"] = concept_trails
         return payload
 
     def _resolve_task_name(self, raw: Any) -> Optional[str]:

@@ -56,9 +56,11 @@ from AGI_Evolutive.io.action_interface import ActionInterface
 from AGI_Evolutive.io.intent_classifier import classify
 from AGI_Evolutive.io.perception_interface import PerceptionInterface
 from AGI_Evolutive.memory.concept_extractor import ConceptExtractor
+from AGI_Evolutive.memory.concept_store import ConceptStore
 from AGI_Evolutive.memory.consolidator import Consolidator
 from AGI_Evolutive.memory.episodic_linker import EpisodicLinker
 from AGI_Evolutive.memory.memory_store import MemoryStore
+from AGI_Evolutive.memory.semantic_bridge import SemanticMemoryBridge
 from AGI_Evolutive.light_scheduler import LightScheduler
 from AGI_Evolutive.runtime.job_manager import JobManager
 from AGI_Evolutive.runtime.phenomenal_kernel import ModeManager, PhenomenalKernel
@@ -1026,13 +1028,24 @@ class Orchestrator:
         self._memory_store = MemoryStore()
         self._consolidator = Consolidator(self._memory_store)
         self._concepts = ConceptExtractor(self._memory_store)
+        self._concept_store = ConceptStore()
+        self._concepts.store = self._concept_store
         self._episodic = EpisodicLinker(self._memory_store)
+        self._concepts.bind(memory=self._memory_store)
+        self._episodic.bind(memory=self._memory_store)
+        self._memory_bridge = SemanticMemoryBridge(
+            self._memory_store,
+            concept_extractor=self._concepts,
+            episodic_linker=self._episodic,
+        )
         self._homeostasis = Homeostasis()
         self._planner = Planner()
         self._meta = MetaCognition(self._memory_store, self._planner, self.self_model)
         self._proposer = Proposer(self._memory_store, self._planner, self._homeostasis)
         self._evolution = EvolutionManager()
         self._emotion_engine = EmotionEngine()
+        self._concepts.bind(emotions=self._emotion_engine)
+        self._episodic.bind(emotions=self._emotion_engine)
         self._reflection_loop = ReflectionLoop(self._meta, interval_sec=300)
         self._reflection_loop.start()
         self._habit_system = HabitSystem(
