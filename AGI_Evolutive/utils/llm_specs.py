@@ -91,6 +91,65 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         },
     ),
     _spec(
+        "io_overview",
+        "AGI_Evolutive/io/__init__.py",
+        "Évalue l'état des interfaces d'entrée/sortie et suggère des optimisations concrètes.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Part de baseline['interfaces'] comme source fiable et enrichis sans supprimer d'informations factuelles sauf incohérence manifeste.",
+            "Chaque interface doit comporter les champs name, module, status, summary, responsibilities (2 à 5 éléments).",
+            "Mentionne les champs entrypoints, llm_hooks et fallback_capabilities si présents dans la baseline.",
+            "Limite recommended_actions à trois entrées concises et orientées action.",
+            "Les risques doivent être un tableau de dictionnaires avec label et severity.",
+        ),
+        example_output={
+            "summary": "Les interfaces d'E/S relient perception, intention et action avec supervision LLM optionnelle.",
+            "interfaces": [
+                {
+                    "name": "perception",
+                    "module": "AGI_Evolutive.io.perception_interface",
+                    "status": "stable",
+                    "summary": "Ingestion inbox et pré-analyse utilisateur.",
+                    "responsibilities": [
+                        "Surveiller le dossier inbox",
+                        "Lier les sous-systèmes mémoire/émotions",
+                        "Pré-analyser les entrées via perception_preprocess",
+                    ],
+                    "entrypoints": ["PerceptionInterface"],
+                    "llm_hooks": ["perception_preprocess"],
+                    "fallback_capabilities": [
+                        "Scan heuristique des fichiers",
+                        "Journalisation JSONL",
+                    ],
+                },
+                {
+                    "name": "action",
+                    "module": "AGI_Evolutive.io.action_interface",
+                    "status": "stable",
+                    "summary": "Priorise les actions et gère la boucle d'exécution.",
+                    "responsibilities": [
+                        "Normaliser les candidats",
+                        "Évaluer impact/effort/risque",
+                        "Mettre à jour les micro-actions",
+                    ],
+                    "entrypoints": ["ActionInterface"],
+                    "llm_hooks": ["action_interface"],
+                    "fallback_capabilities": [
+                        "Thompson sampling et GLM adaptatif",
+                    ],
+                },
+            ],
+            "risks": [
+                {"label": "Intent_classifier dépend majoritairement des heuristiques", "severity": "medium"}
+            ],
+            "recommended_actions": [
+                "Renforcer la télémétrie LLM pour la perception",
+                "Documenter les conditions de bascule heuristique",
+            ],
+            "notes": "Confidence basée sur l'analyse structurée du module.",
+        },
+    ),
+    _spec(
         "intent_classification",
         "AGI_Evolutive/io/intent_classifier.py",
         "Classifie l'intention utilisateur et justifie ta décision.",
