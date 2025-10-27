@@ -1388,6 +1388,101 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
             "notes": "",
         },
     ),
+    _spec(
+        "self_improver_dominance",
+        "AGI_Evolutive/self_improver/metrics.py",
+        "Analyse les métriques champion vs challenger et statue sur l'acceptation.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Fixe 'decision' à 'accept' ou 'reject' uniquement.",
+            "Indique la métrique déterminante dans 'primary_metric'.",
+            "Renseigne 'recommendations' avec 0 à 3 conseils concrets.",
+        ),
+        example_output={
+            "decision": "accept",
+            "confidence": 0.72,
+            "primary_metric": "acc",
+            "rationale": "Le challenger gagne +1.8 points d'acc. sans dégrader l'ECE.",
+            "recommendations": ["Surveiller la latence si la charge augmente"],
+            "notes": "",
+        },
+    ),
+    _spec(
+        "self_improver_mutation_plan",
+        "AGI_Evolutive/self_improver/mutations.py",
+        "Passe en revue les mutations proposées et ajuste les valeurs numériques pertinentes.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Limite-toi aux clés présentes dans 'candidate' ou 'base'.",
+            "Retourne 'suggested_updates' avec des floats prêts à appliquer.",
+            "Liste les risques ou validations dans 'considerations'.",
+        ),
+        example_output={
+            "mutated_keys": ["learning.self_assess.threshold", "abduction.tie_gap"],
+            "suggested_updates": {
+                "learning.self_assess.threshold": 0.93,
+                "abduction.tie_gap": 0.1,
+            },
+            "confidence": 0.68,
+            "considerations": ["Réduire légèrement tie_gap pour encourager l'exploration"],
+            "notes": "",
+        },
+    ),
+    _spec(
+        "self_improver_promotion_brief",
+        "AGI_Evolutive/self_improver/promote.py",
+        "Synthétise un candidat de promotion avec risques et points de vigilance.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Fournis 'summary' en une phrase actionnable.",
+            "Ajoute 'risks' et 'opportunities' (listes courtes).",
+            "Calcule 'go' booléen pour recommander la promotion.",
+        ),
+        example_output={
+            "summary": "Candidat améliore l'acc. de 1.5 pts avec canary vert.",
+            "go": True,
+            "confidence": 0.77,
+            "risks": ["Monitoring latence à renforcer"],
+            "opportunities": ["Capitaliser sur la baisse d'ECE"],
+            "notes": "",
+        },
+    ),
+    _spec(
+        "self_improver_quality_review",
+        "AGI_Evolutive/self_improver/quality.py",
+        "Interprète les rapports de qualité et signale les faiblesses critiques.",
+        AVAILABLE_MODELS["fast"],
+        extra_instructions=(
+            "Retourne 'llm_passed' booléen reflétant ton avis.",
+            "Liste les 'alerts' triées par sévérité décroissante.",
+        ),
+        example_output={
+            "llm_passed": True,
+            "confidence": 0.63,
+            "alerts": ["Latence tests integration supérieure à 1.3x baseline"],
+            "recommendations": ["Programmer un test de charge ciblé"],
+            "notes": "",
+        },
+    ),
+    _spec(
+        "self_improver_skill_requirements",
+        "AGI_Evolutive/self_improver/skill_acquisition.py",
+        "Analyse une demande de compétence et dérive les prérequis détaillés.",
+        AVAILABLE_MODELS["fast"],
+        extra_instructions=(
+            "Retourne 'requirements' comme liste de phrases actionnables.",
+            "Ajoute 'keywords' (3 à 8) pour indexer la compétence.",
+        ),
+        example_output={
+            "requirements": [
+                "Collecter exemples d'emails clients pour entraînement",
+                "Valider workflow d'envoi avec sandbox",
+            ],
+            "keywords": ["automation", "email", "workflow"],
+            "confidence": 0.7,
+            "notes": "",
+        },
+    ),
 )
 
 

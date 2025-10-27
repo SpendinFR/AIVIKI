@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from typing import Any, Callable, Dict, Optional
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 from .metrics import aggregate_metrics, bootstrap_superiority, dominates
 from .mutations import generate_overrides
@@ -13,6 +15,9 @@ from .promote import PromotionManager
 from .sandbox import SandboxRunner, ArchFactory
 from .quality import QualityGateRunner
 from .code_evolver import CodeEvolver
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class SelfImprover:
@@ -73,6 +78,44 @@ class SelfImprover:
         record = {"t": time.time(), **payload}
         with open("data/self_improve/experiments.jsonl", "a", encoding="utf-8") as handle:
             handle.write(json.dumps(json_sanitize(record)) + "\n")
+
+    def _llm_guard_candidate(
+        self,
+        overrides: Dict[str, Any],
+        metrics: Dict[str, Any],
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> tuple[bool, Dict[str, Any], Optional[Dict[str, Any]]]:
+        metadata = dict(metadata or {})
+        response = try_call_llm_dict(
+            "self_improver_promotion_brief",
+            input_payload={
+                "overrides": overrides,
+                "metrics": metrics,
+                "metadata": metadata,
+            },
+            logger=_LOGGER,
+            max_retries=2,
+        )
+        response_data = dict(response) if response else None
+        if response_data:
+            metadata.setdefault("llm_brief", response_data)
+            go_value = response_data.get("go")
+            confidence = response_data.get("confidence", 0.0)
+            try:
+                conf_val = float(confidence)
+            except (TypeError, ValueError):
+                conf_val = 0.0
+            if isinstance(go_value, bool) and not go_value and conf_val >= 0.75:
+                self._log_experiment(
+                    {
+                        "kind": "llm_gate_reject",
+                        "overrides": overrides,
+                        "metrics": metrics,
+                        "llm_brief": response_data,
+                    }
+                )
+                return True, metadata, response_data
+        return False, metadata, response_data
 
     # ------------------------------------------------------------------
     # Public API
@@ -139,13 +182,16 @@ class SelfImprover:
                 "canary": report.get("canary"),
                 "patch": serialised,
             }
+            skip_candidate, metadata, llm_brief = self._llm_guard_candidate(base, aggregated, metadata)
+            if skip_candidate:
+                continue
             cid = self.prom.stage_candidate(base, aggregated, metadata=metadata)
             best_cid = cid
             try:
                 if hasattr(self.memory, "add_memory"):
                     self.memory.add_memory(
                         kind="code_candidate",
-                        content=str(report.get("summary", ""))[:160],
+                        content=str((metadata.get("llm_brief") or {}).get("summary") or report.get("summary", ""))[:160],
                         metadata={"candidate_id": cid, "file": report.get("file")},
                     )
                     self.memory.add_memory(
@@ -222,6 +268,9 @@ class SelfImprover:
                 "mutation": mutation,
                 "canary": canary,
             }
+            skip_candidate, metadata, _ = self._llm_guard_candidate(cand, aggregated, metadata)
+            if skip_candidate:
+                continue
             cid = self.prom.stage_candidate(cand, aggregated, metadata=metadata)
             best_cid = cid
             best_metrics = aggregated
@@ -268,6 +317,9 @@ class SelfImprover:
                 "mutation": evaluation.get("mutation_testing"),
                 "patch": self.code_evolver.serialise_patch(patch),
             }
+            skip_candidate, metadata, _ = self._llm_guard_candidate(base, aggregated, metadata)
+            if skip_candidate:
+                continue
             cid = self.prom.stage_candidate(base, aggregated, metadata=metadata)
             best_cid = cid
             best_metrics = aggregated
@@ -285,10 +337,17 @@ class SelfImprover:
                 pass
             return None
 
+        llm_brief = (best_metadata or {}).get("llm_brief") if best_metadata else None
+        summary = ""
+        if isinstance(llm_brief, dict):
+            summary = str(llm_brief.get("summary") or "").strip()
+        metric_clause = (
+            f"acc={best_metrics.get('acc', 0.0):.3f}, "
+            f"ece={best_metrics.get('cal_ece', 0.0):.3f}"
+        )
+        prompt_intro = summary or f"Promotion du challenger {best_cid}".strip()
         question = (
-            f"Promotion du challenger {best_cid} ? "
-            f"(acc={best_metrics.get('acc', 0.0):.3f}, "
-            f"ece={best_metrics.get('cal_ece', 0.0):.3f}) "
+            f"{prompt_intro} ? ({metric_clause}) "
             "Réponds 'oui' pour promouvoir."
         )
         try:
@@ -296,7 +355,12 @@ class SelfImprover:
                 self.memory.add_memory(
                     kind="promotion_request",
                     content=question,
-                    metadata={"cid": best_cid, "metrics": best_metrics, "details": best_metadata},
+                    metadata={
+                        "cid": best_cid,
+                        "metrics": best_metrics,
+                        "details": best_metadata,
+                        "llm_summary": llm_brief,
+                    },
                 )
             if self.questions and hasattr(self.questions, "add_question"):
                 self.questions.add_question(question)

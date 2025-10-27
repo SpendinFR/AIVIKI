@@ -3,6 +3,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import logging
 import threading
 import time
 import uuid
@@ -13,6 +14,10 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _now() -> float:
@@ -1554,7 +1559,47 @@ class SkillSandboxManager:
                 req.extend(_unique_keywords(_normalise_text(item)))
         if not req:
             req.extend(_unique_keywords(request.description))
-        return req[:20]
+        llm_response = try_call_llm_dict(
+            "self_improver_skill_requirements",
+            input_payload={
+                "action_type": request.action_type,
+                "description": request.description,
+                "payload": payload,
+                "existing_requirements": list(req),
+            },
+            logger=_LOGGER,
+            max_retries=2,
+        )
+        if llm_response:
+            llm_requirements = llm_response.get("requirements")
+            if isinstance(llm_requirements, Sequence) and not isinstance(llm_requirements, (str, bytes)):
+                for item in llm_requirements:
+                    normalized = _normalise_text(item).strip()
+                    if normalized:
+                        req.append(normalized)
+            keywords = llm_response.get("keywords")
+            if isinstance(keywords, Sequence) and not isinstance(keywords, (str, bytes)):
+                unique_keywords = []
+                seen_kw: Dict[str, bool] = {}
+                for term in keywords:
+                    clean = str(term).strip()
+                    if clean and clean.lower() not in seen_kw:
+                        seen_kw[clean.lower()] = True
+                        unique_keywords.append(clean)
+                if unique_keywords:
+                    payload.setdefault("llm_keywords", unique_keywords)
+        seen_req: Dict[str, bool] = {}
+        ordered: List[str] = []
+        for item in req:
+            clean = str(item).strip()
+            if not clean:
+                continue
+            key = clean.lower()
+            if key in seen_req:
+                continue
+            seen_req[key] = True
+            ordered.append(clean)
+        return ordered[:20]
 
     def _implementation_requirement_prompts(self) -> List[str]:
         return [

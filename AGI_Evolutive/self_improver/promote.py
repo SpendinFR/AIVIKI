@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Protocol, TYPE_CHECKING
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Protocol, TYPE_CHECKING
 
 from AGI_Evolutive.core.structures.mai import MAI
 from AGI_Evolutive.knowledge.mechanism_store import MechanismStore
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 if TYPE_CHECKING:
     from .quality import QualityGateRunner
@@ -90,6 +92,8 @@ class PromotionManager:
     def __init__(self, root: str = "config", storage: Optional[PromotionStorage] = None) -> None:
         self.storage = storage or PromotionStorage(root=root)
 
+        self._logger = logging.getLogger(__name__)
+
     # ------------------------------------------------------------------
     # Active overrides management
     def load_active(self) -> Dict[str, Any]:
@@ -107,13 +111,34 @@ class PromotionManager:
         metadata: Dict[str, Any] | None = None,
     ) -> str:
         cid = str(uuid.uuid4())
+        payload_metadata = dict(metadata or {})
+        llm_brief: Mapping[str, Any] | None = None
+        existing_brief = payload_metadata.get("llm_brief")
+        if isinstance(existing_brief, Mapping):
+            llm_brief = existing_brief
+        elif overrides or metrics:
+            llm_brief = try_call_llm_dict(
+                "self_improver_promotion_brief",
+                input_payload={
+                    "overrides": overrides,
+                    "metrics": metrics,
+                    "metadata": metadata or {},
+                },
+                logger=self._logger,
+                max_retries=2,
+            )
+            if llm_brief:
+                payload_metadata.setdefault("llm_brief", dict(llm_brief))
+
         payload = {
             "overrides": overrides,
             "metrics": metrics,
-            "metadata": metadata or {},
+            "metadata": payload_metadata,
             "t": time.time(),
             "cid": cid,
         }
+        if llm_brief:
+            payload["llm_brief"] = dict(llm_brief)
         self.storage.write_candidate(cid, payload)
         return cid
 

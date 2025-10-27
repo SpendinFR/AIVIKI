@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 import math
 import random
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, MutableMapping, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Sequence
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 
 DEFAULTS: Dict[str, float] = {
@@ -154,6 +157,49 @@ class _MutationMemory:
 _MEMORY = _MutationMemory()
 
 
+_LOGGER = logging.getLogger(__name__)
+
+
+def _apply_llm_guidance(
+    base: Mapping[str, Any],
+    candidate: MutableMapping[str, Any],
+    mutated_keys: Sequence[str],
+) -> List[str]:
+    payload = {
+        "base": dict(base),
+        "candidate": dict(candidate),
+        "mutated_keys": list(mutated_keys),
+        "leaderboard": [
+            {"score": score, "deltas": deltas}
+            for score, deltas in _MEMORY.leaderboard
+        ],
+    }
+    response = try_call_llm_dict(
+        "self_improver_mutation_plan",
+        input_payload=payload,
+        logger=_LOGGER,
+        max_retries=2,
+    )
+    if not response:
+        return list(mutated_keys)
+
+    updated_keys = set(mutated_keys)
+    suggested = response.get("suggested_updates", {})
+    if isinstance(suggested, Mapping):
+        for key, value in suggested.items():
+            try:
+                candidate[key] = float(value)
+            except (TypeError, ValueError):
+                continue
+            updated_keys.add(str(key))
+
+    llm_keys = response.get("mutated_keys")
+    if isinstance(llm_keys, Sequence) and not isinstance(llm_keys, (str, bytes)):
+        updated_keys.update(str(key) for key in llm_keys)
+
+    return list(updated_keys)
+
+
 def _probability_like(key: str, value: float) -> bool:
     if "threshold" in key:
         return True
@@ -191,6 +237,7 @@ def generate_overrides(base: Dict[str, Any], n: int = 4) -> List[Dict[str, Any]]
         for key in mutated_keys:
             original = candidate[key]
             candidate[key] = _mutate_value(key, float(original))
+        mutated_keys = _apply_llm_guidance(merged, candidate, mutated_keys)
         _MEMORY.register_candidate(candidate, mutated_keys)
         candidates.append(candidate)
 
