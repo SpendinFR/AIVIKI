@@ -18,7 +18,10 @@ import pickle
 import time
 import types
 from datetime import datetime
-from typing import Any, Callable, Dict, Iterable, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Mapping, MutableMapping, Optional, Tuple
+
+from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 DEFAULT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".agi_state")
 DEFAULT_DIR = os.path.abspath(DEFAULT_DIR)
@@ -510,3 +513,89 @@ class PersistenceManager:
         """Return the most recent drift analysis between snapshots."""
 
         return dict(self._last_drift or {})
+
+    def generate_health_report(self) -> MutableMapping[str, Any]:
+        """Produce a diagnostic summary for observability dashboards."""
+
+        status = {
+            "schema_version": self.schema_version,
+            "seconds_since_last_save": max(0.0, time.time() - self._last_save),
+            "last_snapshot": self.get_last_snapshot_metadata(),
+            "last_drift": self.get_last_drift(),
+        }
+        heuristic = self._fallback_health(status)
+
+        response = try_call_llm_dict(
+            "persistence_healthcheck",
+            input_payload=json_sanitize(status),
+            logger=self.logger,
+            max_retries=2,
+        )
+        if not isinstance(response, MutableMapping):
+            return heuristic
+
+        summary = self._clean_text(response.get("summary")) or heuristic["summary"]
+        alerts = self._clean_list(response.get("alerts"))
+        recommendations = self._clean_list(response.get("recommended_actions"))
+        notes = self._clean_text(response.get("notes")) or heuristic["notes"]
+        confidence = heuristic.get("confidence", 0.6)
+        try:
+            confidence = float(response.get("confidence", confidence))
+        except Exception:
+            confidence = float(confidence)
+
+        enriched = dict(heuristic)
+        enriched.update(
+            {
+                "source": "llm",
+                "summary": summary,
+                "alerts": alerts,
+                "recommended_actions": recommendations or heuristic["recommended_actions"],
+                "confidence": max(0.0, min(1.0, confidence)),
+                "notes": notes,
+            }
+        )
+        return enriched
+
+    def _fallback_health(self, status: Mapping[str, Any]) -> MutableMapping[str, Any]:
+        last_drift = status.get("last_drift", {})
+        severity = float(last_drift.get("severity", 0.0) or 0.0)
+        seconds_since_save = float(status.get("seconds_since_last_save", 0.0) or 0.0)
+        alerts: list[str] = []
+        recommendations: list[str] = []
+        if severity >= 0.5:
+            alerts.append("Dérive importante détectée sur le dernier snapshot.")
+            recommendations.append("Planifier un audit des composantes les plus impactées.")
+        if seconds_since_save > max(self.autosave_interval * 3, 900):
+            alerts.append("Dernière sauvegarde trop ancienne.")
+            recommendations.append("Déclencher une sauvegarde manuelle ou ajuster l'autosave.")
+        if not alerts:
+            recommendations.append("Continuer la surveillance standard des snapshots.")
+        summary = "Persistance stable." if not alerts else "Persistance à surveiller."
+        return {
+            "source": "heuristic",
+            "summary": summary,
+            "alerts": alerts,
+            "recommended_actions": recommendations,
+            "confidence": 0.58 if alerts else 0.72,
+            "notes": "Synthèse heuristique basée sur la dernière dérive et le rythme de sauvegarde.",
+        }
+
+    @staticmethod
+    def _clean_text(value: Any) -> str:
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if cleaned:
+                return cleaned
+        return ""
+
+    @staticmethod
+    def _clean_list(value: Any) -> list[str]:
+        if not isinstance(value, (list, tuple)):
+            return []
+        results: list[str] = []
+        for item in value:
+            text = PersistenceManager._clean_text(item)
+            if text:
+                results.append(text)
+        return results
