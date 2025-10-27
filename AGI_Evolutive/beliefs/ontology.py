@@ -7,8 +7,57 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Set
 
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+_LLM_SPEC_KEY = "ontology_enrichment"
+_LLM_CONFIDENCE_THRESHOLD = 0.55
+_LLM_SNAPSHOT_LIMIT = 32
+_CACHE_MISS = object()
+
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_confidence(value: Any, *, default: float = 0.0) -> float:
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0.0, min(1.0, confidence))
+
+
+def _coerce_bool(value: Any, *, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "oui", "yes"}:
+            return True
+        if lowered in {"false", "0", "non", "no"}:
+            return False
+    return default
+
+
+def _ensure_str_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        item = value.strip()
+        return [item] if item else []
+    if isinstance(value, Iterable):
+        result: list[str] = []
+        for candidate in value:
+            if isinstance(candidate, str):
+                stripped = candidate.strip()
+                if stripped:
+                    result.append(stripped)
+        return result
+    return []
+
+
+def _normalized_name(value: str) -> str:
+    return value.strip().lower()
 
 
 @dataclass(frozen=True)
@@ -82,9 +131,177 @@ class Ontology:
         self.entity_types: Dict[str, EntityType] = {}
         self.relation_types: Dict[str, RelationType] = {}
         self.event_types: Dict[str, EventType] = {}
+        self._entity_suggestions: Dict[str, Optional[Mapping[str, Any]]] = {}
+        self._relation_suggestions: Dict[str, Optional[Mapping[str, Any]]] = {}
+        self._event_suggestions: Dict[str, Optional[Mapping[str, Any]]] = {}
 
     # ------------------------------------------------------------------
     # Registration helpers
+    def _llm_snapshot(self) -> Dict[str, Any]:
+        def _slice(values: Iterable[Any]) -> list[Any]:
+            return list(values)[:_LLM_SNAPSHOT_LIMIT]
+
+        entities_payload = [
+            {
+                "name": entity.name,
+                "parent": entity.parent,
+            }
+            for entity in _slice(self.entity_types.values())
+        ]
+        relations_payload = [
+            {
+                "name": relation.name,
+                "domain": sorted(relation.domain),
+                "range": sorted(relation.range),
+                "polarity_sensitive": relation.polarity_sensitive,
+                "temporal": relation.temporal,
+                "stability": relation.stability,
+            }
+            for relation in _slice(self.relation_types.values())
+        ]
+        events_payload = [
+            {
+                "name": event.name,
+                "roles": {role: sorted(options) for role, options in event.roles.items()},
+            }
+            for event in _slice(self.event_types.values())
+        ]
+        return {
+            "entities": entities_payload,
+            "relations": relations_payload,
+            "events": events_payload,
+        }
+
+    def _llm_enrich(
+        self,
+        *,
+        entity_candidates: Optional[list[Mapping[str, Any]]] = None,
+        relation_candidates: Optional[list[Mapping[str, Any]]] = None,
+        event_candidates: Optional[list[Mapping[str, Any]]] = None,
+    ) -> Optional[Mapping[str, Any]]:
+        payload = {
+            "candidates": {
+                "entities": list(entity_candidates or []),
+                "relations": list(relation_candidates or []),
+                "events": list(event_candidates or []),
+            },
+            "existing_snapshot": self._llm_snapshot(),
+        }
+        return try_call_llm_dict(
+            _LLM_SPEC_KEY,
+            input_payload=payload,
+            logger=logger,
+            max_retries=2,
+        )
+
+    def _lookup_cached(self, cache: Dict[str, Optional[Mapping[str, Any]]], name: str) -> Any:
+        key = _normalized_name(name)
+        if key in cache:
+            return cache[key]
+        return _CACHE_MISS
+
+    def _store_cached(
+        self,
+        cache: Dict[str, Optional[Mapping[str, Any]]],
+        name: str,
+        suggestion: Optional[Mapping[str, Any]],
+    ) -> Optional[Mapping[str, Any]]:
+        cache[_normalized_name(name)] = suggestion
+        return suggestion
+
+    def _match_suggestion(
+        self,
+        items: Iterable[Mapping[str, Any]],
+        name: str,
+    ) -> Optional[Mapping[str, Any]]:
+        lowered = _normalized_name(name)
+        for item in items:
+            candidate_name = item.get("name")
+            if isinstance(candidate_name, str) and _normalized_name(candidate_name) == lowered:
+                return item
+        return None
+
+    def _entity_suggestion(self, name: str) -> Optional[Mapping[str, Any]]:
+        cached = self._lookup_cached(self._entity_suggestions, name)
+        if cached is not _CACHE_MISS:
+            return cached
+
+        response = self._llm_enrich(entity_candidates=[{"name": name}])
+        if not isinstance(response, Mapping):
+            return self._store_cached(self._entity_suggestions, name, None)
+
+        suggestion = self._match_suggestion(
+            [item for item in response.get("entities", []) if isinstance(item, Mapping)],
+            name,
+        )
+        if suggestion is None:
+            return self._store_cached(self._entity_suggestions, name, None)
+
+        confidence = _coerce_confidence(suggestion.get("confidence"), default=1.0)
+        if confidence < _LLM_CONFIDENCE_THRESHOLD:
+            logger.debug(
+                "LLM suggestion for entity '%s' rejected (confidence %.2f)",
+                name,
+                confidence,
+            )
+            return self._store_cached(self._entity_suggestions, name, None)
+
+        return self._store_cached(self._entity_suggestions, name, suggestion)
+
+    def _relation_suggestion(self, name: str) -> Optional[Mapping[str, Any]]:
+        cached = self._lookup_cached(self._relation_suggestions, name)
+        if cached is not _CACHE_MISS:
+            return cached
+
+        response = self._llm_enrich(relation_candidates=[{"name": name}])
+        if not isinstance(response, Mapping):
+            return self._store_cached(self._relation_suggestions, name, None)
+
+        suggestion = self._match_suggestion(
+            [item for item in response.get("relations", []) if isinstance(item, Mapping)],
+            name,
+        )
+        if suggestion is None:
+            return self._store_cached(self._relation_suggestions, name, None)
+
+        confidence = _coerce_confidence(suggestion.get("confidence"), default=1.0)
+        if confidence < _LLM_CONFIDENCE_THRESHOLD:
+            logger.debug(
+                "LLM suggestion for relation '%s' rejected (confidence %.2f)",
+                name,
+                confidence,
+            )
+            return self._store_cached(self._relation_suggestions, name, None)
+
+        return self._store_cached(self._relation_suggestions, name, suggestion)
+
+    def _event_suggestion(self, name: str) -> Optional[Mapping[str, Any]]:
+        cached = self._lookup_cached(self._event_suggestions, name)
+        if cached is not _CACHE_MISS:
+            return cached
+
+        response = self._llm_enrich(event_candidates=[{"name": name}])
+        if not isinstance(response, Mapping):
+            return self._store_cached(self._event_suggestions, name, None)
+
+        suggestion = self._match_suggestion(
+            [item for item in response.get("events", []) if isinstance(item, Mapping)],
+            name,
+        )
+        if suggestion is None:
+            return self._store_cached(self._event_suggestions, name, None)
+
+        confidence = _coerce_confidence(suggestion.get("confidence"), default=1.0)
+        if confidence < _LLM_CONFIDENCE_THRESHOLD:
+            logger.debug(
+                "LLM suggestion for event '%s' rejected (confidence %.2f)",
+                name,
+                confidence,
+            )
+            return self._store_cached(self._event_suggestions, name, None)
+
+        return self._store_cached(self._event_suggestions, name, suggestion)
+
     def register_entity(self, name: str, *, parent: Optional[str] = None) -> None:
         if parent and parent not in self.entity_types:
             logger.debug("Auto-registering missing parent entity '%s' for '%s'", parent, name)
@@ -223,13 +440,95 @@ class Ontology:
         return self.relation_types.get(name)
 
     def event(self, name: str) -> Optional[EventType]:
-        return self.event_types.get(name)
+        event_type = self.event_types.get(name)
+        if event_type:
+            return event_type
+        suggestion = self._event_suggestion(name)
+        if not suggestion:
+            return None
+        roles_data = suggestion.get("roles")
+        if not isinstance(roles_data, Mapping):
+            logger.debug(  # pragma: no cover - logging
+                "LLM suggestion for event '%s' missing roles: %s",
+                name,
+                suggestion,
+            )
+            return None
+        roles: Dict[str, Set[str]] = {}
+        for role, allowed in roles_data.items():
+            if not isinstance(role, str):
+                continue
+            allowed_list = _ensure_str_list(allowed)
+            if not allowed_list:
+                continue
+            roles[role] = set(allowed_list)
+            for ent_name in allowed_list:
+                if ent_name not in self.entity_types:
+                    self.infer_entity_type(ent_name)
+        if not roles:
+            logger.debug(  # pragma: no cover - logging
+                "LLM suggestion for event '%s' produced empty roles: %s",
+                name,
+                suggestion,
+            )
+            return None
+        event_type = EventType(name=name, roles=roles)
+        self.event_types[name] = event_type
+        logger.debug(  # pragma: no cover - logging
+            "LLM provided schema for event '%s' with roles=%s",
+            name,
+            sorted(roles.keys()),
+        )
+        return event_type
 
     # ------------------------------------------------------------------
     def infer_relation_type(self, name: str) -> RelationType:
         rel = self.relation(name)
         if rel:
             return rel
+        suggestion = self._relation_suggestion(name)
+        if suggestion:
+            domain_candidates = _ensure_str_list(
+                suggestion.get("domain")
+                or suggestion.get("domain_types")
+                or suggestion.get("subjects")
+            )
+            range_candidates = _ensure_str_list(
+                suggestion.get("range")
+                or suggestion.get("range_types")
+                or suggestion.get("objects")
+            )
+            domain = {candidate for candidate in domain_candidates if candidate}
+            range_ = {candidate for candidate in range_candidates if candidate}
+            if domain and range_:
+                for entity_name in domain.union(range_):
+                    if entity_name not in self.entity_types:
+                        self.infer_entity_type(entity_name)
+                relation = RelationType(
+                    name=name,
+                    domain=domain,
+                    range=range_,
+                    polarity_sensitive=_coerce_bool(
+                        suggestion.get("polarity_sensitive"), default=True
+                    ),
+                    temporal=_coerce_bool(
+                        suggestion.get("temporal"), default=False
+                    ),
+                    stability=str(suggestion.get("stability", "anchor")).strip() or "anchor",
+                )
+                self.relation_types[name] = relation
+                logger.debug(
+                    "LLM provided schema for relation '%s': domain=%s range=%s",  # pragma: no cover - logging
+                    name,
+                    sorted(relation.domain),
+                    sorted(relation.range),
+                )
+                return relation
+            logger.debug(  # pragma: no cover - logging
+                "LLM suggestion for relation '%s' missing domain/range: %s",
+                name,
+                suggestion,
+            )
         # Fallback relation for unknown entries
         fallback = RelationType(
             name=name,
@@ -246,6 +545,28 @@ class Ontology:
         ent = self.entity(name)
         if ent:
             return ent
+        suggestion = self._entity_suggestion(name)
+        if suggestion:
+            parent_raw = suggestion.get("parent") or suggestion.get("parent_type")
+            parent: Optional[str]
+            if isinstance(parent_raw, str) and parent_raw.strip():
+                parent = parent_raw.strip()
+            else:
+                parent = "Entity"
+            if parent == name:
+                parent = "Entity"
+            if parent and parent not in self.entity_types:
+                inferred_parent = EntityType(name=parent, parent="Entity" if parent != "Entity" else None)
+                self.entity_types[parent] = inferred_parent
+            entity = EntityType(name=name, parent=parent)
+            self.entity_types[name] = entity
+            logger.debug(  # pragma: no cover - logging
+                "LLM provided parent '%s' for entity '%s' (%s)",
+                parent,
+                name,
+                suggestion.get("justification"),
+            )
+            return entity
         fallback = EntityType(name=name, parent="Entity")
         self.entity_types[name] = fallback
         return fallback
