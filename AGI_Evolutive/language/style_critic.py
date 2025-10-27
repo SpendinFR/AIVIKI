@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Mapping, Tuple
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 
 EMOJI_RE = re.compile(
@@ -20,6 +23,17 @@ COPULA_RE = re.compile(
 )
 PUNCT_BEFORE_RE = re.compile(r"\s+([!?;:])")
 PUNCT_AFTER_RE = re.compile(r"([!?;:])(?!\s)")
+
+
+LOGGER = logging.getLogger(__name__)
+LLM_SPEC_KEY = "language_style_critique"
+
+
+def _coerce_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _strip_accents(text: str) -> str:
@@ -139,6 +153,14 @@ class StyleCritic:
 
     def analyze(self, text: str) -> Dict[str, Any]:
         sample = (text or "").strip()
+        heuristic_report = self._run_heuristics(sample)
+        payload = self._build_llm_payload(sample, heuristic_report)
+        response = try_call_llm_dict(LLM_SPEC_KEY, input_payload=payload, logger=LOGGER)
+        if not response:
+            return heuristic_report
+        return self._merge_llm_response(sample, heuristic_report, response)
+
+    def _run_heuristics(self, sample: str) -> Dict[str, Any]:
         normalized = _strip_accents(sample)
         issues: List[Tuple[str, Any]] = []
 
@@ -180,6 +202,146 @@ class StyleCritic:
             "issues": issues,
             "signals": self._signals.last_snapshots(),
         }
+
+    def _build_llm_payload(self, sample: str, heuristics: Mapping[str, Any]) -> Dict[str, Any]:
+        issues = []
+        for item in heuristics.get("issues", []):
+            if isinstance(item, (tuple, list)) and len(item) == 2:
+                code, payload = item
+                issues.append({"code": code, "payload": payload})
+        return {
+            "text": sample,
+            "max_chars": self.max_chars,
+            "heuristics": {
+                "length": heuristics.get("length"),
+                "issues": issues,
+                "signals": heuristics.get("signals"),
+            },
+        }
+
+    def _merge_llm_response(
+        self,
+        sample: str,
+        heuristics: Mapping[str, Any],
+        response: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        llm_issues_raw = response.get("issues")
+        llm_issue_map: Dict[str, Mapping[str, Any]] = {}
+        if isinstance(llm_issues_raw, list):
+            for entry in llm_issues_raw:
+                if isinstance(entry, Mapping):
+                    code = str(
+                        entry.get("code")
+                        or entry.get("name")
+                        or entry.get("issue")
+                        or ""
+                    ).strip()
+                    if code:
+                        llm_issue_map[code] = entry
+
+        combined: List[Tuple[str, Any]] = []
+        llm_feedback: Dict[str, Dict[str, Any]] = {}
+        seen: set[str] = set()
+
+        for item in heuristics.get("issues", []):
+            if not (isinstance(item, (tuple, list)) and len(item) == 2):
+                continue
+            code, payload = item
+            info = llm_issue_map.get(code)
+            new_payload = payload
+            if info:
+                severity = _coerce_float(info.get("severity"))
+                explanation = info.get("explanation") or info.get("rationale") or info.get("reason")
+                suggestion = info.get("suggested_fix") or info.get("suggestion")
+
+                if isinstance(payload, dict):
+                    new_payload = dict(payload)
+                    if severity is not None:
+                        base = _coerce_float(new_payload.get("severity"))
+                        if base is not None:
+                            new_payload["severity"] = round((base + severity) / 2.0, 3)
+                        else:
+                            new_payload["severity"] = severity
+                else:
+                    if severity is not None:
+                        base = _coerce_float(payload)
+                        if base is not None:
+                            new_payload = round((base + severity) / 2.0, 3)
+                        else:
+                            new_payload = severity
+
+                feedback_entry: Dict[str, Any] = {}
+                if severity is not None:
+                    feedback_entry["severity"] = severity
+                if explanation:
+                    explanation_str = str(explanation).strip()
+                    if explanation_str:
+                        feedback_entry["explanation"] = explanation_str
+                        if isinstance(new_payload, dict):
+                            new_payload.setdefault("explanation", explanation_str)
+                if suggestion:
+                    suggestion_str = str(suggestion).strip()
+                    if suggestion_str:
+                        feedback_entry["suggested_fix"] = suggestion_str
+                        if isinstance(new_payload, dict):
+                            new_payload.setdefault("suggested_fix", suggestion_str)
+                if feedback_entry:
+                    llm_feedback[code] = feedback_entry
+
+            combined.append((code, new_payload))
+            seen.add(str(code))
+
+        for code, info in llm_issue_map.items():
+            if str(code) in seen:
+                continue
+            severity = _coerce_float(info.get("severity"))
+            if severity is None:
+                continue
+            explanation = info.get("explanation") or info.get("rationale") or info.get("reason")
+            suggestion = info.get("suggested_fix") or info.get("suggestion")
+            payload: Any
+            feedback_entry: Dict[str, Any] = {"severity": severity}
+            explanation_str = str(explanation).strip() if isinstance(explanation, str) else None
+            suggestion_str = str(suggestion).strip() if isinstance(suggestion, str) else None
+            if explanation_str:
+                feedback_entry["explanation"] = explanation_str
+            if suggestion_str:
+                feedback_entry["suggested_fix"] = suggestion_str
+            if explanation_str or suggestion_str:
+                payload = {"severity": severity}
+                if explanation_str:
+                    payload["explanation"] = explanation_str
+                if suggestion_str:
+                    payload["suggested_fix"] = suggestion_str
+            else:
+                payload = severity
+            combined.append((code, payload))
+            llm_feedback[str(code)] = feedback_entry
+
+        length_value = _coerce_float(response.get("length"))
+        if length_value is not None:
+            length_report = int(length_value)
+        else:
+            length_report = int(heuristics.get("length", len(sample)) or 0)
+
+        merged: Dict[str, Any] = {
+            "length": length_report,
+            "issues": combined,
+            "signals": heuristics.get("signals", {}),
+        }
+
+        confidence = _coerce_float(response.get("confidence"))
+        if confidence is not None:
+            merged["llm_confidence"] = max(0.0, min(1.0, confidence))
+
+        notes = response.get("notes")
+        if isinstance(notes, str) and notes.strip():
+            merged["llm_notes"] = notes.strip()
+
+        if llm_feedback:
+            merged["llm_feedback"] = llm_feedback
+
+        return merged
 
     def rewrite(self, text: str) -> str:
         if not text:

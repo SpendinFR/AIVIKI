@@ -132,6 +132,184 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         },
     ),
     _spec(
+        "language_style_critique",
+        "AGI_Evolutive/language/style_critic.py",
+        "Évalue la réponse de l'assistant et identifie les problèmes de style prioritaires.",
+        AVAILABLE_MODELS["fast"],
+        extra_instructions=(
+            "Retourne 'issues' triées par sévérité décroissante.",
+            "Chaque issue doit inclure 'code', 'severity' entre 0 et 1, 'explanation' concise et 'suggested_fix'.",
+            "Ajoute 'confidence' entre 0 et 1 et des 'notes' seulement si nécessaires.",
+        ),
+        example_output={
+            "length": 180,
+            "issues": [
+                {
+                    "code": "excess_bang",
+                    "severity": 0.74,
+                    "explanation": "Trop de points d'exclamation consécutifs.",
+                    "suggested_fix": "Limiter les points d'exclamation à un seul par phrase.",
+                },
+                {
+                    "code": "hedging_maybe",
+                    "severity": 0.42,
+                    "explanation": "Plusieurs hésitations (peut-être, je crois) affaiblissent le ton.",
+                    "suggested_fix": "Réaffirmer les conclusions sans termes hésitants.",
+                },
+            ],
+            "confidence": 0.68,
+            "notes": "",
+        },
+    ),
+    _spec(
+        "language_social_reward",
+        "AGI_Evolutive/language/social_reward.py",
+        "Estime la valence sociale d'un message utilisateur et justifie la note.",
+        AVAILABLE_MODELS["fast"],
+        extra_instructions=(
+            "Retourne un champ 'reward' compris entre -1 et 1.",
+            "Indique 'label' parmi {positive, neutral, negative}.",
+            "Liste les 'evidence' pertinentes (mots, expressions).",
+        ),
+        example_output={
+            "reward": 0.6,
+            "label": "positive",
+            "evidence": ["merci", "super"],
+            "confidence": 0.7,
+            "notes": "Les marqueurs positifs sont majoritaires malgré une légère réserve.",
+        },
+    ),
+    _spec(
+        "language_style_observer",
+        "AGI_Evolutive/language/style_observer.py",
+        "Analyse des candidats stylistiques et sélectionne ceux à intégrer en priorité.",
+        AVAILABLE_MODELS["fast"],
+        extra_instructions=(
+            "Retourne un champ 'decisions' (liste).",
+            "Chaque décision inclut 'id', 'accept' bool, 'priority' 0..1 et 'justification'.",
+            "Mentionne dans 'notes' les raisons d'incertitude éventuelles.",
+        ),
+        example_output={
+            "decisions": [
+                {"id": 0, "accept": True, "priority": 0.82, "justification": "Phrase courte et alignée."},
+                {"id": 1, "accept": False, "priority": 0.2, "justification": "Trop de jargon pour l'utilisateur."},
+            ],
+            "confidence": 0.71,
+            "notes": "Limiter l'intégration aux expressions avec contexte clair.",
+        },
+    ),
+    _spec(
+        "language_style_profiler",
+        "AGI_Evolutive/language/style_profiler.py",
+        "Analyse un message utilisateur et extrait les indices de style et de mémoire personnelle.",
+        AVAILABLE_MODELS["fast"],
+        extra_instructions=(
+            "Retourne 'tone', 'preferences' (liste), 'personal_facts', 'names' si détectés.",
+            "Chaque préférence inclut 'trait' et 'strength' entre 0 et 1.",
+            "Inclue 'lexicon' pour suggérer des tokens à renforcer (champ 'token').",
+        ),
+        example_output={
+            "tone": "casual chaleureux",
+            "preferences": [
+                {"trait": "emoji_usage", "strength": 0.75},
+                {"trait": "bullet_lists", "strength": 0.6},
+            ],
+            "personal_facts": [
+                {"summary": "Adore le café du matin", "confidence": 0.68}
+            ],
+            "names": [{"name": "Alice", "count": 1}],
+            "lexicon": [
+                {"token": "workflow", "weight": 0.2},
+                {"token": "booster", "weight": 0.15},
+            ],
+            "notes": "",  # facultatif
+        },
+    ),
+    _spec(
+        "language_quote_memory",
+        "AGI_Evolutive/language/quote_memory.py",
+        "Choisis la meilleure citation à proposer à partir du contexte fourni.",
+        AVAILABLE_MODELS["fast"],
+        extra_instructions=(
+            "Retourne 'selected_id' (entier) correspondant à l'id candidat.",
+            "Ajoute 'selected_tags' si des tags doivent être renforcés et une liste 'alternatives' optionnelle.",
+            "Si aucune citation ne convient, mets 'reject_all' à true.",
+        ),
+        example_output={
+            "selected_id": 2,
+            "selected_tags": ["motivation", "humour"],
+            "alternatives": [1],
+            "notes": "Favorise le rappel léger avant un appel à l'action.",
+        },
+    ),
+    _spec(
+        "language_inbox_ingest",
+        "AGI_Evolutive/language/inbox_ingest.py",
+        "Filtre les lignes d'un fichier d'inbox et indique comment les router (lexique, style, mémoire).",
+        AVAILABLE_MODELS["fast"],
+        extra_instructions=(
+            "Retourne 'decisions' avec pour chaque entrée {id, accept, targets, liked, tags, channel}.",
+            "Les cibles possibles : lexicon, style, quote.",
+            "Utilise 'notes' pour documenter les exclusions importantes.",
+        ),
+        example_output={
+            "decisions": [
+                {
+                    "id": 0,
+                    "accept": True,
+                    "targets": ["lexicon", "style"],
+                    "liked": False,
+                    "tags": ["setup"],
+                    "channel": "inbox",
+                },
+                {
+                    "id": 1,
+                    "accept": True,
+                    "targets": ["quote"],
+                    "liked": True,
+                    "tags": ["motivation"],
+                    "channel": "user",
+                },
+            ],
+            "notes": "Ignoré deux lignes car bruit marketing.",
+        },
+    ),
+    _spec(
+        "language_frames",
+        "AGI_Evolutive/language/frames.py",
+        "Identifie l'intention, les actes de dialogue et les besoins à partir d'une tournure utilisateur.",
+        AVAILABLE_MODELS["fast"],
+        extra_instructions=(
+            "Retourne 'intent', 'confidence', 'acts' (noms de DialogueAct), 'slots', 'needs'.",
+            "Ajoute 'unknown_terms' si nécessaire et 'notes' pour contextualiser.",
+        ),
+        example_output={
+            "intent": "ask_info",
+            "confidence": 0.78,
+            "acts": ["ASK", "CLARIFY"],
+            "slots": {"topic": "automatisation des tests"},
+            "needs": ["détails sur l'environnement"],
+            "unknown_terms": ["CI/CD"],
+            "notes": "Utilisateur incertain sur la procédure exacte.",
+        },
+    ),
+    _spec(
+        "language_semantic_understanding",
+        "AGI_Evolutive/language/__init__.py",
+        "Raffine le frame d'intention détecté en ajoutant slots et confiance ajustée.",
+        AVAILABLE_MODELS["fast"],
+        extra_instructions=(
+            "Respecte l'intention heuristique sauf si elle est manifestement incorrecte.",
+            "Retourne 'intent', 'confidence', 'slots' et éventuellement 'notes'.",
+        ),
+        example_output={
+            "intent": "plan",
+            "confidence": 0.81,
+            "slots": {"dates": ["10 mai"], "topic": "atelier IA"},
+            "notes": "Mention implicite d'organisation d'événement.",
+        },
+    ),
+    _spec(
         "conversation_context",
         "AGI_Evolutive/conversation/context.py",
         "Résume le contexte conversationnel et détecte le ton.",
