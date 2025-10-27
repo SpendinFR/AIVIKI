@@ -23,6 +23,7 @@ Licence: MIT
 """
 from __future__ import annotations
 
+import logging
 import os
 import json
 import time
@@ -32,10 +33,43 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field, asdict
 from typing import Dict, Any, Optional, List, Tuple
 
+from AGI_Evolutive.utils.llm_service import (
+    LLMIntegrationError,
+    LLMUnavailableError,
+    get_llm_manager,
+    is_llm_enabled,
+)
+
 # ========================= Utilitaires ========================= #
 
 def clip(x: float, lo: float, hi: float) -> float:
     return lo if x < lo else hi if x > hi else x
+
+
+LOGGER = logging.getLogger(__name__)
+
+_POSITIVE_EMOTIONS = {
+    "joie",
+    "fierté",
+    "soulagement",
+    "gratitude",
+    "calme",
+    "confiance",
+    "enthousiasme",
+    "espoir",
+    "satisfaction",
+}
+_NEGATIVE_EMOTIONS = {
+    "stress",
+    "colère",
+    "tristesse",
+    "anxiété",
+    "peur",
+    "culpabilité",
+    "frustration",
+    "fatigue",
+    "inquiétude",
+}
 
 
 def _softmax(logits: Dict[str, float], temperature: float = 1.0) -> Dict[str, float]:
@@ -607,6 +641,7 @@ class EmotionEngine:
 
         # Cache modulators
         self.last_modulators: Dict[str, Any] = {}
+        self._last_llm_annotation: Optional[Dict[str, Any]] = None
 
         # Charger si présent
         self.load()
@@ -787,9 +822,16 @@ class EmotionEngine:
         dv, da, dd, parts, gates = self.aggregator.step(ctx, quality=quality_signal)
         self._synthesizer.observe(ctx, quality_signal)
 
+        dv, da, dd, llm_annotation = self._llm_appraise(ctx, dv, da, dd)
+        self._last_llm_annotation = llm_annotation
+
+        meta_payload = {"parts": parts, "ctx_keys": list(ctx.keys()), "gates": gates}
+        if llm_annotation:
+            meta_payload["llm"] = llm_annotation
+
         # 3) Appliquer delta + journaliser
         self._nudge(dv, da, dd, source="aggregator", confidence=self._confidence_from_ctx(ctx),
-                    meta={"parts": parts, "ctx_keys": list(ctx.keys()), "gates": gates})
+                    meta=meta_payload)
 
         # 3b) Rituels potentiels (après nudge pour état à jour)
         self._rituals.observe(now, quality_signal, self.state, self.mood)
@@ -799,6 +841,11 @@ class EmotionEngine:
 
         # 5) Recalcul modulateurs & dispatch
         self.last_modulators = self._compute_modulators()
+        if llm_annotation:
+            self.last_modulators.setdefault("llm_annotation", llm_annotation)
+            suggestion = llm_annotation.get("regulation_suggestion") if isinstance(llm_annotation, dict) else None
+            if suggestion and isinstance(suggestion, str):
+                self.last_modulators.setdefault("regulation_suggestion", suggestion)
         adjust = self._plasticity.observe(now, quality_signal, self.last_modulators)
         if adjust:
             self.half_life_sec = self._plasticity.episode_half_life
@@ -812,6 +859,85 @@ class EmotionEngine:
         self._last_step = now
 
     # ========================= Interne ========================= #
+    def _llm_appraise(
+        self,
+        ctx: Dict[str, Any],
+        dv: float,
+        da: float,
+        dd: float,
+    ) -> Tuple[float, float, float, Optional[Dict[str, Any]]]:
+        if not is_llm_enabled():
+            return dv, da, dd, None
+
+        payload = {
+            "state": {
+                "valence": self.state.valence,
+                "arousal": self.state.arousal,
+                "dominance": self.state.dominance,
+            },
+            "aggregated_delta": {"dv": dv, "da": da, "dd": dd},
+            "context_keys": list(ctx.keys())[:24],
+        }
+
+        try:
+            response = get_llm_manager().call_dict(
+                "emotion_engine",
+                input_payload=payload,
+            )
+        except (LLMUnavailableError, LLMIntegrationError):
+            LOGGER.debug("LLM emotion engine unavailable", exc_info=True)
+            return dv, da, dd, None
+
+        if not isinstance(response, dict):
+            return dv, da, dd, None
+
+        emotions = response.get("emotions")
+        annotation: Dict[str, Any] = {
+            "emotions": emotions,
+            "regulation_suggestion": response.get("regulation_suggestion"),
+            "notes": response.get("notes"),
+        }
+
+        if not isinstance(emotions, list) or not emotions:
+            return dv, da, dd, annotation
+
+        valence_score = 0.0
+        total_intensity = 0.0
+        for entry in emotions:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or "").lower()
+            intensity = float(entry.get("intensity", 0.0) or 0.0)
+            total_intensity += intensity
+            if name in _POSITIVE_EMOTIONS:
+                valence_score += intensity
+            elif name in _NEGATIVE_EMOTIONS:
+                valence_score -= intensity
+            else:
+                valence_score += intensity * (1.0 if dv >= 0 else -1.0) * 0.25
+
+        valence_score = clip(valence_score, -1.0, 1.0)
+        arousal_level = clip(total_intensity / max(1.0, len(emotions)), 0.0, 1.0)
+        dominance_delta = clip(0.35 * valence_score, -0.6, 0.6)
+
+        agg_valence = clip(self.state.valence + dv, -1.0, 1.0)
+        agg_arousal = clip(self.state.arousal + da, 0.0, 1.0)
+        agg_dominance = clip(self.state.dominance + dd, 0.0, 1.0)
+
+        llm_valence = clip(self.state.valence + valence_score, -1.0, 1.0)
+        llm_arousal = clip(0.5 * self.state.arousal + 0.5 * arousal_level, 0.0, 1.0)
+        llm_dominance = clip(self.state.dominance + dominance_delta, 0.0, 1.0)
+
+        combined_valence = clip(0.6 * agg_valence + 0.4 * llm_valence, -1.0, 1.0)
+        combined_arousal = clip(0.5 * agg_arousal + 0.5 * llm_arousal, 0.0, 1.0)
+        combined_dominance = clip(0.6 * agg_dominance + 0.4 * llm_dominance, 0.0, 1.0)
+
+        new_dv = clip(combined_valence - self.state.valence, -1.0, 1.0)
+        new_da = clip(combined_arousal - self.state.arousal, -1.0, 1.0)
+        new_dd = clip(combined_dominance - self.state.dominance, -1.0, 1.0)
+
+        return new_dv, new_da, new_dd, annotation
+
     def _collect_context(self) -> Dict[str, Any]:
         ctx: Dict[str, Any] = {}
         metacog = self.bound.get("metacog")

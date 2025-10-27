@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -91,6 +97,24 @@ class ReasoningLedger:
         trace.ended_ts = time.time()
         error = abs(float(obtained) - float(expected))
         trace.outcome = {"expected": float(expected), "obtained": float(obtained), "error": error}
+        llm_response = try_call_llm_dict(
+            "reasoning_ledger",
+            input_payload={
+                "trace_id": trace.trace_id,
+                "topic": trace.topic,
+                "premises": [p.__dict__ for p in trace.premises],
+                "options": [o.__dict__ for o in trace.options],
+                "counterexamples": [c.__dict__ for c in trace.counterexamples],
+                "chosen": {
+                    "id": trace.chosen_id,
+                    "justification": trace.justification,
+                    "stop_rules_hit": trace.stop_rules_hit,
+                },
+                "outcome": trace.outcome,
+            },
+            logger=LOGGER,
+            max_retries=2,
+        )
         if self.memory is not None:
             self.memory.add(
                 {
@@ -107,6 +131,7 @@ class ReasoningLedger:
                     },
                     "outcome": trace.outcome,
                     "ts": trace.ended_ts,
+                    "llm_entry": llm_response.get("entry") if llm_response else None,
                 }
             )
         del self._active[trace_id]

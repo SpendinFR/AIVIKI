@@ -12,12 +12,18 @@ in a ``None`` value instead of an exception bubbling up to the caller.
 
 from __future__ import annotations
 
+import logging
 import subprocess
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Optional
 
 import psutil
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _bytes_to_human(n: float) -> float:
@@ -101,6 +107,9 @@ class SystemMonitor:
 
         snapshot["disks"] = self._query_disks(now)
 
+        insights = self._llm_comment(snapshot)
+        if insights:
+            snapshot["llm_analysis"] = insights
         self._last_snapshot = snapshot
         self._last_poll = now
         return dict(snapshot)
@@ -214,4 +223,24 @@ class SystemMonitor:
 
         self._prev_disk_ts = now
         return disks
+
+    def _llm_comment(self, snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        response = try_call_llm_dict(
+            "system_monitor",
+            input_payload=snapshot,
+            logger=LOGGER,
+        )
+        if not response:
+            return None
+        observations = response.get("observations")
+        if observations is not None and not isinstance(observations, list):
+            observations = None
+        risks = response.get("risks")
+        if risks is not None and not isinstance(risks, list):
+            risks = None
+        return {
+            "observations": observations or [],
+            "risks": risks or [],
+            "notes": response.get("notes", ""),
+        }
 

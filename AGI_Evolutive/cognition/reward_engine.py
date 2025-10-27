@@ -1,5 +1,6 @@
 from dataclasses import dataclass, asdict
 from typing import Optional, Dict, Any, List, Tuple, Callable
+import logging
 import math
 import re
 import time
@@ -10,6 +11,10 @@ from collections import deque
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
 from AGI_Evolutive.goals import GoalType
 from AGI_Evolutive.goals.curiosity import CuriosityEngine
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -307,6 +312,34 @@ class RewardEngine:
         extrinsic = self._blend_rewards(base_reward, model_reward, confidence)
         intensity = float(max(base_intensity, min(1.0, confidence * 0.9 + 0.1)))
 
+        llm_data: Optional[Dict[str, Any]] = None
+        payload = {
+            "text": text,
+            "channel": channel,
+            "base_reward": base_reward,
+            "model_reward": model_reward,
+            "features": {
+                "lex": lex_features,
+                "surface": surface_features,
+                "context": context_features,
+            },
+        }
+        response = try_call_llm_dict(
+            "reward_engine",
+            input_payload=payload,
+            logger=logger,
+        )
+        if response:
+            llm_data = dict(response)
+            llm_valence = response.get("valence")
+            try:
+                if llm_valence is not None:
+                    extrinsic = self._blend_rewards(extrinsic, float(llm_valence), 0.6)
+            except (TypeError, ValueError):
+                logger.debug("Invalid LLM valence: %r", llm_valence)
+            if response.get("irony_detected"):
+                intensity = max(intensity, 0.6)
+
         polarity = "neutral"
         if extrinsic > 0.05:
             polarity = "positive"
@@ -331,6 +364,8 @@ class RewardEngine:
             "contextual": context_features,
             "personalization": personalization_features,
         }
+        if llm_data:
+            features["llm"] = llm_data
 
         self._update_user_profile(user_id, extrinsic, intensity)
         self._record_event_history(user_id, extrinsic, polarity, features)

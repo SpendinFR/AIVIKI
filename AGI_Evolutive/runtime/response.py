@@ -1,8 +1,57 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+import logging
 import re
+
+from AGI_Evolutive.utils.llm_service import (
+    LLMIntegrationError,
+    LLMUnavailableError,
+    get_llm_manager,
+    is_llm_enabled,
+)
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _llm_enabled() -> bool:
+    return is_llm_enabled()
+
+
+def _llm_manager():
+    return get_llm_manager()
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        if isinstance(value, str):
+            candidate = value.replace(",", ".").strip()
+            return float(candidate)
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _extract_str(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+    text = str(value).strip()
+    return text or None
 
 
 def _split_reasoning_bullets(text: str) -> List[str]:
@@ -73,6 +122,9 @@ def humanize_reasoning_block(text: str) -> Tuple[str, Optional[Dict[str, Any]]]:
 
     sentinel_tokens = ("Hypothèse prise", "Incertitude", "Ce que j'apprends", "🔧", "❓")
     if not any(token in text for token in sentinel_tokens):
+        llm_result = _llm_rewrite_reasoning(text)
+        if llm_result:
+            return llm_result
         return text, None
 
     lines = _split_reasoning_segments(text)
@@ -191,6 +243,63 @@ def humanize_reasoning_block(text: str) -> Tuple[str, Optional[Dict[str, Any]]]:
         "needs": needs,
         "questions": questions,
     }
+    return normalized_text, diagnostics
+
+
+def _llm_rewrite_reasoning(text: str) -> Optional[Tuple[str, Dict[str, Any]]]:
+    if not text or not _llm_enabled():
+        return None
+    try:
+        response = _llm_manager().call_dict("response_formatter", input_payload={"reasoning": text})
+    except (LLMUnavailableError, LLMIntegrationError):
+        LOGGER.debug("LLM response formatter unavailable", exc_info=True)
+        return None
+    if not isinstance(response, Mapping):
+        return None
+
+    hypothesis = _extract_str(response.get("hypothese") or response.get("hypothesis"))
+    incertitude_value = response.get("incertitude")
+    incertitude = _coerce_float(incertitude_value)
+    incertitude_note = None if incertitude is not None else _extract_str(incertitude_value)
+    needs = _coerce_list(response.get("besoins"))
+    questions = _coerce_list(response.get("questions"))
+    summary = _extract_str(response.get("summary") or response.get("notes"))
+    notes = _extract_str(response.get("notes"))
+
+    sentences: List[str] = []
+    if hypothesis:
+        hypothesis_clean = hypothesis.rstrip(".")
+        sentences.append(f"Hypothèse : {hypothesis_clean}.")
+    if summary:
+        summary_clean = summary.rstrip(".")
+        sentences.append(f"Synthèse : {summary_clean}.")
+    if incertitude is not None:
+        confidence = max(0.0, min(1.0, 1.0 - incertitude))
+        sentences.append(f"Confiance estimée : {int(round(confidence * 100))}%.")
+    elif incertitude_note:
+        sentences.append(f"Incertitude : {incertitude_note}.")
+    if needs:
+        sentences.append("Besoins : " + "; ".join(needs) + ".")
+    if questions:
+        formatted = [item.rstrip(" ?") + " ?" for item in questions]
+        sentences.append("Questions : " + " ; ".join(formatted))
+    if notes and notes not in (summary or ""):
+        sentences.append(f"Notes : {notes}.")
+
+    normalized_text = " ".join(sentences).strip()
+    if not normalized_text:
+        normalized_text = summary or text
+
+    diagnostics: Dict[str, Any] = {
+        "hypothesis": hypothesis,
+        "incertitude": incertitude,
+        "needs": needs,
+        "questions": questions,
+        "notes": notes,
+    }
+    if incertitude is None and incertitude_note:
+        diagnostics["incertitude_text"] = incertitude_note
+
     return normalized_text, diagnostics
 
 CONTRACT_KEYS = [

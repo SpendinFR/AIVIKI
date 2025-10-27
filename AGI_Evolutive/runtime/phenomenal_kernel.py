@@ -11,13 +11,19 @@ budgets.
 
 from __future__ import annotations
 
+import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, Iterable, Optional
 
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
 
 __all__ = ["PhenomenalKernel", "ModeManager", "SystemAlert"]
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _clip(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
@@ -206,7 +212,44 @@ class PhenomenalKernel:
             "alert_pressure": alert_pressure,
             "active_alerts": [alert.as_dict(now) for alert in active_alerts],
         }
+        enrichment = self._llm_interpret(
+            emotional_state=emotional_state,
+            kernel_state=self._state,
+        )
+        if enrichment:
+            self._state["llm_interpretation"] = enrichment
         return dict(self._state)
+
+    def _llm_interpret(
+        self,
+        *,
+        emotional_state: Dict[str, float],
+        kernel_state: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        payload = {
+            "emotional_state": emotional_state,
+            "kernel_state": kernel_state,
+        }
+        response = try_call_llm_dict(
+            "phenomenal_kernel",
+            input_payload=payload,
+            logger=LOGGER,
+        )
+        if not response:
+            return None
+        current_state = response.get("current_state")
+        recommended = response.get("recommended_mode")
+        justification = response.get("justification")
+        if not isinstance(current_state, str) or not isinstance(recommended, str):
+            return None
+        if justification is not None and not isinstance(justification, str):
+            justification = None
+        return {
+            "current_state": current_state,
+            "recommended_mode": recommended,
+            "justification": justification or "",
+            "notes": response.get("notes", ""),
+        }
 
     @property
     def state(self) -> Dict[str, Any]:

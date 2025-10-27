@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from AGI_Evolutive.core.structures.mai import Bid, MAI
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 # --- MAI dispatcher (NLG) ---
 # Registre de handlers extensible à chaud (aucune liste figée)
@@ -113,6 +114,21 @@ def apply_mai_bids_to_nlg(
                 nlg_context.mark_applied(bid)
             else:
                 apply_generic(bid, nlg_context)
+    sections = try_call_llm_dict(
+        "language_nlg",
+        input_payload={
+            "base_text": nlg_context.text,
+            "applied_hints": applied,
+        },
+        logger=logger,
+    )
+    if sections:
+        parts = [sections.get("introduction"), sections.get("body"), sections.get("conclusion")]
+        assembled = "\n\n".join(part.strip() for part in parts if isinstance(part, str) and part.strip())
+        if assembled:
+            nlg_context.text = assembled
+            nlg_context.register_custom_action("llm", "structured_sections")
+            setattr(nlg_context, "llm_sections", dict(sections))
     return applied
 
 

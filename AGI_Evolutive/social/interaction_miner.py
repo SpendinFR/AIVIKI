@@ -2,6 +2,7 @@
 # Induction de règles sociales ⟨Contexte→Tactique→Effets_attendus⟩
 # depuis des dialogues inbox. Zéro LLM, heuristiques + ontologie si dispo.
 from __future__ import annotations
+import logging
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Tuple
 import re
@@ -15,8 +16,18 @@ from collections import defaultdict
 from AGI_Evolutive.social.interaction_rule import (
     InteractionRule, Predicate, TacticSpec, ContextBuilder
 )
+from AGI_Evolutive.utils.llm_service import (
+    LLMIntegrationError,
+    LLMUnavailableError,
+    get_llm_manager,
+    is_llm_enabled,
+)
 
 # ---------------------- utilitaires ----------------------
+# ---------------------- utilitaires ----------------------
+LOGGER = logging.getLogger(__name__)
+
+
 def _now() -> float: return time.time()
 def _hash(s: str) -> str: return hashlib.sha1(s.encode("utf-8")).hexdigest()[:12]
 def clamp(x, a=0.0, b=1.0): return max(a, min(b, x))
@@ -237,6 +248,12 @@ class InteractionMiner:
         self.arch = arch
         self._fallback_classifier = self._init_fallback_classifier()
         self._score_calibrator = self._init_score_calibrator()
+        
+    def _llm_enabled(self) -> bool:
+        return is_llm_enabled()
+
+    def _llm_manager(self):
+        return get_llm_manager()
 
     def _init_fallback_classifier(self) -> OnlineTextActClassifier:
         existing = getattr(self.arch, "_interaction_miner_act_classifier", None)
@@ -288,7 +305,12 @@ class InteractionMiner:
     def mine_text(self, text: str, source: str = "inbox:unknown") -> List[InteractionRule]:
         turns = self._parse_turns(text)
         self._annotate_acts(turns)            # remplit .act (heuristique + analyzers si dispo)
-        rules = self._extract_rules(turns, source)
+        llm_annotations = self._llm_annotate(turns, source)
+        if llm_annotations and llm_annotations.get("speech_act") and turns:
+            primary_act = str(llm_annotations["speech_act"]).strip()
+            if primary_act:
+                turns[0].act = primary_act
+        rules = self._extract_rules(turns, source, llm_annotations)
         rules = self._merge_duplicates(rules) # fusionne mêmes règles avec +evidence
         return rules
 
@@ -497,8 +519,17 @@ class InteractionMiner:
         self._persist_learners()
 
     # ----------- Extraction de règles (paires + implicatures) ----------
-    def _extract_rules(self, turns: List[DialogueTurn], source: str) -> List[InteractionRule]:
+    def _extract_rules(
+        self,
+        turns: List[DialogueTurn],
+        source: str,
+        llm_annotations: Optional[Dict[str, Any]] = None,
+    ) -> List[InteractionRule]:
         rules: List[InteractionRule] = []
+        if llm_annotations:
+            llm_rules = self._rules_from_llm(turns, source, llm_annotations)
+            if llm_rules:
+                rules.extend(llm_rules)
         n = len(turns)
         for i in range(n - 1):
             a, b = turns[i], turns[i + 1]
@@ -605,6 +636,99 @@ class InteractionMiner:
                     r.context_predicates.append(Predicate("implicature_hint", "in", ["sous-entendu","ironie"], 0.4))
             except Exception:
                 pass
+
+        return rules
+
+    def _llm_payload(self, turns: List[DialogueTurn], source: str) -> Dict[str, Any]:
+        return {
+            "source": source,
+            "turns": [
+                {
+                    "speaker": t.speaker,
+                    "text": t.text,
+                    "act": t.act,
+                    "valence": t.valence,
+                }
+                for t in turns[:12]
+            ],
+        }
+
+    def _llm_annotate(
+        self, turns: List[DialogueTurn], source: str
+    ) -> Optional[Dict[str, Any]]:
+        if not turns or not self._llm_enabled():
+            return None
+
+        payload = self._llm_payload(turns, source)
+        try:
+            response = self._llm_manager().call_dict(
+                "social_interaction_miner",
+                input_payload=payload,
+            )
+        except (LLMUnavailableError, LLMIntegrationError):
+            LOGGER.debug("LLM interaction miner unavailable", exc_info=True)
+            return None
+
+        if not isinstance(response, dict):
+            return None
+        return response
+
+    def _rules_from_llm(
+        self,
+        turns: List[DialogueTurn],
+        source: str,
+        annotations: Dict[str, Any],
+    ) -> List[InteractionRule]:
+        suggestions = annotations.get("suggested_rules")
+        if not isinstance(suggestions, list):
+            return []
+
+        speech_act = annotations.get("speech_act")
+        base_conf = float(annotations.get("confidence", 0.0) or 0.0)
+        base_conf = max(0.0, min(1.0, base_conf)) or 0.72
+        rules: List[InteractionRule] = []
+        for entry in suggestions:
+            if not isinstance(entry, dict):
+                continue
+            rule_name = str(entry.get("rule") or "").strip()
+            if not rule_name:
+                continue
+            params = entry.get("parameters") if isinstance(entry.get("parameters"), dict) else {}
+            rationale = entry.get("rationale") or entry.get("explanation")
+            expected_effect = entry.get("expected_effect")
+            intensity = float(entry.get("confidence", base_conf) or base_conf)
+            intensity = max(0.05, min(1.0, intensity))
+
+            predicates: List[Predicate] = []
+            if speech_act:
+                predicates.append(Predicate("dialogue_act", "eq", speech_act, 1.0))
+            if entry.get("context") and isinstance(entry["context"], dict):
+                for key, val in list(entry["context"].items())[:4]:
+                    predicates.append(Predicate(str(key), "eq", val, 0.6))
+            if not predicates:
+                predicates.append(Predicate("dialogue_act", "exists", None, 0.4))
+
+            tactic = TacticSpec(rule_name, dict(params))
+            provenance = {
+                "source": source,
+                "kind": "llm_suggestion",
+                "llm": {
+                    "speech_act": speech_act,
+                    "suggestion": entry,
+                },
+            }
+            if expected_effect:
+                provenance.setdefault("llm", {})["expected_effect"] = expected_effect
+            rule = InteractionRule.build(predicates, tactic, provenance=provenance)
+            rule.confidence = clamp(float(intensity), 0.05, 1.0)
+            rule.tags = list(set((rule.tags or []) + ["llm", "social"]))
+            if rationale:
+                rule.provenance.setdefault("llm", {})["rationale"] = rationale
+            if turns:
+                rule.provenance.setdefault("evidence", {})["a"] = turns[0].text
+                if len(turns) > 1:
+                    rule.provenance.setdefault("evidence", {})["b"] = turns[1].text
+            rules.append(rule)
 
         return rules
 

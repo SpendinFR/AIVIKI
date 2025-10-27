@@ -4,16 +4,26 @@ from __future__ import annotations
 
 import glob
 import json
+import logging
 import os
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Mapping
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
-
-
 def _now() -> float:
     return time.time()
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _llm_enabled() -> bool:
+    return is_llm_enabled()
+
+
+def _llm_manager():
+    return get_llm_manager()
 
 
 class PerceptionInterface:
@@ -59,6 +69,7 @@ class PerceptionInterface:
         self._index = self._load_index()
         self.scan_interval = 3.0
         self._last_scan = 0.0
+        self._last_llm_preanalysis: Optional[Mapping[str, Any]] = None
 
     # ------------------------------------------------------------------
     # Binding helpers
@@ -120,6 +131,27 @@ class PerceptionInterface:
 
         return added
 
+    def _llm_preprocess(self, text: str, meta: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
+        if not _llm_enabled():
+            return None
+
+        payload = {"text": text, "metadata": dict(meta)}
+
+        try:
+            response = _llm_manager().call_dict(
+                "perception_preprocess",
+                input_payload=payload,
+            )
+        except (LLMUnavailableError, LLMIntegrationError):
+            LOGGER.debug("LLM perception preprocessing unavailable", exc_info=True)
+            return None
+
+        if not isinstance(response, Mapping):
+            return None
+
+        self._last_llm_preanalysis = dict(response)
+        return self._last_llm_preanalysis
+
     def _ingest_file(self, path: str) -> bool:
         memory = self.bound.get("memory")
         emotions = self.bound.get("emotions")
@@ -140,7 +172,12 @@ class PerceptionInterface:
         except Exception:
             content_text = f"(binaire) {meta['filename']}"
 
-        self._log({"kind": "inbox_file", "meta": meta})
+        llm_analysis = self._llm_preprocess(content_text, meta)
+        record = {"kind": "inbox_file", "meta": meta}
+        if llm_analysis:
+            record["llm"] = llm_analysis
+            meta.setdefault("llm_preanalysis", llm_analysis)
+        self._log(record)
 
         if memory and hasattr(memory, "add_memory"):
             try:
@@ -149,6 +186,7 @@ class PerceptionInterface:
                         "kind": "perception_inbox",
                         "content": content_text,
                         "metadata": meta,
+                        "llm": llm_analysis,
                     }
                 )
             except Exception:
@@ -192,6 +230,10 @@ class PerceptionInterface:
             "t": _now(),
             "meta": meta or {},
         }
+        llm_analysis = self._llm_preprocess(text, record["meta"])
+        if llm_analysis:
+            record["llm"] = llm_analysis
+            record["meta"].setdefault("llm_preanalysis", llm_analysis)
         self._log(record)
 
         memory = self.bound.get("memory")
@@ -202,6 +244,7 @@ class PerceptionInterface:
                         "kind": "dialogue_turn",
                         "content": text,
                         "metadata": {"speaker": speaker, **(meta or {})},
+                        "llm": llm_analysis,
                     }
                 )
             except Exception:

@@ -11,8 +11,23 @@ from dataclasses import dataclass, field
 from itertools import islice
 from typing import Any, Deque, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
+from AGI_Evolutive.utils.llm_service import (
+    LLMIntegrationError,
+    LLMUnavailableError,
+    get_llm_manager,
+    is_llm_enabled,
+)
+
 
 logger = logging.getLogger(__name__)
+
+
+def _llm_enabled() -> bool:
+    return is_llm_enabled()
+
+
+def _llm_manager():
+    return get_llm_manager()
 
 
 def _fmt_date(ts: float) -> str:
@@ -515,6 +530,50 @@ class ContextBuilder:
             "feedback_buffer": list(self._feedback_history)[-5:],
         }
 
+    def _llm_enrichment(
+        self,
+        user_msg: str,
+        recent: List[Dict[str, Any]],
+        long_summary: List[Any],
+        topics: List[str],
+        persona_overrides: Mapping[str, float],
+    ) -> Optional[Mapping[str, Any]]:
+        if not _llm_enabled():
+            return None
+
+        recent_payload: List[Dict[str, Any]] = []
+        for memo in recent[-6:]:
+            text = memo.get("text") or memo.get("content") or ""
+            recent_payload.append(
+                {
+                    "speaker": memo.get("speaker") or memo.get("role"),
+                    "text": _normalize_text(text)[:500],
+                    "ts": memo.get("ts") or memo.get("t"),
+                }
+            )
+
+        payload = {
+            "last_message": user_msg,
+            "recent_messages": recent_payload,
+            "topics": topics,
+            "lessons": long_summary,
+            "user_style": self._user_style(recent, persona_overrides),
+        }
+
+        try:
+            response = _llm_manager().call_dict(
+                "conversation_context",
+                input_payload=payload,
+            )
+        except (LLMUnavailableError, LLMIntegrationError):
+            logger.debug("LLM conversation context unavailable", exc_info=True)
+            return None
+
+        if not isinstance(response, Mapping):
+            return None
+
+        return dict(response)
+
     # ---------------------------------------------------------------- Build ---
     def build(self, user_msg: str) -> Dict[str, Any]:
         user_id = self._infer_user_id()
@@ -539,4 +598,21 @@ class ContextBuilder:
         }
         self._update_feedback_loop(ctx)
         ctx["monitoring"] = self._monitoring_snapshot()
+
+        llm_bundle = self._llm_enrichment(user_msg, recent, long_summary, topics, persona_overrides)
+        if llm_bundle:
+            ctx.setdefault("llm_summary", llm_bundle)
+            summary_text = llm_bundle.get("summary")
+            if isinstance(summary_text, str) and summary_text:
+                ctx.setdefault("llm_summary_text", summary_text)
+            llm_topics = llm_bundle.get("topics")
+            if isinstance(llm_topics, list) and llm_topics:
+                ctx.setdefault("llm_topics", llm_topics)
+            tone = llm_bundle.get("tone")
+            if isinstance(tone, str) and tone:
+                ctx.setdefault("tone", tone)
+            alerts = llm_bundle.get("alerts")
+            if isinstance(alerts, list) and alerts:
+                ctx.setdefault("alerts", alerts)
+
         return ctx

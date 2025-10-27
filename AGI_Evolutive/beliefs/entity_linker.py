@@ -1,11 +1,17 @@
 """Simple entity linker handling aliases and synonym resolution for the belief graph."""
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _sigmoid(x: float) -> float:
@@ -219,6 +225,36 @@ class EntityLinker:
             self._bump_context(canonical, context, 0.01)
             return canonical, record.entity_type
 
+        llm_choice = self._llm_resolve(
+            name,
+            entity_type=entity_type,
+            context=context,
+        )
+        if llm_choice:
+            canonical_id, resolved_type, justification = llm_choice
+            if canonical_id in self._entities:
+                record = self._entities[canonical_id]
+            else:
+                record = EntityRecord(
+                    canonical_id=canonical_id,
+                    name=name,
+                    entity_type=resolved_type or entity_type or "Entity",
+                    popularity=0.6,
+                )
+                self._entities[canonical_id] = record
+            record.bump(
+                self._weighter.score("resolve", record.entity_type, record),
+                decay_rate=self._decay_rate,
+                context=context,
+                now=now,
+            )
+            if resolved_type and record.entity_type != resolved_type:
+                record.entity_type = resolved_type
+            if justification:
+                self._bump_context(canonical_id, context, 0.03)
+            self._aliases[norm] = canonical_id
+            return canonical_id, record.entity_type
+
         candidates = []
         if context:
             context_scores = self._context_usage.get(context, {})
@@ -242,6 +278,45 @@ class EntityLinker:
         if entity_type and record.entity_type != entity_type:
             record.entity_type = entity_type
         return canonical_id, record.entity_type
+
+    def _llm_resolve(
+        self,
+        name: str,
+        *,
+        entity_type: Optional[str],
+        context: Optional[str],
+    ) -> Optional[Tuple[str, Optional[str], Optional[str]]]:
+        payload = {
+            "mention": name,
+            "entity_type": entity_type,
+            "context": context,
+            "known_entities": [
+                {
+                    "canonical_id": canonical_id,
+                    "name": record.name,
+                    "entity_type": record.entity_type,
+                    "popularity": record.popularity,
+                }
+                for canonical_id, record in list(self._entities.items())[:50]
+            ],
+        }
+        response = try_call_llm_dict(
+            "entity_linker",
+            input_payload=payload,
+            logger=LOGGER,
+        )
+        if not response:
+            return None
+        canonical = response.get("canonical_entity")
+        if not canonical or not isinstance(canonical, str):
+            return None
+        resolved_type = response.get("resolved_type") or response.get("entity_type")
+        if resolved_type is not None and not isinstance(resolved_type, str):
+            resolved_type = None
+        justification = response.get("justification")
+        if justification is not None and not isinstance(justification, str):
+            justification = None
+        return canonical, resolved_type, justification
 
     # ------------------------------------------------------------------
     def merge(self, preferred: str, duplicate: str) -> None:

@@ -9,6 +9,7 @@ from .planner import expand_queries, decompose
 from .compose import assemble_citations
 from .guards import should_refuse, refusal_message
 from .telemetry import log_event
+from . import request_llm_guidance
 
 class RAGPipeline:
     def __init__(self, cfg: Dict):
@@ -26,6 +27,18 @@ class RAGPipeline:
     def ask(self, question: str) -> Dict:
         t0 = time.perf_counter()
         q_exp = expand_queries(question)
+        llm_guidance = request_llm_guidance(
+            question,
+            config=self.cfg,
+            expansions=q_exp,
+        )
+        if llm_guidance:
+            suggested = llm_guidance.get("reformulated_queries") or llm_guidance.get("expansions")
+            if isinstance(suggested, list):
+                supplemental = [q for q in suggested if isinstance(q, str) and q.strip()]
+                if supplemental:
+                    combined = q_exp + [q for q in supplemental if q not in q_exp]
+                    q_exp = combined
         dense_all = []; sparse_all = []
         for q in q_exp:
             qvec = encode_query(q)
@@ -62,6 +75,8 @@ class RAGPipeline:
                 "compose": (t_comp - t_rer) * 1000,
             },
         }
+        if llm_guidance:
+            diagnostics["llm_guidance"] = llm_guidance
         if should_refuse(citations,
                          min_docs=self.cfg['guards']['min_support_docs'],
                          min_score=self.cfg['guards']['min_support_score'],

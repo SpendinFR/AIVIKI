@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -8,9 +9,13 @@ from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
 from .analytics import EventPipeline, SnapshotDriftTracker
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 if TYPE_CHECKING:
     from AGI_Evolutive.core.persistence import PersistenceManager
+
+
+logger = logging.getLogger(__name__)
 
 class JSONLLogger:
     """
@@ -49,11 +54,28 @@ class JSONLLogger:
             if extra:
                 meta = {k: v for k, v in extra.items() if k not in fields}
 
+        llm_fields: Dict[str, Any] = {}
+        llm_payload = {
+            "event_type": event_type,
+            "fields": json_sanitize(fields),
+            "metadata": json_sanitize(meta),
+        }
+        response = try_call_llm_dict(
+            "jsonl_logger",
+            input_payload=llm_payload,
+            logger=logger,
+        )
+        if response:
+            llm_fields = {
+                f"llm_{key}": value for key, value in response.items() if f"llm_{key}" not in fields
+            }
+
         rec = {
             "t": time.time(),
             "type": event_type,
             **fields,
             **meta,
+            **llm_fields,
         }
         line = json.dumps(json_sanitize(rec), ensure_ascii=False)
         with self._lock:

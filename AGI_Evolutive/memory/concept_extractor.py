@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import glob
 import json
+import logging
 import math
 import os
 import random
@@ -9,9 +10,15 @@ import re
 import time
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import (
+    LLMIntegrationError,
+    LLMUnavailableError,
+    get_llm_manager,
+    is_llm_enabled,
+)
 
 from .concept_store import ConceptStore
 
@@ -25,6 +32,16 @@ BASIC_STOP = set(
     not do does did have has had can could will would should into about over more no so than then very just
     """.split()
 )
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _llm_enabled() -> bool:
+    return is_llm_enabled()
+
+
+def _llm_manager():
+    return get_llm_manager()
 
 CAP_WORD = re.compile(r"\b[A-ZÉÈÀÂÎÔÙÛÇ][\w\-']+\b")
 TOKEN = re.compile(r"[a-z0-9àâäéèêëîïôöùûüç']{3,}")
@@ -205,6 +222,8 @@ class ConceptExtractor:
         self.period_s = 15.0
         self._last_step = 0.0
         self._last_batch_score = 0.0
+        self._last_llm_feedback: Optional[Mapping[str, Any]] = None
+        self._last_llm_suggestions: Optional[List[Tuple[str, float]]] = None
 
     # ---------- binding ----------
     def bind(self, memory: Any = None, emotions=None, metacog=None, language=None) -> None:
@@ -253,6 +272,7 @@ class ConceptExtractor:
 
         for mem_id, text, meta in docs:
             concepts = self._extract_concepts(text, meta, profile)
+            llm_feedback = self._last_llm_feedback
             if not concepts:
                 continue
             tf = Counter(concepts)
@@ -273,13 +293,15 @@ class ConceptExtractor:
 
             self._update_index(top, mem_id, text, profile)
             self._update_graph(top, profile)
-            self._log_event(mem_id, meta, top, profile)
+            self._log_event(mem_id, meta, top, profile, llm_feedback)
             self._update_store(mem_id, top, profile)
             self._log_memory(mem_id, top)
             self._update_classifier(top)
 
             if mem_id:
                 ids_in_batch.append(mem_id)
+
+            self._last_llm_feedback = None
 
         self.state["processed_ids"] += ids_in_batch
         if len(self.state["processed_ids"]) > 5000:
@@ -295,6 +317,8 @@ class ConceptExtractor:
 
     # ---------- concept helpers ----------
     def _extract_concepts(self, text: str, meta: Dict[str, Any], profile: Profile) -> List[str]:
+        self._last_llm_feedback = None
+        self._last_llm_suggestions = None
         lang = self._detect_language(text, meta)
         lowered = text.lower()
         dynamic_stop = self._language_stopwords(lang)
@@ -322,7 +346,70 @@ class ConceptExtractor:
                 weight = max(1, int(profile.fallback_weight))
                 concepts.extend(fallback * weight)
 
+        self._augment_with_llm(concepts, text, meta, profile)
+
         return concepts
+
+    def _augment_with_llm(
+        self,
+        concepts: List[str],
+        text: str,
+        meta: Dict[str, Any],
+        profile: Profile,
+    ) -> None:
+        if not _llm_enabled():
+            return
+
+        should_trigger = len(concepts) < max(profile.min_concepts * 2, 6)
+        if not should_trigger:
+            return
+
+        payload = {
+            "text": text,
+            "metadata": meta.get("metadata", {}),
+            "kind": meta.get("kind"),
+            "tags": meta.get("tags"),
+        }
+        try:
+            response = _llm_manager().call_dict("concept_extraction", input_payload=payload)
+        except (LLMUnavailableError, LLMIntegrationError):
+            LOGGER.debug("LLM concept extraction unavailable", exc_info=True)
+            return
+
+        if not isinstance(response, Mapping):
+            return
+
+        suggestions: List[Tuple[str, float]] = []
+        for entry in response.get("concepts", []):
+            if not isinstance(entry, Mapping):
+                continue
+            term = str(entry.get("term", "")).strip()
+            if not term:
+                continue
+            try:
+                raw_score = entry.get("score", 0.7)
+                score = float(raw_score)
+            except (TypeError, ValueError):
+                score = 0.7
+            score = max(0.2, min(1.0, score))
+            suggestions.append((term, score))
+
+        if not suggestions:
+            self._last_llm_feedback = dict(response)
+            return
+
+        self._last_llm_suggestions = suggestions
+        feedback = dict(response)
+        feedback.setdefault("suggestions", suggestions)
+        self._last_llm_feedback = feedback
+
+        base_weight = max(1, int(round(profile.support_gain or 1.0)))
+        for term, score in suggestions:
+            normalized = term.lower().strip()
+            if not normalized:
+                continue
+            multiplier = max(1, int(round(1 + score * (1 + base_weight))))
+            concepts.extend([normalized] * multiplier)
 
     def _score_select(
         self,
@@ -394,6 +481,7 @@ class ConceptExtractor:
         meta: Dict[str, Any],
         top: List[Tuple[str, float]],
         profile: Profile,
+        llm_feedback: Optional[Mapping[str, Any]] = None,
     ) -> None:
         avg_score = sum(score for _, score in top) / max(1, len(top))
         _safe_jsonl_append(
@@ -406,6 +494,7 @@ class ConceptExtractor:
                 "meta": meta.get("metadata", {}),
                 "profile": profile.identifier,
                 "avg_score": avg_score,
+                "llm": json_sanitize(llm_feedback) if llm_feedback else None,
             },
         )
 
@@ -639,6 +728,10 @@ class ConceptExtractor:
     @property
     def last_batch_score(self) -> float:
         return float(getattr(self, "_last_batch_score", 0.0))
+
+    @property
+    def last_llm_feedback(self) -> Optional[Mapping[str, Any]]:
+        return self._last_llm_feedback
 
     def quality_signal(self, window: int = 5) -> float:
         """Return a normalized quality indicator derived from recent batches."""

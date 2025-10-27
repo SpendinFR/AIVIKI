@@ -18,7 +18,14 @@ import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
+
+import logging
+
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+
+LOGGER = logging.getLogger(__name__)
 
 __all__ = [
     "unified_priority",
@@ -268,7 +275,22 @@ class PriorityManager:
         model_score = self.model.predict(features)
         choice = self.bandit.choose({"heuristic": baseline, "glm": model_score})
         score = baseline if choice == "heuristic" else model_score
-        token = self._register(ctx, features, choice, baseline, model_score, score)
+        llm_payload = self._call_llm_priority(ctx, baseline, model_score, strategy=choice)
+        if llm_payload is not None:
+            priority = llm_payload.get("priority")
+            try:
+                score = _clamp(float(priority))
+            except (TypeError, ValueError):
+                pass
+        token = self._register(
+            ctx,
+            features,
+            choice,
+            baseline,
+            model_score,
+            score,
+            llm_payload=llm_payload,
+        )
         self._local.last_token = token
         return score
 
@@ -305,6 +327,8 @@ class PriorityManager:
         baseline: float,
         model_score: float,
         score: float,
+        *,
+        llm_payload: Optional[Mapping[str, Any]] = None,
     ) -> str:
         with self._lock:
             self._counter += 1
@@ -321,9 +345,37 @@ class PriorityManager:
                 "score": score,
                 "inputs": ctx.to_dict(),
                 "features": {k: float(features.get(k, 0.0)) for k in features},
+                "llm": dict(llm_payload) if llm_payload else None,
             }
         )
         return token
+
+    def _call_llm_priority(
+        self,
+        ctx: PriorityContext,
+        baseline: float,
+        model_score: float,
+        *,
+        strategy: str,
+    ) -> Optional[Dict[str, Any]]:
+        recent_records = []
+        buffer = getattr(self.logger, "_buffer", None)
+        if isinstance(buffer, list):
+            recent_records = buffer[-5:]
+        payload = {
+            "context": ctx.to_dict(),
+            "heuristics": {"baseline": baseline, "glm": model_score, "strategy": strategy},
+            "history": recent_records,
+        }
+        response = try_call_llm_dict(
+            "unified_priority",
+            input_payload=payload,
+            logger=LOGGER,
+            max_retries=2,
+        )
+        if not response:
+            return None
+        return dict(response)
 
 
 _MANAGER = PriorityManager()

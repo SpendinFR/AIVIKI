@@ -1,6 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Tuple, Iterable
+import logging
 import re, time, json, os, unicodedata, math
 
 # ---------- utils ----------
@@ -17,6 +18,17 @@ def _clean_term(t: str) -> str:
     t = re.sub(r"[^\w\- ]", "", t)
     t = re.sub(r"\s+", " ", t)
     return t
+
+from AGI_Evolutive.utils.llm_service import (
+    LLMIntegrationError,
+    LLMUnavailableError,
+    get_llm_manager,
+    is_llm_enabled,
+)
+
+
+LOGGER = logging.getLogger(__name__)
+
 
 STOP = set("""
 le la les un une des de du au aux et ou mais donc car que qui quoi dont où
@@ -454,8 +466,84 @@ class ConceptRecognizer:
             }
             items.append(ItemCandidate(kind=kind, label=label_clean, score=final_score,
                                        evidence=evidence, features=features_payload, ts=_now()))
+        items = self._apply_llm_guidance(textN, items)
         # tri: score puis richesse de l'evidence
         items.sort(key=lambda c: (c.score, sum(len(v) if isinstance(v,list) else 1 for v in c.evidence.values())), reverse=True)
+        return items
+
+    def _apply_llm_guidance(self, text: str, items: List[ItemCandidate]) -> List[ItemCandidate]:
+        if not items or not is_llm_enabled():
+            return items
+
+        payload = {
+            "text": text[:2000],
+            "candidates": [
+                {
+                    "kind": item.kind,
+                    "label": item.label,
+                    "score": item.score,
+                    "evidence": item.evidence,
+                    "features": item.features,
+                }
+                for item in items[:10]
+            ],
+        }
+
+        if not payload["candidates"]:
+            return items
+
+        try:
+            response = get_llm_manager().call_dict(
+                "concept_recognizer",
+                input_payload=payload,
+            )
+        except (LLMUnavailableError, LLMIntegrationError):
+            LOGGER.debug("LLM concept recognizer unavailable", exc_info=True)
+            return items
+
+        if not isinstance(response, dict):
+            return items
+
+        mapping: Dict[str, Dict[str, Any]] = {}
+        for entry in response.get("candidates", []):
+            if not isinstance(entry, dict):
+                continue
+            name = _clean_term(str(entry.get("candidate") or entry.get("label") or ""))
+            if not name:
+                continue
+            mapping[name] = entry
+
+        for item in items:
+            data = mapping.get(item.label)
+            if not data:
+                continue
+            status = str(data.get("status") or "").strip().lower()
+            justification = data.get("justification")
+            rec_learning = data.get("recommended_learning")
+            llm_record = {
+                "status": status,
+                "justification": justification,
+                "recommended_learning": rec_learning,
+                "notes": data.get("notes"),
+            }
+            item.features.setdefault("llm", llm_record)
+            item.evidence.setdefault("llm", []).append({k: v for k, v in llm_record.items() if v})
+
+            if status in {"à_apprendre", "apprendre", "retain", "promote", "a_apprendre"}:
+                item.score = clamp(0.6 * item.score + 0.4 * float(data.get("confidence", 0.85) or 0.85), 0.0, 1.0)
+            elif status in {"surveiller", "review", "a_surveiller"}:
+                item.score = clamp(0.5 * item.score + 0.5 * 0.55, 0.0, 1.0)
+            elif status in {"rejeter", "rejet", "reject", "ignore"}:
+                item.score = clamp(min(item.score, 0.25), 0.0, 1.0)
+
+            suggested_kind = str(data.get("kind") or "").strip().lower()
+            if suggested_kind and suggested_kind in {"concept", "term", "style", "construction"}:
+                item.kind = suggested_kind
+
+        notes = response.get("notes")
+        if notes:
+            LOGGER.debug("LLM concept recognizer notes: %s", notes)
+
         return items
 
     # --- apprentissage des patrons à partir d'une confirmation ---

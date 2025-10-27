@@ -2,13 +2,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import queue
 import threading
 import time
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import (
+    LLMIntegrationError,
+    LLMUnavailableError,
+    get_llm_manager,
+    is_llm_enabled,
+)
+
+LOGGER = logging.getLogger(__name__)
 
 
 class EventPipeline:
@@ -170,4 +179,96 @@ class SnapshotDriftTracker:
             elif old_value != new_value:
                 diffs.append(path)
         return diffs
+
+
+class LLMAnalyticsInterpreter:
+    """Batch events and request a semantic analytics summary from the local LLM."""
+
+    def __init__(
+        self,
+        *,
+        manager: Optional[Any] = None,
+        enabled: Optional[bool] = None,
+        batch_size: int = 24,
+        flush_interval: float = 45.0,
+        log_path: str = "runtime/llm_analytics.jsonl",
+    ) -> None:
+        self._provided_manager = manager
+        self._manager: Optional[Any] = None
+        self._enabled = is_llm_enabled() if enabled is None else bool(enabled)
+        self.batch_size = max(1, int(batch_size))
+        self.flush_interval = float(flush_interval)
+        self.log_path = log_path
+        directory = os.path.dirname(self.log_path) or "."
+        os.makedirs(directory, exist_ok=True)
+        self._lock = threading.Lock()
+        self._buffer: List[Dict[str, Any]] = []
+        self._last_flush = time.time()
+        self._last_output: Optional[Mapping[str, Any]] = None
+
+    @property
+    def last_output(self) -> Optional[Mapping[str, Any]]:
+        return self._last_output
+
+    def __call__(self, event: Dict[str, Any]) -> None:
+        if not self._enabled:
+            return
+
+        sanitized = json_sanitize(event or {})
+        with self._lock:
+            self._buffer.append(sanitized)
+            now = time.time()
+            should_flush = len(self._buffer) >= self.batch_size or (now - self._last_flush) >= self.flush_interval
+            if not should_flush:
+                return
+            batch = list(self._buffer)
+            self._buffer.clear()
+            self._last_flush = now
+
+        self._interpret_batch(batch)
+
+    def flush(self) -> None:
+        with self._lock:
+            if not self._buffer:
+                return
+            batch = list(self._buffer)
+            self._buffer.clear()
+            self._last_flush = time.time()
+        self._interpret_batch(batch)
+
+    def _get_manager(self) -> Optional[Any]:
+        if self._manager is not None:
+            return self._manager
+        if self._provided_manager is not None:
+            self._manager = self._provided_manager
+            return self._manager
+        try:
+            self._manager = get_llm_manager()
+        except Exception:  # pragma: no cover - defensive guard
+            LOGGER.debug("Unable to resolve LLM manager", exc_info=True)
+            return None
+        return self._manager
+
+    def _interpret_batch(self, batch: List[Dict[str, Any]]) -> None:
+        if not batch:
+            return
+        manager = self._get_manager()
+        if manager is None or not self._enabled:
+            return
+        try:
+            response = manager.call_dict("runtime_analytics", input_payload={"events": batch})
+        except (LLMUnavailableError, LLMIntegrationError):
+            LOGGER.debug("LLM analytics interpretation failed", exc_info=True)
+            return
+        if not isinstance(response, Mapping):
+            return
+
+        record = {
+            "t": time.time(),
+            "events": batch,
+            "analysis": response,
+        }
+        self._last_output = response
+        with open(self.log_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(json_sanitize(record), ensure_ascii=False) + "\n")
 

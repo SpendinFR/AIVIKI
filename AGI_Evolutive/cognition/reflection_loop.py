@@ -1,5 +1,24 @@
+import logging
 import time, threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Mapping
+
+from AGI_Evolutive.utils.llm_service import (
+    LLMIntegrationError,
+    LLMUnavailableError,
+    get_llm_manager,
+    is_llm_enabled,
+)
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _llm_enabled() -> bool:
+    return is_llm_enabled()
+
+
+def _llm_manager():
+    return get_llm_manager()
 
 class ReflectionLoop:
     """
@@ -10,6 +29,7 @@ class ReflectionLoop:
         self.interval = max(30, int(interval_sec))
         self.running = False
         self._thread: Optional[threading.Thread] = None
+        self._last_llm_reflection: Optional[Mapping[str, Any]] = None
 
     def start(self):
         if self.running: return
@@ -34,6 +54,82 @@ class ReflectionLoop:
 
     def stop(self):
         self.running = False
+
+    def _llm_generate_hypotheses(
+        self,
+        observation: Optional[str],
+        recent: List[Dict[str, Any]],
+        max_tests: int,
+    ) -> Optional[Dict[str, Any]]:
+        if not observation or not _llm_enabled():
+            return None
+
+        payload = {
+            "observation": observation,
+            "max_hypotheses": max_tests,
+            "recent_memories": [
+                {
+                    "kind": memo.get("kind"),
+                    "text": memo.get("text") or memo.get("content"),
+                    "ts": memo.get("ts") or memo.get("t"),
+                }
+                for memo in recent[-6:]
+            ],
+        }
+
+        try:
+            response = _llm_manager().call_dict(
+                "reflection_loop",
+                input_payload=payload,
+            )
+        except (LLMUnavailableError, LLMIntegrationError):
+            LOGGER.debug("LLM reflection loop unavailable", exc_info=True)
+            return None
+
+        if not isinstance(response, Mapping):
+            return None
+
+        hypotheses: List[Dict[str, Any]] = []
+        for entry in response.get("hypotheses", []):
+            if not isinstance(entry, Mapping):
+                continue
+            label = entry.get("statement")
+            if not isinstance(label, str) or not label.strip():
+                continue
+            support = entry.get("support") if isinstance(entry.get("support"), list) else []
+            hypotheses.append(
+                {
+                    "label": label.strip(),
+                    "score": 0.6 if entry.get("status") == "confirmé" else 0.5,
+                    "explanation": entry.get("status") or "",
+                    "ask_next": entry.get("next_question"),
+                    "status": entry.get("status"),
+                    "support": support,
+                }
+            )
+
+        if not hypotheses and not response.get("follow_up_checks"):
+            return None
+
+        summary_parts = []
+        if response.get("notes"):
+            summary_parts.append(str(response.get("notes")))
+        if response.get("follow_up_checks"):
+            summary_parts.append(
+                f"Suivi: {len(response['follow_up_checks'])} action(s) recommandée(s)."
+            )
+        summary = " ".join(summary_parts) or f"{len(hypotheses)} hypothèses proposées par LLM."
+
+        result = {
+            "tested": len(hypotheses),
+            "hypotheses": hypotheses,
+            "summary": summary,
+        }
+        if response.get("follow_up_checks"):
+            result["follow_up_checks"] = response["follow_up_checks"]
+
+        self._last_llm_reflection = response
+        return result
 
     def test_hypotheses(self, scratch: Dict[str, Any], max_tests: int = 3) -> Dict[str, Any]:
         """Génère quelques hypothèses, tente un contre-exemple pour chacune."""
@@ -61,6 +157,10 @@ class ReflectionLoop:
         if not observation and recent:
             last = recent[-1]
             observation = last.get("text") or last.get("content")
+
+        llm_result = self._llm_generate_hypotheses(observation, recent, max_tests)
+        if llm_result:
+            return llm_result
 
         arch = scratch.get("architecture") or scratch.get("arch")
         if arch is None:

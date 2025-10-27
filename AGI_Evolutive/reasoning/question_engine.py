@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import random
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 try:  # pragma: no cover - optional dependency
-    from AGI_Evolutive.cognition.meta_cognition import OnlineLinear
+from AGI_Evolutive.cognition.meta_cognition import OnlineLinear
 except Exception:  # pragma: no cover - graceful fallback
     OnlineLinear = None  # type: ignore[assignment]
 
 if TYPE_CHECKING:  # pragma: no cover - typing helper
     from .abduction import Hypothesis
 
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+LOGGER = logging.getLogger(__name__)
 
 class QuestionEngine:
     """Rank potential clarification questions by expected information gain."""
@@ -107,7 +111,7 @@ class QuestionEngine:
         if not candidates:
             return None
         candidates.sort(key=lambda item: (item["gain"], item["score"]), reverse=True)
-        winner = candidates[0]
+        winner = self._llm_rank_candidates(candidates, observation) or candidates[0]
         self._register_question(winner)
         return winner["text"]
 
@@ -286,6 +290,44 @@ class QuestionEngine:
         if hyp.causal_support:
             cue += f" (indices: {hyp.causal_support[0]})"
         return f"Quels éléments concrets confirmeraient {cue} dans « {observation[:80]} » ?"
+
+    def _llm_rank_candidates(
+        self, candidates: List[Dict[str, Any]], observation: str
+    ) -> Optional[Dict[str, Any]]:
+        if not candidates:
+            return None
+
+        payload = {
+            "observation": observation,
+            "candidates": [
+                {
+                    "text": cand.get("text"),
+                    "gain": float(cand.get("gain", 0.0)),
+                    "score": float(cand.get("score", 0.0)),
+                    "meta": cand.get("meta", {}),
+                }
+                for cand in candidates
+            ],
+        }
+
+        response = try_call_llm_dict(
+            "question_engine",
+            input_payload=payload,
+            logger=LOGGER,
+        )
+        if not isinstance(response, Mapping):
+            return None
+
+        selected_text = response.get("selected_question") or response.get("question")
+        if not isinstance(selected_text, str):
+            return None
+
+        for cand in candidates:
+            if cand.get("text") == selected_text:
+                enriched = dict(cand)
+                enriched.setdefault("llm_guidance", response)
+                return enriched
+        return None
 
     # ------------------------------------------------------------------
     def _entropy(self, scores: Iterable[float]) -> float:

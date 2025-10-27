@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import random
@@ -10,8 +11,12 @@ from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 from .graph import Belief, BeliefGraph
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -285,7 +290,48 @@ class BeliefSummarizer:
         self._last_timeframe = timeframe
         anchors = [self._serialize_belief(b) for b in best.anchors]
         episodes = [self._serialize_belief(b) for b in best.episodes]
-        return {"anchors": anchors, "episodes": episodes}
+        summary = {"anchors": anchors, "episodes": episodes}
+        enrichment = self._llm_enrich_summary(timeframe, summary, features=best.features)
+        if enrichment:
+            summary["llm_enrichment"] = enrichment
+        return summary
+
+    def _llm_enrich_summary(
+        self,
+        timeframe: str,
+        summary: Dict[str, List[Dict[str, object]]],
+        *,
+        features: Dict[str, float],
+    ) -> Optional[Dict[str, object]]:
+        payload = {
+            "timeframe": timeframe,
+            "anchors": summary.get("anchors", []),
+            "episodes": summary.get("episodes", []),
+            "aggregated_features": features,
+        }
+        response = try_call_llm_dict(
+            "belief_summarizer",
+            input_payload=payload,
+            logger=LOGGER,
+        )
+        if not response:
+            return None
+        narrative = response.get("narrative")
+        anchors = response.get("anchors")
+        coherence = response.get("coherence_score")
+        if not isinstance(narrative, str):
+            return None
+        if anchors is not None and not isinstance(anchors, list):
+            return None
+        if coherence is not None and not isinstance(coherence, (int, float)):
+            return None
+        cleaned = {
+            "narrative": narrative,
+            "anchors": anchors or [],
+            "coherence_score": float(coherence) if coherence is not None else None,
+            "notes": response.get("notes", ""),
+        }
+        return cleaned
 
     def _serialize_belief(self, belief: Belief) -> Dict[str, object]:
         return {
