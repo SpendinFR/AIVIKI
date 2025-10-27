@@ -10,6 +10,8 @@ import time
 import unicodedata
 from typing import Any, Dict, Iterable, List, Tuple
 
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
 class LiveLexicon:
     def __init__(self, path: str = "data/lexicon.json"):
         self.path = path
@@ -42,6 +44,7 @@ class LiveLexicon:
         # extrait des n-grammes simples (2-5 mots) – heuristique légère
         normalized = self._normalize_text(text)
         words = self._tokenize(normalized)
+        triggered_llm = False
         for n in (2,3,4,5):
             for i in range(len(words)-n+1):
                 phrase = " ".join(words[i:i+n])
@@ -55,8 +58,13 @@ class LiveLexicon:
                 c["last"] = time.time()
                 if liked:
                     c["liked"] += 1
+                if self._should_query_llm(c, liked):
+                    if self._maybe_expand_with_llm(phrase, c, liked=liked):
+                        triggered_llm = True
         # Nettoyage léger pour éviter l'accumulation de bruit
         self._cleanup_collocations()
+        if triggered_llm:
+            self.save()
 
     def prefer(self, phrase: str):
         key = self._normalize_text(phrase)
@@ -66,13 +74,22 @@ class LiveLexicon:
         )
         c["liked"] += 1
         c["last"] = time.time()
+        if self._should_query_llm(c, liked=True):
+            if self._maybe_expand_with_llm(key, c, liked=True):
+                self.save()
         self.save()
 
     def sample_variant(self, key: str, default: str) -> str:
         # renvoie un synonyme/variation si dispo
         variants = self.lex["synonyms"].get(key, [])
         if not variants:
-            return default
+            entry = self.lex["collocations"].get(key)
+            if entry and self._should_query_llm(entry, liked=False):
+                if self._maybe_expand_with_llm(key, entry, liked=False):
+                    variants = self.lex["synonyms"].get(key, [])
+                    self.save()
+            if not variants:
+                return default
         population = [default] + variants
         meta_store: Dict[str, Dict[str, float]] = self.lex.setdefault("_synonyms_meta", {}).setdefault(key, {})
         scores: List[Tuple[float, str]] = []
@@ -210,4 +227,77 @@ class LiveLexicon:
         for phrase in to_delete:
             self.logger.debug("cleanup removing stale collocation=%s", phrase)
             self.lex["collocations"].pop(phrase, None)
+
+    # --- LLM integration -------------------------------------------------
+
+    def _should_query_llm(self, meta: Dict[str, Any], liked: bool) -> bool:
+        now = time.time()
+        last = float(meta.get("last_llm_ts", 0.0))
+        cooldown = 6 * 3600.0 if liked else 12 * 3600.0
+        if now - last < cooldown:
+            return False
+        freq = int(meta.get("freq", 0))
+        if liked:
+            return True
+        return freq in {3, 5, 8} or (freq % 10 == 0 and freq > 0)
+
+    def _maybe_expand_with_llm(self, phrase: str, meta: Dict[str, Any], *, liked: bool) -> bool:
+        payload = {
+            "phrase": phrase,
+            "statistics": {
+                "freq": int(meta.get("freq", 0)),
+                "liked": int(meta.get("liked", 0)),
+                "last_seen": meta.get("last", 0),
+            },
+            "existing_synonyms": self.lex["synonyms"].get(phrase, []),
+            "liked": bool(liked),
+        }
+        response = try_call_llm_dict(
+            "language_lexicon",
+            input_payload=payload,
+            logger=self.logger,
+        )
+        meta["last_llm_ts"] = time.time()
+        if not response:
+            return False
+
+        changed = False
+        synonyms = response.get("synonyms") or response.get("variants")
+        if isinstance(synonyms, list):
+            bucket = self.lex["synonyms"].setdefault(phrase, [])
+            for candidate in synonyms:
+                if not isinstance(candidate, str):
+                    continue
+                normalized = candidate.strip()
+                if not normalized or normalized.lower() == phrase.lower():
+                    continue
+                if normalized not in bucket:
+                    bucket.append(normalized)
+                    changed = True
+
+        related = response.get("collocations") or response.get("related_collocations")
+        if isinstance(related, list):
+            for colloc in related:
+                if not isinstance(colloc, str):
+                    continue
+                cleaned = colloc.strip()
+                if len(cleaned) < 8:
+                    continue
+                slot = self.lex["collocations"].setdefault(
+                    cleaned,
+                    {"freq": 0, "liked": 0, "last": 0, "last_selected": 0},
+                )
+                slot.setdefault("source", "llm")
+                slot["last"] = time.time()
+                changed = True
+
+        register = response.get("register")
+        if isinstance(register, str):
+            meta["register"] = register
+
+        if changed:
+            self.logger.debug(
+                "LLM expanded lexicon", extra={"phrase": phrase, "response": response}
+            )
+        return changed
 

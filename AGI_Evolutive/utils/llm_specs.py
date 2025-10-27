@@ -1115,6 +1115,35 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         },
     ),
     _spec(
+        "language_lexicon",
+        "AGI_Evolutive/language/lexicon.py",
+        "Propose des variantes lexicales pertinentes et des collocations utiles.",
+        AVAILABLE_MODELS["fast"],
+        extra_instructions=(
+            "Retourne 'synonyms' (liste), 'collocations' (liste optionnelle) et le registre conseillé.",
+        ),
+        example_output={
+            "synonyms": ["marge de progression", "axe d'amélioration"],
+            "collocations": ["plan d'amélioration continue"],
+            "register": "professionnel",
+            "notes": "",
+        },
+    ),
+    _spec(
+        "language_renderer",
+        "AGI_Evolutive/language/renderer.py",
+        "Affiner la réponse finale en respectant le style et le contexte.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Retourne un champ 'revision' (texte final) et 'lexicon_updates' si pertinent.",
+        ),
+        example_output={
+            "revision": "Voici une proposition reformulée avec empathie.",
+            "lexicon_updates": ["vision holistique"],
+            "notes": "Accentuer la gratitude en ouverture.",
+        },
+    ),
+    _spec(
         "language_voice",
         "AGI_Evolutive/language/voice.py",
         "Ajuste les curseurs de voix selon le feedback récent.",
