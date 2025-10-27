@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -11,11 +12,15 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, Optional
 
 from .dag_store import GoalNode
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 if TYPE_CHECKING:
     from . import GoalMetadata
 
 TOKEN_PATTERN = re.compile(r"\w+|[^\w\s]", re.UNICODE)
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -128,11 +133,66 @@ class IntentionModel:
 
     def predict(self, goal: GoalNode, metadata: Optional["GoalMetadata"]) -> Prediction:
         payload = self._compose_payload(goal, metadata)
-        return self.classifier.predict(payload)
+        llm_prediction = self._llm_predict(goal, metadata, payload)
+        baseline_prediction = self.classifier.predict(payload)
+
+        if llm_prediction:
+            if llm_prediction.confidence >= 0.3:
+                return llm_prediction
+            if baseline_prediction.label is None or llm_prediction.confidence >= baseline_prediction.confidence:
+                return llm_prediction
+
+        return baseline_prediction
 
     def update(self, label: str, goal: GoalNode, metadata: Optional["GoalMetadata"]) -> None:
         payload = self._compose_payload(goal, metadata)
         self.classifier.update(label, payload)
+
+    def _llm_predict(
+        self,
+        goal: GoalNode,
+        metadata: Optional["GoalMetadata"],
+        text_representation: str,
+    ) -> Optional[Prediction]:
+        goal_snapshot = {
+            "id": goal.id,
+            "description": goal.description,
+            "criteria": list(goal.criteria),
+            "status": goal.status,
+            "created_by": goal.created_by,
+            "priority": goal.priority,
+            "value": goal.value,
+            "urgency": goal.urgency,
+            "curiosity": goal.curiosity,
+            "competence": goal.competence,
+        }
+        if metadata:
+            goal_snapshot["metadata"] = metadata.to_payload()
+
+        payload = {
+            "goal": goal_snapshot,
+            "text_representation": text_representation,
+        }
+
+        response = try_call_llm_dict(
+            "goal_intention_analysis",
+            input_payload=payload,
+            logger=LOGGER,
+        )
+        if not isinstance(response, dict):
+            return None
+
+        label = response.get("intent") or response.get("label")
+        if not isinstance(label, str) or not label.strip():
+            return None
+
+        confidence = response.get("confidence")
+        try:
+            confidence_value = max(0.0, min(1.0, float(confidence)))
+        except (TypeError, ValueError):
+            confidence_value = 0.0
+
+        return Prediction(label=label.strip().lower(), confidence=confidence_value)
 
     @staticmethod
     def _compose_payload(goal: GoalNode, metadata: Optional["GoalMetadata"]) -> str:

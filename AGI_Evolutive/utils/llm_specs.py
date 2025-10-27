@@ -91,6 +91,65 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         },
     ),
     _spec(
+        "io_overview",
+        "AGI_Evolutive/io/__init__.py",
+        "Évalue l'état des interfaces d'entrée/sortie et suggère des optimisations concrètes.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Part de baseline['interfaces'] comme source fiable et enrichis sans supprimer d'informations factuelles sauf incohérence manifeste.",
+            "Chaque interface doit comporter les champs name, module, status, summary, responsibilities (2 à 5 éléments).",
+            "Mentionne les champs entrypoints, llm_hooks et fallback_capabilities si présents dans la baseline.",
+            "Limite recommended_actions à trois entrées concises et orientées action.",
+            "Les risques doivent être un tableau de dictionnaires avec label et severity.",
+        ),
+        example_output={
+            "summary": "Les interfaces d'E/S relient perception, intention et action avec supervision LLM optionnelle.",
+            "interfaces": [
+                {
+                    "name": "perception",
+                    "module": "AGI_Evolutive.io.perception_interface",
+                    "status": "stable",
+                    "summary": "Ingestion inbox et pré-analyse utilisateur.",
+                    "responsibilities": [
+                        "Surveiller le dossier inbox",
+                        "Lier les sous-systèmes mémoire/émotions",
+                        "Pré-analyser les entrées via perception_preprocess",
+                    ],
+                    "entrypoints": ["PerceptionInterface"],
+                    "llm_hooks": ["perception_preprocess"],
+                    "fallback_capabilities": [
+                        "Scan heuristique des fichiers",
+                        "Journalisation JSONL",
+                    ],
+                },
+                {
+                    "name": "action",
+                    "module": "AGI_Evolutive.io.action_interface",
+                    "status": "stable",
+                    "summary": "Priorise les actions et gère la boucle d'exécution.",
+                    "responsibilities": [
+                        "Normaliser les candidats",
+                        "Évaluer impact/effort/risque",
+                        "Mettre à jour les micro-actions",
+                    ],
+                    "entrypoints": ["ActionInterface"],
+                    "llm_hooks": ["action_interface"],
+                    "fallback_capabilities": [
+                        "Thompson sampling et GLM adaptatif",
+                    ],
+                },
+            ],
+            "risks": [
+                {"label": "Intent_classifier dépend majoritairement des heuristiques", "severity": "medium"}
+            ],
+            "recommended_actions": [
+                "Renforcer la télémétrie LLM pour la perception",
+                "Documenter les conditions de bascule heuristique",
+            ],
+            "notes": "Confidence basée sur l'analyse structurée du module.",
+        },
+    ),
+    _spec(
         "intent_classification",
         "AGI_Evolutive/io/intent_classifier.py",
         "Classifie l'intention utilisateur et justifie ta décision.",
@@ -236,6 +295,88 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         },
     ),
     _spec(
+        "goal_metadata_inference",
+        "AGI_Evolutive/goals/__init__.py",
+        "Analyse un nouveau but et propose le type et les critères de succès adaptés.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Le champ 'goal_type' doit être parmi: survival, growth, exploration, mastery, social, creative, self_actualisation, cognitive.",
+            "Fournis 2 à 4 'success_criteria' actionnables.",
+            "Ajoute 'confidence' (0-1) et 'notes' si utile.",
+        ),
+        example_output={
+            "goal_type": "growth",
+            "success_criteria": [
+                "Clarifier l'impact utilisateur recherché",
+                "Définir un résultat observable à court terme",
+            ],
+            "confidence": 0.74,
+            "notes": "Aligné avec la consolidation des compétences.",
+        },
+    ),
+    _spec(
+        "goal_curiosity_proposals",
+        "AGI_Evolutive/goals/curiosity.py",
+        "À partir du contexte et des écarts détectés, propose des sous-buts structurés.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Retourne une liste 'proposals' (maximum 3) avec description, criteria, value, competence, curiosity, urgency entre 0 et 1.",
+            "Ajoute 'confidence' (0-1) et 'notes' éventuelles par proposition.",
+        ),
+        example_output={
+            "proposals": [
+                {
+                    "description": "Explorer les signaux faibles dans les journaux récents.",
+                    "criteria": [
+                        "Identifier trois anomalies corrélées",
+                        "Formuler une hypothèse d'impact utilisateur",
+                    ],
+                    "value": 0.62,
+                    "competence": 0.48,
+                    "curiosity": 0.8,
+                    "urgency": 0.45,
+                    "confidence": 0.68,
+                    "notes": ["Focaliser sur la période post-déploiement"],
+                }
+            ],
+            "notes": "Prioriser les pistes à fort potentiel d'apprentissage.",
+        },
+    ),
+    _spec(
+        "goal_priority_review",
+        "AGI_Evolutive/goals/dag_store.py",
+        "Évalue la priorité d'un but en tenant compte des signaux fournis et justifie l'ajustement.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Retourne 'priority' entre 0 et 1 et 'confidence' (0-1).",
+            "Explique la décision dans 'reason' et ajoute 'notes' ou 'adjustments' si pertinent.",
+        ),
+        example_output={
+            "priority": 0.71,
+            "confidence": 0.64,
+            "reason": "Incident critique non résolu et forte urgence.",
+            "notes": "Surveiller la disponibilité des ressources avant exécution.",
+        },
+    ),
+    _spec(
+        "goal_intention_analysis",
+        "AGI_Evolutive/goals/intention_classifier.py",
+        "Classifie l'intention du but (plan, reflect, learn_concept, execute, etc.) et fournit la confiance.",
+        AVAILABLE_MODELS["fast"],
+        extra_instructions=(
+            "Utilise un champ 'intent' parmi {plan, reflect, analyse, learn_concept, explore, execute, act}.",
+            "Ajoute 'confidence' (0-1) et 'alternatives' en cas d'hésitation (liste de {label, confidence}).",
+        ),
+        example_output={
+            "intent": "plan",
+            "confidence": 0.72,
+            "alternatives": [
+                {"label": "reflect", "confidence": 0.4}
+            ],
+            "notes": "Le but demande une structuration avant action.",
+        },
+    ),
+    _spec(
         "planner_support",
         "AGI_Evolutive/cognition/planner.py",
         "Propose un plan structuré avec priorités et dépendances.",
@@ -375,6 +516,35 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         },
     ),
     _spec(
+        "emotional_system_appraisal",
+        "AGI_Evolutive/emotions/__init__.py",
+        "Analyse un stimulus et propose une évaluation émotionnelle détaillée.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Retourne un objet 'appraisal' avec desirability (-1 à 1), certainty, urgency, impact et controllability (0 à 1).",
+            "Indique 'primary_emotion' (en français) et 'primary_intensity' entre 0 et 1.",
+            "Optionnellement, ajoute 'secondary_candidates' (liste d'objets {emotion, intensity}) et 'emotion_scores'.",
+        ),
+        example_output={
+            "appraisal": {
+                "desirability": -0.4,
+                "certainty": 0.7,
+                "urgency": 0.6,
+                "impact": 0.8,
+                "controllability": 0.3,
+            },
+            "primary_emotion": "tristesse",
+            "primary_intensity": 0.75,
+            "secondary_candidates": [
+                {"emotion": "anxiété", "intensity": 0.5},
+                {"emotion": "frustration", "intensity": 0.35},
+            ],
+            "emotion_scores": {"tristesse": 0.75, "anxiété": 0.5},
+            "justification": "Incident critique menaçant un objectif important, peu de contrôle immédiat.",
+            "notes": "",
+        },
+    ),
+    _spec(
         "autonomy_core",
         "AGI_Evolutive/autonomy/core.py",
         "Propose des micro-actions adaptées au contexte d'autonomie.",
@@ -462,6 +632,30 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
             "anchors": ["fiabilité", "vigilance incident"],
             "coherence_score": 0.74,
             "notes": "",
+        },
+    ),
+    _spec(
+        "belief_graph_summary",
+        "AGI_Evolutive/beliefs/graph.py",
+        "Synthétise le graphe de croyances et met en avant les signaux clés.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Liste 2 à 5 faits saillants dans 'highlights' (objet avec 'fact' et 'support').",
+            "Ajoute 'alerts' uniquement pour les contradictions importantes.",
+            "Fournis un champ 'confidence' entre 0 et 1 et des 'notes' concises.",
+        ),
+        example_output={
+            "narrative": "Le graphe indique une forte orientation fiabilité mais un stress face aux incidents.",
+            "highlights": [
+                {
+                    "fact": "L'agent valorise la robustesse des services",
+                    "support": "likes -> service_robuste",
+                    "confidence": 0.82,
+                }
+            ],
+            "alerts": ["Contradiction sur la disponibilité du proxy"],
+            "confidence": 0.78,
+            "notes": "Consolider la surveillance des proxies.",
         },
     ),
     _spec(
