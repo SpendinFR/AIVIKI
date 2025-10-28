@@ -33,7 +33,11 @@ class Telemetry:
             "level": level,
             "data": data or {}
         }
-        annotation = self._llm_annotate(e)
+        try:
+            annotation = self._llm_annotate(e)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            LOGGER.debug("LLM annotation failed: %s", exc, exc_info=True)
+            annotation = None
         if annotation:
             e["llm_annotation"] = annotation
         self.events.append(e)
@@ -63,6 +67,7 @@ class Telemetry:
             "telemetry_annotation",
             input_payload=event,
             logger=LOGGER,
+            max_retries=0,
         )
         if not response:
             return None
