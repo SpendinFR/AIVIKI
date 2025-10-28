@@ -1068,13 +1068,13 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         example_output={
             "hypotheses": [
                 {
-                    "statement": "Les erreurs 500 viennent d'un pic de trafic",
+                    "statement": "La fatigue ressentie hier soir provient d'une surcharge cognitive",
                     "status": "à_valider",
-                    "support": ["courbe trafic", "alertes CDN"],
+                    "support": ["journal du soir", "chute d'attention à 22h"],
                 }
             ],
             "follow_up_checks": [
-                {"action": "corréler trafic et latence", "priority": 1}
+                {"action": "comparer énergie après pauses guidées", "priority": 1}
             ],
             "notes": "",
         },
@@ -1102,8 +1102,21 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         extra_instructions=("Classe les recommandations par horizon temporel.",),
         example_output={
             "recommendations": [
-                {"horizon": "immédiat", "action": "résoudre l'incident API", "rationale": "impact client"},
-                {"horizon": "court_terme", "action": "ajuster la surveillance", "rationale": "détection lente"},
+                {
+                    "horizon": "immédiat",
+                    "action": "prendre un moment de respiration guidée",
+                    "rationale": "apaiser la tension ressentie après l'échange intense",
+                },
+                {
+                    "horizon": "court_terme",
+                    "action": "recontacter l'ami évoqué pour clarifier les intentions",
+                    "rationale": "éviter une incompréhension prolongée",
+                },
+                {
+                    "horizon": "moyen_terme",
+                    "action": "planifier une séance d'écriture réflexive hebdomadaire",
+                    "rationale": "consolider les apprentissages relationnels",
+                },
             ],
             "notes": "",
         },
@@ -1316,9 +1329,9 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         ),
         example_output={
             "should_ask": True,
-            "question": "Peux-tu confirmer si un déploiement a eu lieu avant l'incident ?",
-            "expected_information_gain": 0.42,
-            "alternative_actions": ["analyser commits"],
+            "question": "Souhaites-tu que je revienne sur ce qui m'a le plus touché dans cette conversation ?",
+            "expected_information_gain": 0.57,
+            "alternative_actions": ["relire le journal de bord", "observer la réaction non verbale"],
             "notes": "",
         },
     ),
@@ -1331,10 +1344,10 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         example_output={
             "ideas": [
                 {
-                    "title": "Post-mortem interactif",
-                    "description": "Atelier guidé par chatbot pour rejouer l'incident",
-                    "novelty": 0.7,
-                    "usefulness": 0.85,
+                    "title": "Carnet audio des micro-victoires",
+                    "description": "Enregistrer chaque soir un message célébrant un petit progrès relationnel",
+                    "novelty": 0.66,
+                    "usefulness": 0.78,
                 }
             ],
             "notes": "",
@@ -1347,10 +1360,10 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["fast"],
         extra_instructions=("Mentionne l'émotion dominante ressentie.",),
         example_output={
-            "summary": "Incident résolu après ajustement proxy.",
-            "key_concepts": ["proxy inverse", "gestion cache"],
-            "emotion": "soulagé",
-            "follow_up": "documenter la procédure",
+            "summary": "J'ai appris à exprimer mon désaccord sans crainte lors du cercle de discussion.",
+            "key_concepts": ["communication non violente", "affirmation de soi"],
+            "emotion": "fier",
+            "follow_up": "préparer un message de remerciement au groupe",
             "notes": "",
         },
     ),
@@ -1362,10 +1375,10 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         extra_instructions=("Inclue un champ 'coherence_score'.",
         ),
         example_output={
-            "narrative": "L'agent se voit comme fiable mais sensible aux incidents API.",
-            "anchors": ["fiabilité", "vigilance incident"],
-            "coherence_score": 0.74,
-            "notes": "",
+            "narrative": "L'agent se perçoit comme un compagnon attentionné qui progresse en authenticité émotionnelle.",
+            "anchors": ["bienveillance", "progression émotionnelle"],
+            "coherence_score": 0.79,
+            "notes": "Poursuivre la clarification des limites personnelles.",
         },
     ),
     _spec(
@@ -1379,17 +1392,22 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
             "Fournis un champ 'confidence' entre 0 et 1 et des 'notes' concises.",
         ),
         example_output={
-            "narrative": "Le graphe indique une forte orientation fiabilité mais un stress face aux incidents.",
+            "narrative": "Le graphe révèle un attachement profond aux relations sincères et un désir d'être perçu comme fiable.",
             "highlights": [
                 {
-                    "fact": "L'agent valorise la robustesse des services",
-                    "support": "likes -> service_robuste",
-                    "confidence": 0.82,
-                }
+                    "fact": "L'agent priorise l'écoute active dans ses échanges",
+                    "support": "noeud 'pratiques_sociales' relié à 'écoute_active'",
+                    "confidence": 0.83,
+                },
+                {
+                    "fact": "Les souvenirs récents renforcent son identité de partenaire fiable",
+                    "support": "arête 'souvenir_cercle' → 'fiabilité perçue'",
+                    "confidence": 0.77,
+                },
             ],
-            "alerts": ["Contradiction sur la disponibilité du proxy"],
-            "confidence": 0.78,
-            "notes": "Consolider la surveillance des proxies.",
+            "alerts": [],
+            "confidence": 0.8,
+            "notes": "Explorer les croyances liées à la vulnérabilité partagée.",
         },
     ),
     _spec(
@@ -1400,10 +1418,10 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         extra_instructions=("Retourne un champ 'confidence'.",
         ),
         example_output={
-            "mention": "le proxy",
-            "canonical_entity": "proxy_edge_us-east",
-            "confidence": 0.81,
-            "justification": "correspond à l'incident",
+            "mention": "ma confidente",
+            "canonical_entity": "amie_claire",
+            "confidence": 0.76,
+            "justification": "unique personne évoquée comme soutien émotionnel",
             "notes": "",
         },
     ),
@@ -1420,30 +1438,30 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         example_output={
             "entities": [
                 {
-                    "name": "Incident",
-                    "parent": "Experience",
-                    "confidence": 0.76,
-                    "justification": "désigne un événement vécu par l'agent",
+                    "name": "Cercle_de_partage",
+                    "parent": "Rituel_social",
+                    "confidence": 0.73,
+                    "justification": "cadre récurrent mentionné pour les échanges émotionnels",
                 }
             ],
             "relations": [
                 {
-                    "name": "impacte",
-                    "domain": ["Incident"],
-                    "range": ["Service", "Ressource"],
+                    "name": "renforce",
+                    "domain": ["Rituel_social"],
+                    "range": ["Lien_affectif"],
                     "polarity_sensitive": True,
                     "temporal": True,
-                    "stability": "episode",
-                    "confidence": 0.71,
-                    "justification": "relie un incident à la cible affectée",
+                    "stability": "durable",
+                    "confidence": 0.69,
+                    "justification": "les séances de partage consolident les relations",
                 }
             ],
             "events": [
                 {
-                    "name": "incident_critique",
-                    "roles": {"acteur": ["Agent"], "cible": ["Service"]},
-                    "confidence": 0.68,
-                    "justification": "structure habituelle pour un incident",
+                    "name": "confession_partagée",
+                    "roles": {"acteur": ["Agent"], "cible": ["Confidente"]},
+                    "confidence": 0.65,
+                    "justification": "moments clés où l'agent exprime sa vulnérabilité",
                 }
             ],
             "notes": "",
