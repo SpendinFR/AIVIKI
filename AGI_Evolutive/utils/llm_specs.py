@@ -834,8 +834,8 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         example_output={
             "priority": 0.71,
             "confidence": 0.64,
-            "reason": "Incident critique non résolu et forte urgence.",
-            "notes": "Surveiller la disponibilité des ressources avant exécution.",
+            "reason": "Tension persistante dans la boucle de co-développement intérieur, le but sert d'ancrage pour retrouver l'équilibre.",
+            "notes": "Vérifier la disponibilité des capacités réflexives avant d'engager l'étape suivante.",
         },
     ),
     _spec(
@@ -866,11 +866,12 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         ),
         example_output={
             "plan": [
-                {"id": "collect_logs", "description": "Collecter les logs des 2 dernières heures", "priority": 1, "depends_on": []},
-                {"id": "analyse_erreurs", "description": "Classer les erreurs 500 par endpoint", "priority": 2, "depends_on": ["collect_logs"]},
+                {"id": "cartographier_ressenti", "description": "Consigner les ressentis marquants de la dernière exploration", "priority": 1, "depends_on": []},
+                {"id": "synthese_insights", "description": "Relier les signaux émotionnels aux apprentissages en cours", "priority": 2, "depends_on": ["cartographier_ressenti"]},
+                {"id": "micro_experience", "description": "Planifier un mini-rituel pour intégrer l'enseignement identifié", "priority": 3, "depends_on": ["synthese_insights"]},
             ],
-            "risks": ["logs incomplets"],
-            "notes": "",
+            "risks": ["interprétations biaisées si le journal introspectif est lacunaire"],
+            "notes": "Prévoir un point de revue sensible avec la mémoire autobiographique.",
         },
     ),
     _spec(
@@ -885,13 +886,13 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         ),
         example_output={
             "priority": 0.78,
-            "tags": ["urgent"],
+            "tags": ["alignement_interne"],
             "explain": [
-                "user_urgency:demande explicite(+0.30)",
-                "deadline:échéance proche(+0.22)",
+                "retentissement_interne:intensité émotionnelle(+0.28)",
+                "cohérence_narrative:manque d'intégration(+0.24)",
             ],
             "confidence": 0.74,
-            "notes": "Boost léger validé par signal utilisateur et deadline rapprochée.",
+            "notes": "Priorité rehaussée pour soutenir la continuité du récit de soi, aucun impératif externe détecté.",
         },
     ),
     _spec(
@@ -2453,10 +2454,10 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["fast"],
         extra_instructions=("Retourne pipelines principaux et secondaires.",),
         example_output={
-            "trigger": "THREAT",
-            "pipelines": ["defense", "analyse_incident"],
-            "secondary": ["demande_contexte"],
-            "notes": "",
+            "trigger": "EMOTION",
+            "pipelines": ["auto_regulation", "integration_memorielle"],
+            "secondary": ["dialogue_interne"],
+            "notes": "Activation orientée vers l'assimilation de l'expérience plutôt que la réaction défensive.",
         },
     ),
     _spec(
