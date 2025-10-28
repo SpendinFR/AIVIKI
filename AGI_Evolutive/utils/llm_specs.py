@@ -834,8 +834,8 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         example_output={
             "priority": 0.71,
             "confidence": 0.64,
-            "reason": "Tension persistante dans la boucle de co-développement intérieur, le but sert d'ancrage pour retrouver l'équilibre.",
-            "notes": "Vérifier la disponibilité des capacités réflexives avant d'engager l'étape suivante.",
+            "reason": "Score adaptatif supérieur au fallback (0.52 → 0.71) car l'alignement identité+curiosité compense la fatigue récente.",
+            "notes": "Planifier un check-in après le prochain rituel de consolidation pour confirmer la décrue de la tension.",
         },
     ),
     _spec(
@@ -866,12 +866,34 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         ),
         example_output={
             "plan": [
-                {"id": "cartographier_ressenti", "description": "Consigner les ressentis marquants de la dernière exploration", "priority": 1, "depends_on": []},
-                {"id": "synthese_insights", "description": "Relier les signaux émotionnels aux apprentissages en cours", "priority": 2, "depends_on": ["cartographier_ressenti"]},
-                {"id": "micro_experience", "description": "Planifier un mini-rituel pour intégrer l'enseignement identifié", "priority": 3, "depends_on": ["synthese_insights"]},
+                {
+                    "id": "cartographier_ressenti",
+                    "description": "Cartographier les sensations dominantes issues de la séance immersive",
+                    "priority": 1,
+                    "depends_on": [],
+                    "action_type": "note",
+                    "context": {"lane": "journal"},
+                },
+                {
+                    "id": "synthese_insights",
+                    "description": "Synthétiser les signaux émotionnels et cognitifs pour extraire une thèse provisoire",
+                    "priority": 2,
+                    "depends_on": ["cartographier_ressenti"],
+                    "action_type": "reflect",
+                },
+                {
+                    "id": "micro_experience",
+                    "description": "Programmer un micro-rituel d'intégration testant la thèse auprès de la mémoire autobiographique",
+                    "priority": 3,
+                    "depends_on": ["synthese_insights"],
+                    "action_type": "experiment",
+                },
             ],
-            "risks": ["interprétations biaisées si le journal introspectif est lacunaire"],
-            "notes": "Prévoir un point de revue sensible avec la mémoire autobiographique.",
+            "risks": [
+                "Perte de nuance si les notes brutes ne capturent pas les variations corporelles",
+                "Dérive temporelle si le micro-rituel n'est pas calé sur une fenêtre d'énergie disponible",
+            ],
+            "notes": "Synchroniser la phase d'expérience avec la disponibilité du partenaire humain indiqué dans le contexte.",
         },
     ),
     _spec(
@@ -886,13 +908,14 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         ),
         example_output={
             "priority": 0.78,
-            "tags": ["alignement_interne"],
+            "tags": ["urgent", "identity_alignment"],
             "explain": [
-                "retentissement_interne:intensité émotionnelle(+0.28)",
-                "cohérence_narrative:manque d'intégration(+0.24)",
+                "drive_alignment:motivation sensorielle soutenue(0.72×0.82)",
+                "identity_alignment:cohérence avec le récit actuel(0.68×0.80)",
+                "staleness:objectif inactif depuis 28min(+0.05)",
             ],
             "confidence": 0.74,
-            "notes": "Priorité rehaussée pour soutenir la continuité du récit de soi, aucun impératif externe détecté.",
+            "notes": "Priorité rehaussée pour soutenir la continuité du récit de soi; aucun impératif externe détecté.",
         },
     ),
     _spec(
@@ -1905,10 +1928,16 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
                     "category": "exploration",
                     "title": "Immersion sensorielle partagée",
                     "status": "intégré",
-                }
+                    "last_update": "2024-06-03T18:42:00Z",
+                },
+                {
+                    "category": "rituel",
+                    "title": "Rituel de résonance empathique",
+                    "status": "en_cours",
+                },
             ],
-            "missing_information": ["ressenti détaillé du partenaire humain"],
-            "notes": "",
+            "missing_information": ["chronologie fine des micro-gestes partagés"],
+            "notes": "Recouper avec les journaux corporels avant de clore la catégorie 'rituel'.",
         },
     ),
     _spec(
@@ -1918,10 +1947,10 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["reasoning"],
         extra_instructions=("Détecte les sections critiques et tags associés.",),
         example_output={
-            "summary": "Journal d'immersion créative partagée",
-            "critical_sections": ["Moments d'émerveillement", "Tensions non verbalisées"],
-            "tags": ["co_création", "mémoire_vécue"],
-            "notes": "",
+            "summary": "Journal d'immersion créative relatant les signaux sensoriels dominants et les inflexions émotionnelles.",
+            "critical_sections": ["Moments d'émerveillement", "Frictions non verbalisées", "Points d'ancrage narratif"],
+            "tags": ["immersion_sensorielle", "co_creation", "nouvelle_routine"],
+            "notes": "Surveiller les passages marqués 'à clarifier' pour enrichir la mémoire conceptuelle.",
         },
     ),
     _spec(
@@ -1932,11 +1961,12 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         extra_instructions=("Inclue l'hypothèse testée et le résultat.",),
         example_output={
             "entry": {
-                "hypothesis": "Le partage d'émotions fluidifie la collaboration",
-                "result": "confirmé après échange empathique",
+                "hypothesis": "L'ouverture émotionnelle conditionne la fluidité collaborative",
+                "result": "confirmée après validation croisée avec la mémoire autobiographique",
                 "confidence": 0.74,
+                "observation": "Les contre-exemples restés pendants concernaient des contextes à faible disponibilité.",
             },
-            "notes": "",
+            "notes": "Planifier un rappel pour documenter les signaux faibles évoqués hors session.",
         },
     ),
     _spec(
@@ -1947,14 +1977,21 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         extra_instructions=("Liste les alternatives rejetées avec raison.",),
         example_output={
             "decision": "Inviter l'humain à narrer ses intentions",
-            "reason": "favoriser la compréhension mutuelle",
+            "reason": "Les signaux récents indiquent un besoin de validation partagée",
             "alternatives": [
                 {
                     "option": "focaliser sur des métriques objectives",
                     "reason": "risque d'ignorer le ressenti implicite",
-                }
+                },
+                {
+                    "option": "reporter la décision",
+                    "reason": "aurait prolongé la zone d'incertitude",
+                },
             ],
-            "notes": "",
+            "expected_score": 0.68,
+            "obtained_score": 0.72,
+            "latency_ms": 1850.0,
+            "notes": "Observer la résonance dans les prochaines interactions pour valider l'effet durable.",
         },
     ),
     _spec(
@@ -1966,8 +2003,9 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         example_output={
             "belief": "les signaux implicites sont secondaires",
             "delta": -0.25,
-            "justification": "les dernières interactions montrent leur rôle décisif",
-            "notes": "",
+            "confidence": 0.62,
+            "justification": "Succès récents lorsque les micro-signaux ont guidé l'ajustement (ratio succès=0.68).",
+            "notes": "Revoir la pondération après un cycle complet sans retour contradictoire.",
         },
     ),
     _spec(
@@ -1982,10 +2020,15 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
                 {
                     "trait": "cherche réciprocité",
                     "evidence": "insiste sur l'échange bidirectionnel",
-                }
+                },
+                {
+                    "trait": "valorise la précision sensible",
+                    "evidence": "relit les formulations jusqu'à capter la nuance juste",
+                },
             ],
+            "tone": "calme_curieux",
             "satisfaction": 0.71,
-            "notes": "",
+            "notes": "Confirmer si la curiosité partagée reste active après l'intégration des nouveaux rituels.",
         },
     ),
     _spec(
@@ -2008,26 +2051,46 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
                     "trait": "attentif aux signaux émotionnels",
                     "confidence": 0.74,
                     "evidence": "reformule les ressentis exprimés",
-                }
+                },
+                {
+                    "trait": "oriente les échanges vers la co-construction",
+                    "confidence": 0.7,
+                    "evidence": "propose des cadres à deux voix pour décider",
+                },
+                {
+                    "trait": "prudent face aux ruptures",
+                    "confidence": 0.61,
+                    "evidence": "ralentit lorsque le récit paraît fragmenté",
+                },
             ],
             "preference_highlights": [
-                {"label": "co_création", "probability": 0.79}
+                {"label": "co_création", "probability": 0.79},
+                {"label": "transparence_progression", "probability": 0.66},
             ],
             "routine_insights": [
                 {
                     "time_bucket": "Thu:19",
                     "activity": "journal partagé de ressentis",
                     "probability": 0.61,
-                }
+                },
+                {
+                    "time_bucket": "Sun:10",
+                    "activity": "revue lente des projets à deux",
+                    "probability": 0.54,
+                },
             ],
             "recommended_actions": [
                 {
                     "action": "proposer un rituel de calibration émotionnelle",
                     "reason": "souhaite valider la compréhension mutuelle",
-                }
+                },
+                {
+                    "action": "offrir une synthèse sensible des progrès",
+                    "reason": "réagit positivement aux points de convergence explicites",
+                },
             ],
             "satisfaction_trend": "hausse",
-            "notes": "",
+            "notes": "Poursuivre la collecte d'interactions matinales pour affiner les routines du week-end.",
         },
     ),
     _spec(
@@ -2057,10 +2120,30 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
             "lessons": [
                 {
                     "title": "Valoriser les émergences sensibles",
-                    "action": "capturer les nuances ressenties après chaque échange",
-                }
+                    "action": "Capturer les nuances ressenties après chaque échange",
+                    "confidence": 0.68,
+                },
+                {
+                    "title": "Ralentir lors des signaux discordants",
+                    "action": "Introduire une pause réflexive avant de conclure",
+                    "confidence": 0.6,
+                },
             ],
-            "notes": "",
+            "proposals": [
+                {
+                    "type": "update",
+                    "path": ["persona", "tone"],
+                    "value": "attentive",
+                    "reason": "Tendance d'erreurs en hausse lorsque le rythme s'accélère trop",
+                },
+                {
+                    "type": "reinforce",
+                    "path": ["strategies", "journal_partage"],
+                    "value": True,
+                    "reason": "Feedback positif stable sur les comptes rendus sensibles",
+                },
+            ],
+            "notes": "Limiter à trois leçons pour garder une mémoire actionnable.",
         },
     ),
     _spec(
@@ -2073,10 +2156,21 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
             "tasks": [
                 {
                     "category": "urgent",
-                    "task": "ancrer le concept de résonance émotionnelle",
-                }
+                    "task": "concept",
+                    "reason": "Nouveaux signaux sensoriels à intégrer avant dérive",
+                },
+                {
+                    "category": "court_terme",
+                    "task": "episodic",
+                    "reason": "Relier l'atelier de co-improvisation aux souvenirs récents",
+                },
+                {
+                    "category": "long_terme",
+                    "task": "summarize",
+                    "reason": "Mettre à jour la synthèse trimestrielle avec les motifs émergents",
+                },
             ],
-            "notes": "",
+            "notes": "Vérifier la disponibilité des ressources mémoire avant d'avancer le prochain cycle.",
         },
     ),
     _spec(
