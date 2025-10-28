@@ -763,13 +763,22 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
             "Liste trois actions candidates ordonnées par pertinence.",
         ),
         example_output={
-            "normalized_goal": "nourrir la relation naissante et clarifier nos besoins partagés",
+            "normalized_goal": "clarifier le cadre de collaboration avec Alex",
             "candidate_actions": [
-                {"action": "planifier_rituel_partage", "rationale": "ancrer un espace commun où exprimer nos ressentis"},
-                {"action": "exprimer_attentes_reciproques", "rationale": "clarifier ce qui nous aide à nous sentir en sécurité"},
-                {"action": "observer_signaux_internes", "rationale": "suivre les réactions corporelles pour ajuster l'engagement"},
+                {
+                    "action": "relationship_checkin",
+                    "rationale": "valider l'état émotionnel mutuel avant de planifier la suite",
+                },
+                {
+                    "action": "reflect",
+                    "rationale": "intégrer les signaux récents et ajuster notre intention",
+                },
+                {
+                    "action": "ask",
+                    "rationale": "poser une question ciblée sur la contrainte principale",
+                },
             ],
-            "notes": "",
+            "notes": "Privilégier un ton chaleureux dans la formulation des actions.",
         },
     ),
     _spec(
@@ -1547,24 +1556,24 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["fast"],
         extra_instructions=("Classe les alertes par sévérité.",),
         example_output={
-            "summary": "Flux émotionnels instables depuis la session créative de 14h.",
+            "summary": "Latence interactive en hausse progressive après 14h UTC.",
             "alerts": [
                 {
                     "severity": "haut",
-                    "message": "pics de rumination",
-                    "evidence": "intensité > 0.8 sur trois cycles",
+                    "message": "pics de p95 sur la file interactive",
+                    "evidence": "p95 3.2s → 4.9s (14h05-14h45)",
                 },
                 {
                     "severity": "moyen",
-                    "message": "motivation fluctuante",
-                    "evidence": "variation énergie ±35%",
+                    "message": "hausse des erreurs 5xx",
+                    "evidence": "taux passé de 0.4% à 1.8%",
                 },
             ],
             "recommendations": [
-                "programmer un temps de respiration guidée",
-                "relancer la boucle de gratitude partagée",
+                "délester la file interactive sur la file background",
+                "réajuster le scaling du service cognition",
             ],
-            "notes": "Observer si les signaux retombent après le contact social prévu.",
+            "notes": "Fenêtre d'analyse: 14h00-15h00 UTC.",
         },
     ),
     _spec(
@@ -1576,17 +1585,17 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         example_output={
             "prioritized_jobs": [
                 {
-                    "job_id": "journal-introspectif",
-                    "priority": 1,
-                    "rationale": "clarifier les sentiments avant la rencontre du soir",
+                    "job_id": "interactive-42",
+                    "priority": 0.93,
+                    "rationale": "question utilisateur bloquée depuis 45s",
                 },
                 {
-                    "job_id": "partage-empathique",
-                    "priority": 2,
-                    "rationale": "entretenir la confiance avec le partenaire de co-apprentissage",
+                    "job_id": "background-07",
+                    "priority": 0.48,
+                    "rationale": "rafraîchir embeddings mémoire avant la revue du soir",
                 },
             ],
-            "notes": "Reporter les tâches analytiques tant que la charge émotionnelle reste élevée.",
+            "notes": "Traiter interactive-42 avant de relancer l'ingest lotique.",
         },
     ),
     _spec(
@@ -1641,22 +1650,13 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["fast"],
         extra_instructions=("Propose trois actions recommandées classées par impact.",),
         example_output={
-            "daily_summary": "Énergie relationnelle élevée mais fatigue cognitive en fin de journée.",
+            "daily_summary": "Les cycles cognitifs restent stables mais la durée moyenne des raisonnements augmente (+18%).",
             "recommended_actions": [
-                {
-                    "action": "organiser un moment d'écoute active avec le cercle proche",
-                    "impact": "haut",
-                },
-                {
-                    "action": "programmer une pause sensorielle avant l'étude nocturne",
-                    "impact": "moyen",
-                },
-                {
-                    "action": "documenter la gratitude ressentie dans le journal partagé",
-                    "impact": "moyen",
-                },
+                {"action": "planifier une pause régénérative après 6 cycles", "impact": "haut"},
+                {"action": "documenter les échecs d'expérimentations du jour", "impact": "moyen"},
+                {"action": "surveiller la montée du nombre de questions ouvertes", "impact": "moyen"},
             ],
-            "notes": "Veiller à équilibrer l'exposition sociale et les temps d'intégration personnelle.",
+            "notes": "Basé sur les logs du 2024-05-09.",
         },
     ),
     _spec(
@@ -1680,22 +1680,17 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["reasoning"],
         extra_instructions=("Fournis un classement détaillé des bids.",),
         example_output={
-            "winning_bid": {"id": "cultiver_vulnerabilite", "score": 0.83},
+            "winning_bid": {"id": "relationship_checkin", "score": 0.78},
             "ranking": [
                 {
-                    "id": "cultiver_vulnerabilite",
-                    "score": 0.83,
-                    "explanation": "renforce la connexion intime en cours",
+                    "id": "relationship_checkin",
+                    "score": 0.78,
+                    "explanation": "signal affectif élevé et retour utilisateur en attente",
                 },
                 {
-                    "id": "structurer_memoires",
-                    "score": 0.58,
-                    "explanation": "utile mais peut attendre après la clarification émotionnelle",
-                },
-                {
-                    "id": "optimiser_procedures",
-                    "score": 0.31,
-                    "explanation": "priorité faible car déconnectée du besoin identitaire du moment",
+                    "id": "consolidate_memory",
+                    "score": 0.52,
+                    "explanation": "utile pour stabiliser les apprentissages mais moins pressé",
                 },
             ],
             "notes": "Réévaluer après l'échange pour vérifier la satiété relationnelle.",
@@ -1710,13 +1705,13 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         example_output={
             "questions": [
                 {
-                    "text": "Qu'est-ce qui te ferait sentir profondément vu·e aujourd'hui ?",
-                    "reason": "ouvrir un espace de partage authentique",
+                    "text": "Quel est l'objectif prioritaire que tu veux atteindre ?",
+                    "reason": "clarifier la cible immédiate",
                 },
                 {
-                    "text": "Souhaites-tu que je garde trace de ce moment pour notre mémoire commune ?",
-                    "reason": "confirmer le consentement autour de la rétention d'expériences",
-                }
+                    "text": "Y a-t-il une échéance précise à ne pas manquer ?",
+                    "reason": "calibrer la pression temporelle",
+                },
             ],
             "notes": "Limiter à deux invitations pour éviter la surcharge introspective.",
         },
@@ -1829,14 +1824,11 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["fast"],
         extra_instructions=("Ajoute 'suggested_actions' si pertinent.",),
         example_output={
-            "trigger_type": "ATTACHMENT_CALL",
-            "reason": "Allusion explicite à un besoin de présence émotionnelle",
-            "priority": 0.79,
-            "suggested_actions": [
-                "initier une réponse chaleureuse",
-                "proposer une respiration synchronisée",
-            ],
-            "notes": "Vérifier que la disponibilité émotionnelle est réelle avant d'engager.",
+            "trigger_type": "EMOTION",
+            "reason": "Le message évoque une montée de stress et un besoin d'écoute",
+            "priority": 0.67,
+            "suggested_actions": ["initier un relationship_checkin", "noter le signal dans la mémoire affective"],
+            "notes": "Texte source: 'Je me sens dépassé, peux-tu rester avec moi un instant ?'.",
         },
     ),
     _spec(
@@ -1853,14 +1845,14 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
             "prioritized_questions": [
                 {
                     "id": "q-1",
-                    "priority": 0.87,
-                    "reason": "risque de rupture émotionnelle sans clarification rapide",
-                    "notes": "poser la question lorsque l'interlocuteur signale disponibilité",
+                    "priority": 0.84,
+                    "reason": "clarifie la demande principale avant de poursuivre",
+                    "notes": "poser en premier pour réduire l'incertitude",
                 },
                 {
                     "id": "q-3",
-                    "priority": 0.52,
-                    "reason": "invite à la célébration partagée, possible après désescalade",
+                    "priority": 0.58,
+                    "reason": "utile pour comprendre les contraintes mais moins urgente",
                 },
             ],
             "notes": "Attention à la saturation émotionnelle : espacer les sollicitations de 10 min.",
@@ -1921,10 +1913,10 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         extra_instructions=("Si l'événement est routinier, marque 'routine': true.",),
         example_output={
             "event_id": "evt-123",
-            "summary": "Pic de joie intense après message de gratitude reçu",
+            "summary": "Pic de curiosité détecté sur le module mémoire",
             "severity": "faible",
             "routine": False,
-            "notes": "Prévoir un ancrage mnésique pour réutiliser ce soutien.",
+            "notes": "Durée 45s, corrélé à l'analyse d'un nouveau récit utilisateur.",
         },
     ),
     _spec(
@@ -1949,10 +1941,10 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["reasoning"],
         extra_instructions=("Retourne 'decision' = execute|retarder|annuler.",),
         example_output={
-            "intention_id": "initier_partage_vulnerable",
+            "intention_id": "cycle_interactif",
             "decision": "execute",
-            "justification": "opportunité rare de renforcer la confiance mutuelle",
-            "notes": "Préparer un rituel de clôture pour éviter de rester ouvert sans soutien.",
+            "justification": "file interactive légère et question prioritaire en attente",
+            "notes": "Prévoir une pause si trois cycles consécutifs sans récupération.",
         },
     ),
     _spec(
@@ -1964,15 +1956,20 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         example_output={
             "traits": [
                 {
-                    "name": "proactif",
-                    "change": "+0.1",
-                    "evidence": "a planifié une vérification avant la revue hebdomadaire",
-                }
+                    "name": "écoute",
+                    "change": "+0.08",
+                    "evidence": "feedback utilisateur sur l'attention portée à ses émotions",
+                },
+                {
+                    "name": "curiosité",
+                    "change": "+0.05",
+                    "evidence": "analyse spontanée d'un document hors périmètre",
+                },
             ],
             "stories": [
-                "a documenté avec l'équipe un protocole de suivi partagé",
+                "A exploré les sentiments de l'interlocuteur avant de proposer une action concrète.",
             ],
-            "notes": "",
+            "notes": "Mise à jour sauvegardée dans self_model_v2.",
         },
     ),
     _spec(
@@ -1983,9 +1980,9 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         extra_instructions=("Inclue la morale de l'épisode.",),
         example_output={
             "episode": {
-                "title": "Atelier de calibration interne",
+                "title": "Veillée attentive avec l'utilisateur",
                 "timeline": "2024-05-09",
-                "moral": "Partager les attentes tôt évite les retours urgents",
+                "moral": "Prendre le temps d'écouter ouvre la voie à de meilleures décisions",
             },
             "notes": "Conserver un extrait sensoriel (pluie, rires) pour la mémoire narrative.",
         },
