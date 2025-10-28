@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import socket
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, MutableMapping, Optional, Sequence
 from urllib import error as urlerror
@@ -63,7 +64,7 @@ class OllamaModelConfig:
     name: str
     temperature: float = 0.2
     top_p: float = 0.9
-    request_timeout: float = 60.0
+    request_timeout: float = 180.0
     system_prompt: Optional[str] = None
 
 
@@ -120,6 +121,7 @@ class OllamaLLMClient:
             "model": model.name,
             "prompt": prompt,
             "stream": False,
+            "format": "json",
             "options": {
                 "temperature": model.temperature,
                 "top_p": model.top_p,
@@ -159,6 +161,10 @@ class OllamaLLMClient:
             raise LLMCallError(f"HTTP error {exc.code}: {body.decode('utf-8', errors='ignore')}") from exc
         except urlerror.URLError as exc:  # pragma: no cover - network failure
             raise LLMCallError(f"Connection error: {exc.reason}") from exc
+        except socket.timeout as exc:  # pragma: no cover - timeout
+            raise LLMCallError("Connection timed out") from exc
+        except TimeoutError as exc:  # pragma: no cover - timeout
+            raise LLMCallError("Connection timed out") from exc
 
     def _post_json(self, path: str, payload: Mapping[str, Any], *, timeout: float) -> Mapping[str, Any]:
         encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")

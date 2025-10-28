@@ -184,6 +184,18 @@ def try_call_llm_dict(
             except Exception:  # pragma: no cover - defensive logging guard
                 pass
         return None
+    except Exception as exc:  # pragma: no cover - unexpected failure safety net
+        if logger is not None:
+            try:
+                logger.warning(
+                    "Unexpected error while calling LLM integration '%s': %s",
+                    spec_key,
+                    exc,
+                    exc_info=True,
+                )
+            except Exception:
+                pass
+        return None
 
 
 __all__ = [
