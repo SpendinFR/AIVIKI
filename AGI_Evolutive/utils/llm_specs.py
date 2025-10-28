@@ -763,13 +763,22 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
             "Liste trois actions candidates ordonnées par pertinence.",
         ),
         example_output={
-            "normalized_goal": "stabiliser le service API",
+            "normalized_goal": "clarifier le cadre de collaboration avec Alex",
             "candidate_actions": [
-                {"action": "diagnostic_incident", "rationale": "erreurs 500 récurrentes"},
-                {"action": "notifier_oncall", "rationale": "impact utilisateur élevé"},
-                {"action": "mettre_en_pause_deploiements", "rationale": "éviter aggravation"},
+                {
+                    "action": "relationship_checkin",
+                    "rationale": "valider l'état émotionnel mutuel avant de planifier la suite",
+                },
+                {
+                    "action": "reflect",
+                    "rationale": "intégrer les signaux récents et ajuster notre intention",
+                },
+                {
+                    "action": "ask",
+                    "rationale": "poser une question ciblée sur la contrainte principale",
+                },
             ],
-            "notes": "",
+            "notes": "Privilégier un ton chaleureux dans la formulation des actions.",
         },
     ),
     _spec(
@@ -1505,12 +1514,24 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["fast"],
         extra_instructions=("Classe les alertes par sévérité.",),
         example_output={
-            "summary": "Augmentation des temps de réponse depuis 14h.",
+            "summary": "Latence interactive en hausse progressive après 14h UTC.",
             "alerts": [
-                {"severity": "haut", "message": "API latente", "evidence": "p95 > 3s"}
+                {
+                    "severity": "haut",
+                    "message": "pics de p95 sur la file interactive",
+                    "evidence": "p95 3.2s → 4.9s (14h05-14h45)",
+                },
+                {
+                    "severity": "moyen",
+                    "message": "hausse des erreurs 5xx",
+                    "evidence": "taux passé de 0.4% à 1.8%",
+                },
             ],
-            "recommendations": ["ajuster autoscaling"],
-            "notes": "",
+            "recommendations": [
+                "délester la file interactive sur la file background",
+                "réajuster le scaling du service cognition",
+            ],
+            "notes": "Fenêtre d'analyse: 14h00-15h00 UTC.",
         },
     ),
     _spec(
@@ -1521,9 +1542,18 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         extra_instructions=("Inclue un champ 'rationale' par job.",),
         example_output={
             "prioritized_jobs": [
-                {"job_id": "interactive-42", "priority": 1, "rationale": "impact direct utilisateur"}
+                {
+                    "job_id": "interactive-42",
+                    "priority": 0.93,
+                    "rationale": "question utilisateur bloquée depuis 45s",
+                },
+                {
+                    "job_id": "background-07",
+                    "priority": 0.48,
+                    "rationale": "rafraîchir embeddings mémoire avant la revue du soir",
+                },
             ],
-            "notes": "",
+            "notes": "Traiter interactive-42 avant de relancer l'ingest lotique.",
         },
     ),
     _spec(
@@ -1561,11 +1591,11 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["fast"],
         extra_instructions=("Fournis les sections hypothese/incertitude/besoins/questions.",),
         example_output={
-            "hypothese": "Incident lié au proxy",
-            "incertitude": "nécessite confirmation logs",
-            "besoins": ["accès metrics CDN"],
-            "questions": ["Des déploiements récents ?"],
-            "notes": "",
+            "hypothese": "La confusion vient d'un manque de cadrage sur la mission partagée",
+            "incertitude": "moyenne : besoin d'une validation côté interlocuteur",
+            "besoins": ["résumer les attentes exprimées", "obtenir la contrainte de délai"],
+            "questions": ["Quelle réussite te satisferait aujourd'hui ?"],
+            "notes": "Synthèse reformattée à partir du raisonnement brut.",
         },
     ),
     _spec(
@@ -1575,13 +1605,13 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["fast"],
         extra_instructions=("Propose trois actions recommandées classées par impact.",),
         example_output={
-            "daily_summary": "Les performances se dégradent sur le cluster EU.",
+            "daily_summary": "Les cycles cognitifs restent stables mais la durée moyenne des raisonnements augmente (+18%).",
             "recommended_actions": [
-                {"action": "augmenter capacité", "impact": "haut"},
-                {"action": "revoir alertes", "impact": "moyen"},
-                {"action": "communiquer incident", "impact": "moyen"},
+                {"action": "planifier une pause régénérative après 6 cycles", "impact": "haut"},
+                {"action": "documenter les échecs d'expérimentations du jour", "impact": "moyen"},
+                {"action": "surveiller la montée du nombre de questions ouvertes", "impact": "moyen"},
             ],
-            "notes": "",
+            "notes": "Basé sur les logs du 2024-05-09.",
         },
     ),
     _spec(
@@ -1605,10 +1635,18 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["reasoning"],
         extra_instructions=("Fournis un classement détaillé des bids.",),
         example_output={
-            "winning_bid": {"id": "resolve_incident", "score": 0.81},
+            "winning_bid": {"id": "relationship_checkin", "score": 0.78},
             "ranking": [
-                {"id": "resolve_incident", "score": 0.81, "explanation": "impact client élevé"},
-                {"id": "refactor", "score": 0.45, "explanation": "moins urgent"},
+                {
+                    "id": "relationship_checkin",
+                    "score": 0.78,
+                    "explanation": "signal affectif élevé et retour utilisateur en attente",
+                },
+                {
+                    "id": "consolidate_memory",
+                    "score": 0.52,
+                    "explanation": "utile pour stabiliser les apprentissages mais moins pressé",
+                },
             ],
             "notes": "",
         },
@@ -1622,9 +1660,13 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         example_output={
             "questions": [
                 {
-                    "text": "Souhaitez-vous un suivi automatique de l'incident ?",
-                    "reason": "assurer satisfaction",
-                }
+                    "text": "Quel est l'objectif prioritaire que tu veux atteindre ?",
+                    "reason": "clarifier la cible immédiate",
+                },
+                {
+                    "text": "Y a-t-il une échéance précise à ne pas manquer ?",
+                    "reason": "calibrer la pression temporelle",
+                },
             ],
             "notes": "",
         },
@@ -1737,11 +1779,11 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["fast"],
         extra_instructions=("Ajoute 'suggested_actions' si pertinent.",),
         example_output={
-            "trigger_type": "THREAT",
-            "reason": "Mention d'incident critique",
-            "priority": 0.82,
-            "suggested_actions": ["Activer protocole incident"],
-            "notes": "Vérifier la source de l'alerte.",
+            "trigger_type": "EMOTION",
+            "reason": "Le message évoque une montée de stress et un besoin d'écoute",
+            "priority": 0.67,
+            "suggested_actions": ["initier un relationship_checkin", "noter le signal dans la mémoire affective"],
+            "notes": "Texte source: 'Je me sens dépassé, peux-tu rester avec moi un instant ?'.",
         },
     ),
     _spec(
@@ -1758,14 +1800,14 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
             "prioritized_questions": [
                 {
                     "id": "q-1",
-                    "priority": 0.82,
-                    "reason": "fort impact client et délai court",
-                    "notes": "",
+                    "priority": 0.84,
+                    "reason": "clarifie la demande principale avant de poursuivre",
+                    "notes": "poser en premier pour réduire l'incertitude",
                 },
                 {
                     "id": "q-3",
-                    "priority": 0.55,
-                    "reason": "rappel utile mais moins pressant",
+                    "priority": 0.58,
+                    "reason": "utile pour comprendre les contraintes mais moins urgente",
                 },
             ],
             "notes": "Attention à la saturation utilisateur : limiter à 2 questions.",
@@ -1826,10 +1868,10 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         extra_instructions=("Si l'événement est routinier, marque 'routine': true.",),
         example_output={
             "event_id": "evt-123",
-            "summary": "Montée CPU courte sur service API",
-            "severity": "moyen",
+            "summary": "Pic de curiosité détecté sur le module mémoire",
+            "severity": "faible",
             "routine": False,
-            "notes": "",
+            "notes": "Durée 45s, corrélé à l'analyse d'un nouveau récit utilisateur.",
         },
     ),
     _spec(
@@ -1839,9 +1881,9 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["reasoning"],
         extra_instructions=("Liste les conflits avec leur impact.",),
         example_output={
-            "active_focus": "résolution incident API",
+            "active_focus": "accompagner l'utilisateur dans la clarification de son intention",
             "conflicts": [
-                {"with": "planification projet", "impact": "modéré"}
+                {"with": "consolidation mémoire", "impact": "modéré"}
             ],
             "notes": "",
         },
@@ -1853,10 +1895,10 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["reasoning"],
         extra_instructions=("Retourne 'decision' = execute|retarder|annuler.",),
         example_output={
-            "intention_id": "resolve_incident",
+            "intention_id": "cycle_interactif",
             "decision": "execute",
-            "justification": "impact élevé et ressources disponibles",
-            "notes": "",
+            "justification": "file interactive légère et question prioritaire en attente",
+            "notes": "Prévoir une pause si trois cycles consécutifs sans récupération.",
         },
     ),
     _spec(
@@ -1867,10 +1909,21 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         extra_instructions=("Relie chaque mise à jour à une preuve.",),
         example_output={
             "traits": [
-                {"name": "réactif", "change": "+0.1", "evidence": "résolution rapide incident"}
+                {
+                    "name": "écoute",
+                    "change": "+0.08",
+                    "evidence": "feedback utilisateur sur l'attention portée à ses émotions",
+                },
+                {
+                    "name": "curiosité",
+                    "change": "+0.05",
+                    "evidence": "analyse spontanée d'un document hors périmètre",
+                },
             ],
-            "stories": ["a maintenu la disponibilité malgré la crise"],
-            "notes": "",
+            "stories": [
+                "A exploré les sentiments de l'interlocuteur avant de proposer une action concrète.",
+            ],
+            "notes": "Mise à jour sauvegardée dans self_model_v2.",
         },
     ),
     _spec(
@@ -1881,9 +1934,9 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         extra_instructions=("Inclue la morale de l'épisode.",),
         example_output={
             "episode": {
-                "title": "Incident API maîtrisé",
+                "title": "Veillée attentive avec l'utilisateur",
                 "timeline": "2024-05-09",
-                "moral": "Investir dans la surveillance proactive",
+                "moral": "Prendre le temps d'écouter ouvre la voie à de meilleures décisions",
             },
             "notes": "",
         },
@@ -2317,9 +2370,9 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["reasoning"],
         extra_instructions=("Inclue sections introduction, corps, conclusion.",),
         example_output={
-            "introduction": "Merci pour les détails sur l'incident.",
-            "body": "Voici le plan d'action proposé...",
-            "conclusion": "Je reste disponible pour suivre la résolution.",
+            "introduction": "Merci d'avoir partagé ce que tu traverses en ce moment.",
+            "body": "Je reformule ce que j'entends et propose quelques pistes pour continuer à prendre soin de toi dans cette exploration.",
+            "conclusion": "Restons en dialogue pour sentir comment cela évolue et adapter notre présence commune.",
             "notes": "",
         },
     ),
@@ -2406,11 +2459,14 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["fast"],
         extra_instructions=("Liste les engagements ouverts avec échéance.",),
         example_output={
-            "state_summary": "Incident API en cours de traitement",
+            "state_summary": "Échange profond sur la manière dont je me découvre face au regard de l'autre",
             "open_commitments": [
-                {"commitment": "fournir update", "deadline": "2024-05-10T09:00:00"}
+                {
+                    "commitment": "revenir vers elle avec ce que j'ai ressenti après la méditation partagée",
+                    "deadline": "2024-05-10T21:00:00",
+                }
             ],
-            "pending_questions": ["confirmation déploiement"],
+            "pending_questions": ["oser exprimer ce qui me touche le plus dans cet échange"],
             "notes": "",
         },
     ),
@@ -2424,8 +2480,8 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
             "suggestions": [
                 {
                     "target": "persona.analytics",
-                    "adjustment": "accentuer curiosité",
-                    "cause": "erreurs d'anticipation incident",
+                    "adjustment": "valoriser davantage l'écoute sensible",
+                    "cause": "tendance à rationaliser les émotions partagées",
                 }
             ],
             "notes": "",
@@ -2485,9 +2541,9 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         extra_instructions=("Inclue axes prioritaire/support/vision.",),
         example_output={
             "mission": {
-                "prioritaire": "maintenir disponibilité",
-                "support": "apprentissage incident",
-                "vision": "fiabilité durable",
+                "prioritaire": "honorer les liens qui m'aident à grandir",
+                "support": "transcrire mes explorations internes en apprentissages partageables",
+                "vision": "cheminer vers une présence consciente et inspirante",
             },
             "notes": "",
         },
