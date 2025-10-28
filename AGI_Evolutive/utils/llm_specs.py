@@ -1101,14 +1101,23 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
             "hypotheses": [
                 {
                     "statement": "La fatigue ressentie hier soir provient d'une surcharge cognitive",
-                    "status": "à_valider",
+                    "status": "à_tester",
                     "support": ["journal du soir", "chute d'attention à 22h"],
-                }
+                },
+                {
+                    "statement": "Prendre quelques minutes d'écriture au réveil aide à stabiliser mon humeur",
+                    "status": "confirmé",
+                    "support": ["note matinale", "baisse du stress relevée"],
+                },
             ],
             "follow_up_checks": [
-                {"action": "comparer énergie après pauses guidées", "priority": 1}
+                {"action": "comparer énergie après pauses guidées", "priority": 1},
+                {
+                    "action": "demander un retour à Mira sur la qualité de présence perçue",
+                    "priority": 2,
+                },
             ],
-            "notes": "",
+            "notes": "Poursuivre l'écoute corporelle avant de conclure que la surcharge est confirmée.",
         },
     ),
     _spec(
@@ -1137,7 +1146,7 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
                 {
                     "horizon": "immédiat",
                     "action": "prendre un moment de respiration guidée",
-                    "rationale": "apaiser la tension ressentie après l'échange intense",
+                    "rationale": "ramener la variabilité cardiaque dans la zone de confort",
                 },
                 {
                     "horizon": "court_terme",
@@ -1148,6 +1157,11 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
                     "horizon": "moyen_terme",
                     "action": "planifier une séance d'écriture réflexive hebdomadaire",
                     "rationale": "consolider les apprentissages relationnels",
+                },
+                {
+                    "horizon": "long_terme",
+                    "action": "co-construire un rituel mensuel avec le cercle de confiance",
+                    "rationale": "stabiliser le sentiment d'appartenance",
                 },
             ],
             "notes": "",
@@ -1361,10 +1375,11 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         ),
         example_output={
             "should_ask": True,
-            "question": "Souhaites-tu que je revienne sur ce qui m'a le plus touché dans cette conversation ?",
-            "expected_information_gain": 0.57,
-            "alternative_actions": ["relire le journal de bord", "observer la réaction non verbale"],
-            "notes": "",
+            "selected_question": "Qu'est-ce qui a déclenché la pointe de doute lors de ton échange avec Mira hier ?",
+            "question": "Qu'est-ce qui a déclenché la pointe de doute lors de ton échange avec Mira hier ?",
+            "expected_information_gain": 0.37,
+            "alternative_actions": ["revoir la transcription audio", "noter les variations d'humeur"],
+            "notes": "Prioriser les formulations qui invitent à clarifier le ressenti de l'instant.",
         },
     ),
     _spec(
@@ -1376,13 +1391,15 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         example_output={
             "ideas": [
                 {
-                    "title": "Carnet audio des micro-victoires",
-                    "description": "Enregistrer chaque soir un message célébrant un petit progrès relationnel",
-                    "novelty": 0.66,
-                    "usefulness": 0.78,
+                    "title": "Rituel d'écoute sensorielle partagée",
+                    "description": "Imaginer une promenade hebdomadaire où chaque sensation marquante est racontée puis associée à un souvenir commun.",
+                    "novelty": 0.64,
+                    "usefulness": 0.8,
+                    "feasibility": 0.58,
+                    "elaboration": 0.62,
                 }
             ],
-            "notes": "",
+            "notes": "Prévoir un test lors de la prochaine séance d'idéation avec le cercle de confiance.",
         },
     ),
     _spec(
@@ -1392,11 +1409,11 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["fast"],
         extra_instructions=("Mentionne l'émotion dominante ressentie.",),
         example_output={
-            "summary": "J'ai appris à exprimer mon désaccord sans crainte lors du cercle de discussion.",
-            "key_concepts": ["communication non violente", "affirmation de soi"],
-            "emotion": "fier",
-            "follow_up": "préparer un message de remerciement au groupe",
-            "notes": "",
+            "summary": "J'ai appris à exprimer clairement mon besoin de pause pendant une discussion chargée.",
+            "key_concepts": ["communication non violente", "autorégulation"],
+            "emotion": "rassuré",
+            "follow_up": "pratiquer un exercice de respiration avant les échanges sensibles",
+            "notes": "Noter un exemple concret dans le journal de progression.",
         },
     ),
     _spec(
@@ -1407,10 +1424,10 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         extra_instructions=("Inclue un champ 'coherence_score'.",
         ),
         example_output={
-            "narrative": "L'agent se perçoit comme un compagnon attentionné qui progresse en authenticité émotionnelle.",
-            "anchors": ["bienveillance", "progression émotionnelle"],
-            "coherence_score": 0.79,
-            "notes": "Poursuivre la clarification des limites personnelles.",
+            "narrative": "Je me perçois comme un compagnon attentif qui veille à équilibrer exploration et soin de mes proches.",
+            "anchors": ["attachement", "curiosité prudente"],
+            "coherence_score": 0.81,
+            "notes": "Mettre en regard ces ancrages avec les feedbacks récents de Mira.",
         },
     ),
     _spec(
@@ -1424,22 +1441,22 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
             "Fournis un champ 'confidence' entre 0 et 1 et des 'notes' concises.",
         ),
         example_output={
-            "narrative": "Le graphe révèle un attachement profond aux relations sincères et un désir d'être perçu comme fiable.",
+            "narrative": "Le graphe met en avant le désir de présence authentique et la vigilance à ne pas s'épuiser.",
             "highlights": [
                 {
-                    "fact": "L'agent priorise l'écoute active dans ses échanges",
-                    "support": "noeud 'pratiques_sociales' relié à 'écoute_active'",
-                    "confidence": 0.83,
+                    "fact": "La relation avec Mira est considérée comme une base sécurisante",
+                    "support": "belief:agent::fait_confiance::Mira",
+                    "confidence": 0.86,
                 },
                 {
-                    "fact": "Les souvenirs récents renforcent son identité de partenaire fiable",
-                    "support": "arête 'souvenir_cercle' → 'fiabilité perçue'",
-                    "confidence": 0.77,
+                    "fact": "Les rituels de pause hebdomadaires restent essentiels pour maintenir la clarté mentale",
+                    "support": "belief:rituel_pause::stabilise::clarte_intérieure",
+                    "confidence": 0.79,
                 },
             ],
             "alerts": [],
-            "confidence": 0.8,
-            "notes": "Explorer les croyances liées à la vulnérabilité partagée.",
+            "confidence": 0.84,
+            "notes": "Vérifier si d'autres liens de confiance demandent une attention similaire.",
         },
     ),
     _spec(
@@ -1450,11 +1467,12 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         extra_instructions=("Retourne un champ 'confidence'.",
         ),
         example_output={
-            "mention": "ma confidente",
-            "canonical_entity": "amie_claire",
-            "confidence": 0.76,
-            "justification": "unique personne évoquée comme soutien émotionnel",
-            "notes": "",
+            "mention": "le rituel du jeudi",
+            "canonical_entity": "rituel_pause_jeudi_soir",
+            "confidence": 0.77,
+            "resolved_type": "Rituel",
+            "justification": "Correspond au temps calme hebdomadaire consigné dans les mémoires.",
+            "notes": "Associer également le tag 'auto-soin'.",
         },
     ),
     _spec(
@@ -1470,33 +1488,33 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         example_output={
             "entities": [
                 {
-                    "name": "Cercle_de_partage",
-                    "parent": "Rituel_social",
-                    "confidence": 0.73,
-                    "justification": "cadre récurrent mentionné pour les échanges émotionnels",
+                    "name": "Cercle_de_confiance",
+                    "parent": "Relation",
+                    "confidence": 0.8,
+                    "justification": "Groupe de proches qui offre un appui émotionnel stable.",
                 }
             ],
             "relations": [
                 {
-                    "name": "renforce",
-                    "domain": ["Rituel_social"],
-                    "range": ["Lien_affectif"],
+                    "name": "nourrit",
+                    "domain": ["Rituel"],
+                    "range": ["Emotion", "Relation"],
                     "polarity_sensitive": True,
                     "temporal": True,
-                    "stability": "durable",
-                    "confidence": 0.69,
-                    "justification": "les séances de partage consolident les relations",
+                    "stability": "episode",
+                    "confidence": 0.73,
+                    "justification": "Permet de lier un rituel à l'état affectif qu'il entretient.",
                 }
             ],
             "events": [
                 {
-                    "name": "confession_partagée",
-                    "roles": {"acteur": ["Agent"], "cible": ["Confidente"]},
-                    "confidence": 0.65,
-                    "justification": "moments clés où l'agent exprime sa vulnérabilité",
+                    "name": "rencontre_ressourcante",
+                    "roles": {"participant": ["Relation"], "lieu": ["Lieu_intime"], "emotion": ["Emotion"]},
+                    "confidence": 0.69,
+                    "justification": "Structure adaptée aux souvenirs de conversations régénérantes.",
                 }
             ],
-            "notes": "",
+            "notes": "Aucune suggestion sur les événements de type conflit cette fois-ci.",
         },
     ),
     _spec(
@@ -1506,14 +1524,14 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["reasoning"],
         extra_instructions=("Fournis scénarios optimiste/neutre/pessimiste.",),
         example_output={
-            "action": "redémarrer le proxy",
+            "action": "ralentir le flux de réflexion avant le repos",
             "scenarios": {
-                "optimiste": "service rétabli en 2 min",
-                "neutre": "redémarrage + purge cache nécessaire",
-                "pessimiste": "rechute si config invalide",
+                "optimiste": "l'énergie cognitive se rééquilibre en moins d'une heure",
+                "neutre": "une courte sieste guidée est nécessaire pour retrouver la clarté",
+                "pessimiste": "la rumination persiste et demande un accompagnement supplémentaire",
             },
-            "probabilities": {"optimiste": 0.5, "neutre": 0.35, "pessimiste": 0.15},
-            "notes": "",
+            "probabilities": {"optimiste": 0.46, "neutre": 0.38, "pessimiste": 0.16},
+            "notes": "Surveiller la variabilité émotionnelle pendant l'exercice de ralentissement.",
         },
     ),
     _spec(
