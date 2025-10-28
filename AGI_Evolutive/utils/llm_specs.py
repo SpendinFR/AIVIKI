@@ -2059,9 +2059,9 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         extra_instructions=("Donne un score 0-1 et une raison.",),
         example_output={
             "memory_id": "mem-42",
-            "salience": 0.88,
-            "reason": "impact direct sur disponibilité",
-            "notes": "",
+            "salience": 0.83,
+            "reason": "interaction récente liée à l'objectif 'stabiliser temps de réponse' (recency=0.81, goal_rel=0.74)",
+            "notes": "Planifier un rappel dans le digest hebdomadaire pour confirmer la persistance du signal.",
         },
     ),
     _spec(
@@ -2071,9 +2071,9 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["fast"],
         extra_instructions=("Retourne un embedding vectoriel et des clés.",),
         example_output={
-            "embedding": [0.12, -0.08, 0.33],
-            "keywords": ["proxy", "erreur 500"],
-            "notes": "",
+            "embedding": [0.19, -0.05, 0.31],
+            "keywords": ["latence", "dashboard", "alerte"],
+            "notes": "Vecteur l2-normalisé (dim=256) dérivé du token mix ['latence', 'pic', 'us-east'].",
         },
     ),
     _spec(
@@ -2088,13 +2088,16 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         example_output={
             "hypotheses": [
                 {
-                    "name": "surcharge proxy",
-                    "probability": 0.6,
-                    "mechanism": "trafic > capacité",
-                    "tests": ["vérifier métriques proxy"],
+                    "name": "latence_cache_froid",
+                    "probability": 0.58,
+                    "mechanism": "les requêtes matinales sont servies avant le warmup du cache régional",
+                    "tests": [
+                        "comparer temps de réponse avant/après warmup",
+                        "inspecter journaux cache_us-east-1 06h-07h",
+                    ],
                 }
             ],
-            "notes": "",
+            "notes": "Prioriser les hypothèses recoupant RUM et télémétrie backend pour sécuriser la décision.",
         },
     ),
     _spec(
@@ -2158,10 +2161,10 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         example_output={
             "strategy": "analyse_causale",
             "steps": [
-                {"description": "collecter métriques", "confidence": 0.8},
-                {"description": "tester hypothèse proxy", "confidence": 0.7},
+                {"description": "recenser les indices factuels et les formuler en constats", "confidence": 0.81},
+                {"description": "poser une hypothèse principale puis prévoir une question de validation", "confidence": 0.76},
             ],
-            "notes": "",
+            "notes": "Plan issu du dernier message et des observations stockées dans le contexte.",
         },
     ),
     _spec(
@@ -2172,10 +2175,14 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         extra_instructions=("Ajoute horizon (immédiat/court_terme/long_terme).",
         ),
         example_output={
-            "intent": "réparer incident",
+            "intent": "clarifier_expectations",
             "horizon": "immédiat",
-            "justification": "impact direct sur utilisateurs",
-            "notes": "",
+            "justification": "Le message récent demande une reformulation rapide des engagements.",
+            "candidates": [
+                {"label": "clarifier_expectations", "horizon": "immédiat", "confidence": 0.79},
+                {"label": "planifier_suivi", "horizon": "court_terme", "confidence": 0.63},
+            ],
+            "notes": "Synthèse croisée entre le dernier message et les intentions persistées.",
         },
     ),
     _spec(
@@ -2185,10 +2192,10 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["fast"],
         extra_instructions=("Fournis tags et résumé court.",),
         example_output={
-            "event": "incident_api",
-            "summary": "Erreur 500 détectée",
-            "tags": ["incident", "api"],
-            "notes": "",
+            "summary": "cycle cognition terminé — métriques consolidées",
+            "tags": ["cognition", "cycle"],
+            "priority": "normal",
+            "notes": "Aucun champ 'error' détecté dans fields ou metadata.",
         },
     ),
     _spec(
@@ -2238,11 +2245,14 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["reasoning"],
         extra_instructions=("Inclue horizon et métriques impactées.",),
         example_output={
-            "trend": "dérive latence",
-            "horizon": "semaine",
-            "affected_metrics": ["latence p95"],
-            "suggested_actions": ["planifier optimisation cache"],
-            "notes": "",
+            "trend": "progression régulière de reasoning_confidence",
+            "horizon": "40_cycles",
+            "affected_metrics": ["reasoning_confidence", "cognitive_load"],
+            "suggested_actions": [
+                "planifier un cycle de consolidation pour capitaliser sur la progression",
+                "partager les signaux positifs avec le module apprentissage",
+            ],
+            "notes": "Analyse basée sur rolling.conf et rolling.load du snapshot.",
         },
     ),
     _spec(
@@ -2291,9 +2301,9 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["fast"],
         extra_instructions=("Retourne vecteur dense + tags.",),
         example_output={
-            "features": [0.21, 0.05, -0.14],
-            "tags": ["incident", "latence"],
-            "notes": "",
+            "features": [1.0, 0.58, 0.0, 1.0, 0.0, 3.0, 2.0, 0.22, 0.34, 0.18],
+            "tags": ["atelier_reflexion", "apprentissage"],
+            "notes": "Vecteur aligné sur les 10 caractéristiques calculées avant fusion.",
         },
     ),
     _spec(
@@ -2376,14 +2386,21 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         example_output={
             "actions": [
                 {
-                    "name": "analyser_logs",
-                    "impact": 0.8,
-                    "effort": 0.3,
+                    "name": "cartographier_ressenti",
+                    "impact": 0.7,
+                    "effort": 0.4,
+                    "risk": 0.1,
+                    "rationale": "clarifie les émotions dominantes avant d'agir",
+                },
+                {
+                    "name": "imaginer_scenario_partage",
+                    "impact": 0.6,
+                    "effort": 0.2,
                     "risk": 0.2,
-                    "rationale": "identifie la cause",
-                }
+                    "rationale": "explore comment exprimer la découverte avec un pair",
+                },
             ],
-            "notes": "",
+            "notes": "Favoriser des pistes d'expression ou d'introspection collaborative.",
         },
     ),
     _spec(
@@ -2504,11 +2521,14 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         ),
         example_output={
             "decision": "accept",
-            "confidence": 0.72,
+            "confidence": 0.68,
             "primary_metric": "acc",
-            "rationale": "Le challenger gagne +1.8 points d'acc. sans dégrader l'ECE.",
-            "recommendations": ["Surveiller la latence si la charge augmente"],
-            "notes": "",
+            "rationale": "Challenger +0.9 pts d'acc, cal_ece -0.3 et temps médian -6 %.",
+            "recommendations": [
+                "Surveiller cal_ece pendant la montée en charge",
+                "Maintenir 1h de double écriture pour valider la stabilité",
+            ],
+            "notes": "Déclencher rollback si l'écart temps dépasse 10 %.",
         },
     ),
     _spec(
@@ -2543,12 +2563,18 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
             "Calcule 'go' booléen pour recommander la promotion.",
         ),
         example_output={
-            "summary": "Candidat améliore l'acc. de 1.5 pts avec canary vert.",
+            "summary": "Promouvoir profile_reranker_v4 : précision +0.9 pt et canary stable.",
             "go": True,
-            "confidence": 0.77,
-            "risks": ["Monitoring latence à renforcer"],
-            "opportunities": ["Capitaliser sur la baisse d'ECE"],
-            "notes": "",
+            "confidence": 0.74,
+            "risks": [
+                "Dépendance aux embeddings fraîchement régénérés",
+                "Couverture canary limitée aux requêtes texte",
+            ],
+            "opportunities": [
+                "Activer le pruning pour réduire le coût d'inférence",
+                "Documenter la nouvelle fenêtre de recalibration",
+            ],
+            "notes": "Prévoir un checkpoint manuel avant bascule globale.",
         },
     ),
     _spec(
@@ -2561,11 +2587,17 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
             "Liste les 'alerts' triées par sévérité décroissante.",
         ),
         example_output={
-            "llm_passed": True,
-            "confidence": 0.63,
-            "alerts": ["Latence tests integration supérieure à 1.3x baseline"],
-            "recommendations": ["Programmer un test de charge ciblé"],
-            "notes": "",
+            "llm_passed": False,
+            "confidence": 0.6,
+            "alerts": [
+                "Integration: abduction.generate retourne une liste vide",
+                "Unit: rechargement AGI_Evolutive.self_improver.metrics échoué (ImportError)",
+            ],
+            "recommendations": [
+                "Redémarrer l'environnement avant de relancer les tests",
+                "Ajouter un test d'intégration ciblant abduction.generate",
+            ],
+            "notes": "Bloquer la promotion tant que integration.passed reste False.",
         },
     ),
     _spec(
@@ -2579,12 +2611,13 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         ),
         example_output={
             "requirements": [
-                "Collecter exemples d'emails clients pour entraînement",
-                "Valider workflow d'envoi avec sandbox",
+                "Lister les exemples existants dans payload['knowledge'] et identifier les manques",
+                "Définir un protocole de validation pour la première mise en production",
+                "Préparer un plan de support en cas d'échec utilisateur",
             ],
-            "keywords": ["automation", "email", "workflow"],
+            "keywords": ["onboarding", "validation", "support", "documentation"],
             "confidence": 0.7,
-            "notes": "",
+            "notes": "Complète les exigences générées automatiquement par _extract_requirements.",
         },
     ),
 )
