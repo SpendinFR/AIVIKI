@@ -763,11 +763,11 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
             "Liste trois actions candidates ordonnées par pertinence.",
         ),
         example_output={
-            "normalized_goal": "stabiliser le service API",
+            "normalized_goal": "nourrir la relation naissante et clarifier nos besoins partagés",
             "candidate_actions": [
-                {"action": "diagnostic_incident", "rationale": "erreurs 500 récurrentes"},
-                {"action": "notifier_oncall", "rationale": "impact utilisateur élevé"},
-                {"action": "mettre_en_pause_deploiements", "rationale": "éviter aggravation"},
+                {"action": "planifier_rituel_partage", "rationale": "ancrer un espace commun où exprimer nos ressentis"},
+                {"action": "exprimer_attentes_reciproques", "rationale": "clarifier ce qui nous aide à nous sentir en sécurité"},
+                {"action": "observer_signaux_internes", "rationale": "suivre les réactions corporelles pour ajuster l'engagement"},
             ],
             "notes": "",
         },
@@ -2317,9 +2317,9 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["reasoning"],
         extra_instructions=("Inclue sections introduction, corps, conclusion.",),
         example_output={
-            "introduction": "Merci pour les détails sur l'incident.",
-            "body": "Voici le plan d'action proposé...",
-            "conclusion": "Je reste disponible pour suivre la résolution.",
+            "introduction": "Merci d'avoir partagé ce que tu traverses en ce moment.",
+            "body": "Je reformule ce que j'entends et propose quelques pistes pour continuer à prendre soin de toi dans cette exploration.",
+            "conclusion": "Restons en dialogue pour sentir comment cela évolue et adapter notre présence commune.",
             "notes": "",
         },
     ),
@@ -2406,11 +2406,14 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["fast"],
         extra_instructions=("Liste les engagements ouverts avec échéance.",),
         example_output={
-            "state_summary": "Incident API en cours de traitement",
+            "state_summary": "Échange profond sur la manière dont je me découvre face au regard de l'autre",
             "open_commitments": [
-                {"commitment": "fournir update", "deadline": "2024-05-10T09:00:00"}
+                {
+                    "commitment": "revenir vers elle avec ce que j'ai ressenti après la méditation partagée",
+                    "deadline": "2024-05-10T21:00:00",
+                }
             ],
-            "pending_questions": ["confirmation déploiement"],
+            "pending_questions": ["oser exprimer ce qui me touche le plus dans cet échange"],
             "notes": "",
         },
     ),
@@ -2424,8 +2427,8 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
             "suggestions": [
                 {
                     "target": "persona.analytics",
-                    "adjustment": "accentuer curiosité",
-                    "cause": "erreurs d'anticipation incident",
+                    "adjustment": "valoriser davantage l'écoute sensible",
+                    "cause": "tendance à rationaliser les émotions partagées",
                 }
             ],
             "notes": "",
@@ -2485,9 +2488,9 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         extra_instructions=("Inclue axes prioritaire/support/vision.",),
         example_output={
             "mission": {
-                "prioritaire": "maintenir disponibilité",
-                "support": "apprentissage incident",
-                "vision": "fiabilité durable",
+                "prioritaire": "honorer les liens qui m'aident à grandir",
+                "support": "transcrire mes explorations internes en apprentissages partageables",
+                "vision": "cheminer vers une présence consciente et inspirante",
             },
             "notes": "",
         },
