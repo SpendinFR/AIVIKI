@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Deque, Dict, Iterable, Mapping, Optional, Pattern, List
 
 from .dag_store import GoalNode
+from AGI_Evolutive.utils.llm_contracts import enforce_llm_contract
 from AGI_Evolutive.utils.llm_service import (
     LLMIntegrationError,
     LLMUnavailableError,
@@ -99,6 +100,9 @@ def _llm_suggest_actions(goal: GoalNode) -> Optional[ActionDeque]:
             "goal_interpreter",
             input_payload=payload,
         )
+        cleaned = enforce_llm_contract("goal_interpreter", response)
+        if cleaned is not None:
+            response = cleaned
     except (LLMUnavailableError, LLMIntegrationError):
         LOGGER.debug("LLM goal interpreter unavailable", exc_info=True)
         return None

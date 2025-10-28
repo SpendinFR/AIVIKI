@@ -6,6 +6,7 @@ import time
 
 from AGI_Evolutive.cognition.homeostasis import OnlineLinearModel
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_contracts import enforce_llm_contract
 from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 
@@ -530,6 +531,10 @@ def recommend_and_apply_mission(
         input_payload=json_sanitize(llm_payload),
         logger=logger,
     )
+
+    cleaned = enforce_llm_contract("identity_mission", llm_result)
+    if cleaned is not None:
+        llm_result = cleaned
 
     if isinstance(llm_result, Mapping):
         mission_block = llm_result.get("mission")
