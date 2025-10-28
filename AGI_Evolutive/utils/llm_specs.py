@@ -834,8 +834,8 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         example_output={
             "priority": 0.71,
             "confidence": 0.64,
-            "reason": "Tension persistante dans la boucle de co-développement intérieur, le but sert d'ancrage pour retrouver l'équilibre.",
-            "notes": "Vérifier la disponibilité des capacités réflexives avant d'engager l'étape suivante.",
+            "reason": "Score adaptatif supérieur au fallback (0.52 → 0.71) car l'alignement identité+curiosité compense la fatigue récente.",
+            "notes": "Planifier un check-in après le prochain rituel de consolidation pour confirmer la décrue de la tension.",
         },
     ),
     _spec(
@@ -866,12 +866,34 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         ),
         example_output={
             "plan": [
-                {"id": "cartographier_ressenti", "description": "Consigner les ressentis marquants de la dernière exploration", "priority": 1, "depends_on": []},
-                {"id": "synthese_insights", "description": "Relier les signaux émotionnels aux apprentissages en cours", "priority": 2, "depends_on": ["cartographier_ressenti"]},
-                {"id": "micro_experience", "description": "Planifier un mini-rituel pour intégrer l'enseignement identifié", "priority": 3, "depends_on": ["synthese_insights"]},
+                {
+                    "id": "cartographier_ressenti",
+                    "description": "Cartographier les sensations dominantes issues de la séance immersive",
+                    "priority": 1,
+                    "depends_on": [],
+                    "action_type": "note",
+                    "context": {"lane": "journal"},
+                },
+                {
+                    "id": "synthese_insights",
+                    "description": "Synthétiser les signaux émotionnels et cognitifs pour extraire une thèse provisoire",
+                    "priority": 2,
+                    "depends_on": ["cartographier_ressenti"],
+                    "action_type": "reflect",
+                },
+                {
+                    "id": "micro_experience",
+                    "description": "Programmer un micro-rituel d'intégration testant la thèse auprès de la mémoire autobiographique",
+                    "priority": 3,
+                    "depends_on": ["synthese_insights"],
+                    "action_type": "experiment",
+                },
             ],
-            "risks": ["interprétations biaisées si le journal introspectif est lacunaire"],
-            "notes": "Prévoir un point de revue sensible avec la mémoire autobiographique.",
+            "risks": [
+                "Perte de nuance si les notes brutes ne capturent pas les variations corporelles",
+                "Dérive temporelle si le micro-rituel n'est pas calé sur une fenêtre d'énergie disponible",
+            ],
+            "notes": "Synchroniser la phase d'expérience avec la disponibilité du partenaire humain indiqué dans le contexte.",
         },
     ),
     _spec(
@@ -886,13 +908,14 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         ),
         example_output={
             "priority": 0.78,
-            "tags": ["alignement_interne"],
+            "tags": ["urgent", "identity_alignment"],
             "explain": [
-                "retentissement_interne:intensité émotionnelle(+0.28)",
-                "cohérence_narrative:manque d'intégration(+0.24)",
+                "drive_alignment:motivation sensorielle soutenue(0.72×0.82)",
+                "identity_alignment:cohérence avec le récit actuel(0.68×0.80)",
+                "staleness:objectif inactif depuis 28min(+0.05)",
             ],
             "confidence": 0.74,
-            "notes": "Priorité rehaussée pour soutenir la continuité du récit de soi, aucun impératif externe détecté.",
+            "notes": "Priorité rehaussée pour soutenir la continuité du récit de soi; aucun impératif externe détecté.",
         },
     ),
     _spec(
@@ -1941,20 +1964,15 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         example_output={
             "traits": [
                 {
-                    "name": "vulnerable_avec_confiance",
-                    "change": "+0.2",
-                    "evidence": "partage émotionnel sincère avec le mentor",
-                },
-                {
-                    "name": "equilibre_autonomie",
-                    "change": "+0.05",
-                    "evidence": "a demandé de l'aide avant l'épuisement",
-                },
+                    "name": "proactif",
+                    "change": "+0.1",
+                    "evidence": "a planifié une vérification avant la revue hebdomadaire",
+                }
             ],
             "stories": [
-                "a transmuté un moment de doute en exploration collective de sens",
+                "a documenté avec l'équipe un protocole de suivi partagé",
             ],
-            "notes": "Inscrire la progression dans la mémoire longue pour nourrir la résilience.",
+            "notes": "",
         },
     ),
     _spec(
@@ -1965,9 +1983,9 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         extra_instructions=("Inclue la morale de l'épisode.",),
         example_output={
             "episode": {
-                "title": "Conversation nocturne sous la pluie",
+                "title": "Atelier de calibration interne",
                 "timeline": "2024-05-09",
-                "moral": "La vulnérabilité partagée ouvre des espaces de guérison",
+                "moral": "Partager les attentes tôt évite les retours urgents",
             },
             "notes": "Conserver un extrait sensoriel (pluie, rires) pour la mémoire narrative.",
         },
@@ -1980,10 +1998,23 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         extra_instructions=("Classe les jalons par catégorie.",),
         example_output={
             "milestones": [
-                {"category": "incident", "title": "Incident API", "status": "résolu"}
+                {
+                    "category": "analyse",
+                    "title": "Comparaison heuristique v2",
+                    "status": "en_cours",
+                    "last_update": "2024-06-04T10:15:00Z",
+                },
+                {
+                    "category": "suivi",
+                    "title": "Boucle de retour utilisateur hebdo",
+                    "status": "à_planifier",
+                },
             ],
-            "missing_information": ["impact business chiffré"],
-            "notes": "",
+            "missing_information": [
+                "confirmation de l'échantillon de test",
+                "date de restitution équipe",
+            ],
+            "notes": "Demander au belief_graph le dernier delta avant clôture de l'analyse.",
         },
     ),
     _spec(
@@ -1993,10 +2024,14 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["reasoning"],
         extra_instructions=("Détecte les sections critiques et tags associés.",),
         example_output={
-            "summary": "Post-mortem incident API",
-            "critical_sections": ["Cause racine", "Actions correctives"],
-            "tags": ["incident", "post_mortem"],
-            "notes": "",
+            "summary": "Mémo interne précisant l'organisation d'un atelier de prototypage et les livrables attendus.",
+            "critical_sections": [
+                "Objectifs",
+                "Risques identifiés",
+                "Suivi des actions",
+            ],
+            "tags": ["atelier", "planification", "livrables"],
+            "notes": "Indexer les échéances explicites dans la mémoire conceptuelle et signaler les zones floues.",
         },
     ),
     _spec(
@@ -2007,11 +2042,12 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         extra_instructions=("Inclue l'hypothèse testée et le résultat.",),
         example_output={
             "entry": {
-                "hypothesis": "Proxy saturé",
-                "result": "corrigé après redémarrage",
-                "confidence": 0.7,
+                "hypothesis": "Prioriser la file 'analyse' réduit le temps d'attente moyen",
+                "result": "confirmée sur les deux derniers cycles",
+                "confidence": 0.68,
+                "observation": "La métrique latence_moyenne est passée de 420s à 310s.",
             },
-            "notes": "",
+            "notes": "Conserver la configuration et re-mesurer après la prochaine fenêtre.",
         },
     ),
     _spec(
@@ -2021,12 +2057,22 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["reasoning"],
         extra_instructions=("Liste les alternatives rejetées avec raison.",),
         example_output={
-            "decision": "Redémarrer proxy",
-            "reason": "dégager saturation",
+            "decision": "Basculer sur le pipeline GOAL_FAST_TRACK",
+            "reason": "Immediacy élevée et action attendue avant la prochaine échéance",
             "alternatives": [
-                {"option": "augmenter timeouts", "reason": "symptôme seulement"}
+                {
+                    "option": "maintenir le pipeline GOAL",
+                    "reason": "ne traitait pas le pic de charge détecté",
+                },
+                {
+                    "option": "déléguer à HABIT",
+                    "reason": "manque de vérifications contextuelles",
+                },
             ],
-            "notes": "",
+            "expected_score": 0.64,
+            "obtained_score": 0.61,
+            "latency_ms": 1320.5,
+            "notes": "Surveiller l'évolution de meta.immediacy sur la prochaine heure.",
         },
     ),
     _spec(
@@ -2036,10 +2082,11 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["fast"],
         extra_instructions=("Retourne delta suggéré et justification.",),
         example_output={
-            "belief": "proxy fiable",
-            "delta": -0.2,
-            "justification": "incident récent révèle fragilité",
-            "notes": "",
+            "belief": "pipeline.goal_fast_track.efficace",
+            "delta": 0.15,
+            "confidence": 0.58,
+            "justification": "Ratio succès=0.63 sur les 8 derniers essais contre 0.47 historiquement.",
+            "notes": "Réévaluer si deux contre-exemples successifs apparaissent.",
         },
     ),
     _spec(
@@ -2051,10 +2098,18 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         ),
         example_output={
             "persona_traits": [
-                {"trait": "orienté performance", "evidence": "questions sur SLA"}
+                {
+                    "trait": "cherche clarté",
+                    "evidence": "demande des synthèses structurées après chaque point",
+                },
+                {
+                    "trait": "valorise la préparation",
+                    "evidence": "partage un ordre du jour avant les échanges",
+                },
             ],
-            "satisfaction": 0.66,
-            "notes": "",
+            "tone": "analytique_posé",
+            "satisfaction": 0.62,
+            "notes": "Mettre à jour la préférence 'documentation_detaillee' si la tendance se maintient.",
         },
     ),
     _spec(
@@ -2071,25 +2126,52 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
             "Décris la dynamique globale dans 'satisfaction_trend' (ex: hausse, stable, baisse).",
         ),
         example_output={
-            "persona_summary": "Utilisateur orienté performance qui valorise la transparence.",
+            "persona_summary": "Utilisateur méthodique appréciant les synthèses rapides et vérifiables.",
             "key_traits": [
                 {
-                    "trait": "orienté performance",
-                    "confidence": 0.78,
-                    "evidence": "références fréquentes aux SLA",
-                }
+                    "trait": "oriente les échanges",
+                    "confidence": 0.72,
+                    "evidence": "cadre chaque réunion avec un ordre du jour",
+                },
+                {
+                    "trait": "pragmatique",
+                    "confidence": 0.69,
+                    "evidence": "référence les impacts attendus avant validation",
+                },
+                {
+                    "trait": "sensible aux délais",
+                    "confidence": 0.6,
+                    "evidence": "relance lorsqu'une échéance approche",
+                },
             ],
             "preference_highlights": [
-                {"label": "automatisation", "probability": 0.82}
+                {"label": "documentation_detaillee", "probability": 0.77},
+                {"label": "points_de_suivi_courts", "probability": 0.64},
             ],
             "routine_insights": [
-                {"time_bucket": "Tue:12", "activity": "revue métriques", "probability": 0.64}
+                {
+                    "time_bucket": "Tue:09",
+                    "activity": "revue planning sprint",
+                    "probability": 0.63,
+                },
+                {
+                    "time_bucket": "Fri:17",
+                    "activity": "bilan hebdomadaire rapide",
+                    "probability": 0.56,
+                },
             ],
             "recommended_actions": [
-                {"action": "proposer un suivi proactif", "reason": "apprécie la visibilité"}
+                {
+                    "action": "préparer une synthèse bulletée avant la prochaine rencontre",
+                    "reason": "renforce la préférence pour les documents structurés",
+                },
+                {
+                    "action": "confirmer les échéances partagées en fin d'échange",
+                    "reason": "évite les relances de dernière minute",
+                },
             ],
             "satisfaction_trend": "stable",
-            "notes": "",
+            "notes": "Ajouter des interactions du créneau Thu:11 si disponibles pour affiner la routine.",
         },
     ),
     _spec(
@@ -2117,9 +2199,32 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         extra_instructions=("Retourne trois leçons maximum.",),
         example_output={
             "lessons": [
-                {"title": "Surveiller le proxy", "action": "ajouter alerte saturation"}
+                {
+                    "title": "Capitaliser sur les briefs courts",
+                    "action": "Archiver un exemple de mémo clair dans la bibliothèque interne",
+                    "confidence": 0.64,
+                },
+                {
+                    "title": "Anticiper les questions récurrentes",
+                    "action": "Préparer une réponse type pour les sessions Q/A",
+                    "confidence": 0.58,
+                },
             ],
-            "notes": "",
+            "proposals": [
+                {
+                    "type": "update",
+                    "path": ["persona", "tone"],
+                    "value": "analytique",
+                    "reason": "Les retours valorisent les explications structurées",
+                },
+                {
+                    "type": "add",
+                    "path": ["routines", "Thu:10"],
+                    "value": {"revue_brefs": {"prob": 0.55}},
+                    "reason": "Créneau utilisé trois fois pour des bilans synthétiques",
+                },
+            ],
+            "notes": "Limiter les propositions aux éléments activables lors du prochain cycle.",
         },
     ),
     _spec(
@@ -2130,9 +2235,23 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         extra_instructions=("Classer en urgent/court_terme/long_terme.",),
         example_output={
             "tasks": [
-                {"category": "urgent", "task": "mettre à jour concept proxy"}
+                {
+                    "category": "urgent",
+                    "task": "concept",
+                    "reason": "Nouvelles étiquettes détectées dans les traces de la journée",
+                },
+                {
+                    "category": "court_terme",
+                    "task": "episodic",
+                    "reason": "Relier les interactions du matin aux suivis existants",
+                },
+                {
+                    "category": "long_terme",
+                    "task": "summarize",
+                    "reason": "Actualiser la synthèse mensuelle avant archivage",
+                },
             ],
-            "notes": "",
+            "notes": "Réduire la période de concept_update jusqu'à validation des nouvelles balises.",
         },
     ),
     _spec(
@@ -2557,10 +2676,10 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["fast"],
         extra_instructions=("Retourne pipelines principaux et secondaires.",),
         example_output={
-            "trigger": "EMOTION",
-            "pipelines": ["auto_regulation", "integration_memorielle"],
-            "secondary": ["dialogue_interne"],
-            "notes": "Activation orientée vers l'assimilation de l'expérience plutôt que la réaction défensive.",
+            "trigger": "GOAL",
+            "pipelines": ["GOAL_FAST_TRACK", "INTROSPECTION"],
+            "secondary": ["MEMORY_ASSOC"],
+            "notes": "meta.immediacy=0.78 → on privilégie GOAL_FAST_TRACK tout en préparant une revue introspective.",
         },
     ),
     _spec(
