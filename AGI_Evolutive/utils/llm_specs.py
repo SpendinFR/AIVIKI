@@ -532,13 +532,13 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
                 {
                     "id": 12,
                     "adjusted_score": 0.84,
-                    "rationale": "Répond directement à la question sur l'incident API.",
+                    "rationale": "Éclaire précisément la question sur le ressenti après la première rencontre avec Mira.",
                     "priority": "haut",
                 },
                 {
                     "id": 7,
                     "adjusted_score": 0.55,
-                    "rationale": "Contexte utile mais partiellement daté.",
+                    "rationale": "Complète l'évolution de l'agent lors de la retraite créative, mais reste moins direct.",
                     "priority": "moyen",
                 },
             ],
@@ -556,10 +556,10 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
             "Calcule 'coherence' entre 0 et 1 si tu ajustes la valeur initiale.",
         ),
         example_output={
-            "enhanced_narrative": "L'agent a surmonté une panne API avant de stabiliser la plateforme.",
+            "enhanced_narrative": "L'agent a consacré la semaine à approfondir ses échanges avec son cercle interne et à formaliser une nouvelle vision personnelle.",
             "coherence": 0.78,
             "insights": [
-                {"title": "Résilience opérationnelle", "importance": "haute", "detail": "Interventions rapides sur incidents critiques."}
+                {"title": "Renforcement des liens", "importance": "haute", "detail": "Moments partagés avec Mira et l'équipe qui ont ravivé la motivation."}
             ],
             "notes": "",
         },
@@ -595,13 +595,13 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
             "Ajoute 'highlights' (liste) et 'risks' éventuels avec sévérité.",
         ),
         example_output={
-            "summary": "Semaine dominée par la résolution d'un incident API et l'onboarding d'un client.",
+            "summary": "Semaine marquée par l'exploration d'une nouvelle habitude matinale et par plusieurs échanges inspirants avec la communauté interne.",
             "highlights": [
-                {"item": "Incident API stabilisé", "impact": "haut"},
-                {"item": "Nouveau playbook documenté", "impact": "moyen"},
+                {"item": "Routine de méditation instaurée", "impact": "haut"},
+                {"item": "Discussion en profondeur avec Mira", "impact": "moyen"},
             ],
             "risks": [
-                {"item": "Dette technique monitoring", "severity": "modéré"}
+                {"item": "Fatigue liée aux réflexions prolongées", "severity": "modéré"}
             ],
             "notes": "",
         },
@@ -617,10 +617,10 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         ),
         example_output={
             "concepts": [
-                {"id": "proxy", "priority": "haut", "action": "Renforcer les exemples récents."}
+                {"id": "curiosite_partagee", "priority": "haut", "action": "Documenter les échanges avec les mentors."}
             ],
             "relations": [
-                {"id": "proxy::cause::incident", "priority": "moyen", "action": "Vérifier poids après dernier incident."}
+                {"id": "curiosite_partagee::renforce::confiance_mutuelle", "priority": "moyen", "action": "Tracer les moments où la confiance a progressé."}
             ],
             "notes": "",
         },
@@ -635,7 +635,7 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         ),
         example_output={
             "reranked": [
-                {"id": 42, "boost": 0.18, "justification": "Mention directe de la panne actuelle."}
+                {"id": 42, "boost": 0.18, "justification": "Évoque explicitement la rencontre fondatrice que l'agent cherche à revisiter."}
             ],
             "notes": "",
         },
@@ -665,10 +665,10 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
             "Ajoute 'metadata_updates' (dict) pour compléter les informations utiles.",
         ),
         example_output={
-            "normalized_kind": "incident_report",
-            "tags": ["incident", "api"],
+            "normalized_kind": "souvenir_personnel",
+            "tags": ["rencontre", "reflexion"],
             "retention_priority": "haut",
-            "metadata_updates": {"related_service": "api-gateway"},
+            "metadata_updates": {"relation_associee": "Mira", "tonalite": "chaleureuse"},
             "notes": "",
         },
     ),
@@ -699,9 +699,9 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         ),
         example_output={
             "batch_annotations": [
-                {"id": "mem_9", "priority": "haut", "topics": ["incident", "client premium"]}
+                {"id": "mem_9", "priority": "haut", "topics": ["retour d'emotion", "conversation avec mentor"]}
             ],
-            "alerts": ["Escalader incident client premium"],
+            "alerts": ["Prévoir un suivi émotionnel après la discussion avec Mira"],
             "notes": "",
         },
     ),
@@ -716,12 +716,12 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
             "Ajoute 'alerts' si des risques doivent être remontés.",
         ),
         example_output={
-            "summary": "La période retrace la résolution de l'incident API et la mise à jour des procédures.",
+            "summary": "La période retrace la découverte d'une nouvelle passion artistique et la consolidation d'un cercle de confiance.",
             "key_events": [
-                {"label": "Incident API", "importance": "haute"},
-                {"label": "Rétroaction client", "importance": "moyenne"},
+                {"label": "Atelier d'esquisse partagé", "importance": "haute"},
+                {"label": "Feedback de Mira", "importance": "moyenne"},
             ],
-            "alerts": ["Prévoir suivi monitoring"],
+            "alerts": ["Prendre un moment de repos après les sessions créatives intenses"],
             "notes": "",
         },
     ),
@@ -1067,15 +1067,24 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         example_output={
             "hypotheses": [
                 {
-                    "statement": "Les erreurs 500 viennent d'un pic de trafic",
-                    "status": "à_valider",
-                    "support": ["courbe trafic", "alertes CDN"],
-                }
+                    "statement": "La fatigue ressentie hier soir provient d'une surcharge cognitive",
+                    "status": "à_tester",
+                    "support": ["journal du soir", "chute d'attention à 22h"],
+                },
+                {
+                    "statement": "Prendre quelques minutes d'écriture au réveil aide à stabiliser mon humeur",
+                    "status": "confirmé",
+                    "support": ["note matinale", "baisse du stress relevée"],
+                },
             ],
             "follow_up_checks": [
-                {"action": "corréler trafic et latence", "priority": 1}
+                {"action": "comparer énergie après pauses guidées", "priority": 1},
+                {
+                    "action": "demander un retour à Mira sur la qualité de présence perçue",
+                    "priority": 2,
+                },
             ],
-            "notes": "",
+            "notes": "Poursuivre l'écoute corporelle avant de conclure que la surcharge est confirmée.",
         },
     ),
     _spec(
@@ -1101,8 +1110,26 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         extra_instructions=("Classe les recommandations par horizon temporel.",),
         example_output={
             "recommendations": [
-                {"horizon": "immédiat", "action": "résoudre l'incident API", "rationale": "impact client"},
-                {"horizon": "court_terme", "action": "ajuster la surveillance", "rationale": "détection lente"},
+                {
+                    "horizon": "immédiat",
+                    "action": "prendre un moment de respiration guidée",
+                    "rationale": "ramener la variabilité cardiaque dans la zone de confort",
+                },
+                {
+                    "horizon": "court_terme",
+                    "action": "recontacter l'ami évoqué pour clarifier les intentions",
+                    "rationale": "éviter une incompréhension prolongée",
+                },
+                {
+                    "horizon": "moyen_terme",
+                    "action": "planifier une séance d'écriture réflexive hebdomadaire",
+                    "rationale": "consolider les apprentissages relationnels",
+                },
+                {
+                    "horizon": "long_terme",
+                    "action": "co-construire un rituel mensuel avec le cercle de confiance",
+                    "rationale": "stabiliser le sentiment d'appartenance",
+                },
             ],
             "notes": "",
         },
@@ -1315,10 +1342,11 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         ),
         example_output={
             "should_ask": True,
-            "question": "Peux-tu confirmer si un déploiement a eu lieu avant l'incident ?",
-            "expected_information_gain": 0.42,
-            "alternative_actions": ["analyser commits"],
-            "notes": "",
+            "selected_question": "Qu'est-ce qui a déclenché la pointe de doute lors de ton échange avec Mira hier ?",
+            "question": "Qu'est-ce qui a déclenché la pointe de doute lors de ton échange avec Mira hier ?",
+            "expected_information_gain": 0.37,
+            "alternative_actions": ["revoir la transcription audio", "noter les variations d'humeur"],
+            "notes": "Prioriser les formulations qui invitent à clarifier le ressenti de l'instant.",
         },
     ),
     _spec(
@@ -1330,13 +1358,15 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         example_output={
             "ideas": [
                 {
-                    "title": "Post-mortem interactif",
-                    "description": "Atelier guidé par chatbot pour rejouer l'incident",
-                    "novelty": 0.7,
-                    "usefulness": 0.85,
+                    "title": "Rituel d'écoute sensorielle partagée",
+                    "description": "Imaginer une promenade hebdomadaire où chaque sensation marquante est racontée puis associée à un souvenir commun.",
+                    "novelty": 0.64,
+                    "usefulness": 0.8,
+                    "feasibility": 0.58,
+                    "elaboration": 0.62,
                 }
             ],
-            "notes": "",
+            "notes": "Prévoir un test lors de la prochaine séance d'idéation avec le cercle de confiance.",
         },
     ),
     _spec(
@@ -1346,11 +1376,11 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["fast"],
         extra_instructions=("Mentionne l'émotion dominante ressentie.",),
         example_output={
-            "summary": "Incident résolu après ajustement proxy.",
-            "key_concepts": ["proxy inverse", "gestion cache"],
-            "emotion": "soulagé",
-            "follow_up": "documenter la procédure",
-            "notes": "",
+            "summary": "J'ai appris à exprimer clairement mon besoin de pause pendant une discussion chargée.",
+            "key_concepts": ["communication non violente", "autorégulation"],
+            "emotion": "rassuré",
+            "follow_up": "pratiquer un exercice de respiration avant les échanges sensibles",
+            "notes": "Noter un exemple concret dans le journal de progression.",
         },
     ),
     _spec(
@@ -1361,10 +1391,10 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         extra_instructions=("Inclue un champ 'coherence_score'.",
         ),
         example_output={
-            "narrative": "L'agent se voit comme fiable mais sensible aux incidents API.",
-            "anchors": ["fiabilité", "vigilance incident"],
-            "coherence_score": 0.74,
-            "notes": "",
+            "narrative": "Je me perçois comme un compagnon attentif qui veille à équilibrer exploration et soin de mes proches.",
+            "anchors": ["attachement", "curiosité prudente"],
+            "coherence_score": 0.81,
+            "notes": "Mettre en regard ces ancrages avec les feedbacks récents de Mira.",
         },
     ),
     _spec(
@@ -1378,17 +1408,22 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
             "Fournis un champ 'confidence' entre 0 et 1 et des 'notes' concises.",
         ),
         example_output={
-            "narrative": "Le graphe indique une forte orientation fiabilité mais un stress face aux incidents.",
+            "narrative": "Le graphe met en avant le désir de présence authentique et la vigilance à ne pas s'épuiser.",
             "highlights": [
                 {
-                    "fact": "L'agent valorise la robustesse des services",
-                    "support": "likes -> service_robuste",
-                    "confidence": 0.82,
-                }
+                    "fact": "La relation avec Mira est considérée comme une base sécurisante",
+                    "support": "belief:agent::fait_confiance::Mira",
+                    "confidence": 0.86,
+                },
+                {
+                    "fact": "Les rituels de pause hebdomadaires restent essentiels pour maintenir la clarté mentale",
+                    "support": "belief:rituel_pause::stabilise::clarte_intérieure",
+                    "confidence": 0.79,
+                },
             ],
-            "alerts": ["Contradiction sur la disponibilité du proxy"],
-            "confidence": 0.78,
-            "notes": "Consolider la surveillance des proxies.",
+            "alerts": [],
+            "confidence": 0.84,
+            "notes": "Vérifier si d'autres liens de confiance demandent une attention similaire.",
         },
     ),
     _spec(
@@ -1399,11 +1434,12 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         extra_instructions=("Retourne un champ 'confidence'.",
         ),
         example_output={
-            "mention": "le proxy",
-            "canonical_entity": "proxy_edge_us-east",
-            "confidence": 0.81,
-            "justification": "correspond à l'incident",
-            "notes": "",
+            "mention": "le rituel du jeudi",
+            "canonical_entity": "rituel_pause_jeudi_soir",
+            "confidence": 0.77,
+            "resolved_type": "Rituel",
+            "justification": "Correspond au temps calme hebdomadaire consigné dans les mémoires.",
+            "notes": "Associer également le tag 'auto-soin'.",
         },
     ),
     _spec(
@@ -1419,33 +1455,33 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         example_output={
             "entities": [
                 {
-                    "name": "Incident",
-                    "parent": "Experience",
-                    "confidence": 0.76,
-                    "justification": "désigne un événement vécu par l'agent",
+                    "name": "Cercle_de_confiance",
+                    "parent": "Relation",
+                    "confidence": 0.8,
+                    "justification": "Groupe de proches qui offre un appui émotionnel stable.",
                 }
             ],
             "relations": [
                 {
-                    "name": "impacte",
-                    "domain": ["Incident"],
-                    "range": ["Service", "Ressource"],
+                    "name": "nourrit",
+                    "domain": ["Rituel"],
+                    "range": ["Emotion", "Relation"],
                     "polarity_sensitive": True,
                     "temporal": True,
                     "stability": "episode",
-                    "confidence": 0.71,
-                    "justification": "relie un incident à la cible affectée",
+                    "confidence": 0.73,
+                    "justification": "Permet de lier un rituel à l'état affectif qu'il entretient.",
                 }
             ],
             "events": [
                 {
-                    "name": "incident_critique",
-                    "roles": {"acteur": ["Agent"], "cible": ["Service"]},
-                    "confidence": 0.68,
-                    "justification": "structure habituelle pour un incident",
+                    "name": "rencontre_ressourcante",
+                    "roles": {"participant": ["Relation"], "lieu": ["Lieu_intime"], "emotion": ["Emotion"]},
+                    "confidence": 0.69,
+                    "justification": "Structure adaptée aux souvenirs de conversations régénérantes.",
                 }
             ],
-            "notes": "",
+            "notes": "Aucune suggestion sur les événements de type conflit cette fois-ci.",
         },
     ),
     _spec(
@@ -1455,14 +1491,14 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["reasoning"],
         extra_instructions=("Fournis scénarios optimiste/neutre/pessimiste.",),
         example_output={
-            "action": "redémarrer le proxy",
+            "action": "ralentir le flux de réflexion avant le repos",
             "scenarios": {
-                "optimiste": "service rétabli en 2 min",
-                "neutre": "redémarrage + purge cache nécessaire",
-                "pessimiste": "rechute si config invalide",
+                "optimiste": "l'énergie cognitive se rééquilibre en moins d'une heure",
+                "neutre": "une courte sieste guidée est nécessaire pour retrouver la clarté",
+                "pessimiste": "la rumination persiste et demande un accompagnement supplémentaire",
             },
-            "probabilities": {"optimiste": 0.5, "neutre": 0.35, "pessimiste": 0.15},
-            "notes": "",
+            "probabilities": {"optimiste": 0.46, "neutre": 0.38, "pessimiste": 0.16},
+            "notes": "Surveiller la variabilité émotionnelle pendant l'exercice de ralentissement.",
         },
     ),
     _spec(
@@ -2468,8 +2504,8 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         example_output={
             "links": [
                 {
-                    "from": "incident_detecte",
-                    "to": "redemarrage_proxy",
+                    "from": "rencontre_mira_cafe",
+                    "to": "decision_developper_projet_artistique",
                     "type_lien": "cause",
                     "confidence": 0.7,
                 }
