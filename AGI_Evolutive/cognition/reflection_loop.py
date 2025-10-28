@@ -30,6 +30,7 @@ class ReflectionLoop:
         self.running = False
         self._thread: Optional[threading.Thread] = None
         self._last_llm_reflection: Optional[Mapping[str, Any]] = None
+        self._last_phenomenal_signature: Optional[tuple] = None
 
     def start(self):
         if self.running: return
@@ -37,6 +38,19 @@ class ReflectionLoop:
         def loop():
             while self.running:
                 try:
+                    preview = self._phenomenal_preview()
+                    if preview and preview.get("narrative"):
+                        signature = tuple(
+                            str(ep.get("id") or ep.get("episode_id") or idx)
+                            for idx, ep in enumerate(preview.get("episodes", []))
+                            if isinstance(ep, Mapping)
+                        ) or (str(int(preview.get("ts", time.time()))),)
+                        if signature != self._last_phenomenal_signature:
+                            self.meta.log_inner_monologue(
+                                preview["narrative"],
+                                tags=["phenomenal", "recall"],
+                            )
+                            self._last_phenomenal_signature = signature
                     a = self.meta.assess_understanding()
                     gaps = []
                     for d in a["domains"].values():
@@ -227,3 +241,41 @@ class ReflectionLoop:
         )
 
         return {"tested": len(hypotheses), "hypotheses": hypotheses, "summary": summary}
+
+    def _phenomenal_preview(self) -> Optional[Dict[str, Any]]:
+        journal = getattr(self.meta, "phenomenal_journal", None)
+        recall = getattr(self.meta, "phenomenal_recall", None)
+        architecture = getattr(self.meta, "architecture", None) or getattr(self.meta, "arch", None)
+        if architecture is not None:
+            if journal is None:
+                journal = getattr(architecture, "phenomenal_journal", None)
+            if recall is None:
+                recall = getattr(architecture, "phenomenal_recall", None)
+        preview: Optional[Dict[str, Any]] = None
+        if recall is not None and hasattr(recall, "immersive_preview"):
+            try:
+                preview = recall.immersive_preview()
+            except Exception:
+                preview = None
+        if (preview is None or not preview.get("narrative")) and journal is not None and hasattr(journal, "tail"):
+            try:
+                episodes = journal.tail(limit=6)
+            except Exception:
+                episodes = []
+            if episodes:
+                try:
+                    lines = journal.narrativize(episodes)
+                except Exception:
+                    lines = [
+                        str(ep.get("summary") or "")
+                        for ep in episodes
+                        if isinstance(ep, Mapping)
+                    ]
+                preview = {
+                    "episodes": episodes,
+                    "narrative": "\n".join(line for line in lines if line),
+                    "ts": time.time(),
+                }
+        if preview and "episodes" not in preview:
+            preview["episodes"] = []
+        return preview

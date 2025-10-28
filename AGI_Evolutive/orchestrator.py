@@ -64,6 +64,11 @@ from AGI_Evolutive.memory.semantic_bridge import SemanticMemoryBridge
 from AGI_Evolutive.light_scheduler import LightScheduler
 from AGI_Evolutive.runtime.job_manager import JobManager
 from AGI_Evolutive.runtime.phenomenal_kernel import ModeManager, PhenomenalKernel
+from AGI_Evolutive.phenomenology import (
+    PhenomenalJournal,
+    PhenomenalQuestioner,
+    PhenomenalRecall,
+)
 from AGI_Evolutive.runtime.system_monitor import SystemMonitor
 from AGI_Evolutive.utils.llm_service import (
     LLMIntegrationError,
@@ -1104,6 +1109,13 @@ class Orchestrator:
 
         self.job_manager = job_manager
         self._phenomenal_kernel = PhenomenalKernel()
+        self.phenomenal_journal = getattr(self, "phenomenal_journal", None) or PhenomenalJournal()
+        self.phenomenal_recall = getattr(self, "phenomenal_recall", None) or PhenomenalRecall(
+            self.phenomenal_journal
+        )
+        self.phenomenal_questioner = getattr(self, "phenomenal_questioner", None) or PhenomenalQuestioner(
+            self.phenomenal_journal
+        )
         self._mode_manager = ModeManager(
             target_work_ratio=0.8,
             window=900.0,
@@ -1124,6 +1136,26 @@ class Orchestrator:
         self._hedonic_reward_min_gain = 0.4
         try:
             setattr(self.arch, "phenomenal_kernel_state", self.phenomenal_kernel_state)
+        except Exception:
+            pass
+        try:
+            setattr(self.arch, "phenomenal_journal", self.phenomenal_journal)
+            setattr(self.arch, "phenomenal_recall", self.phenomenal_recall)
+            arch_memory = getattr(self.arch, "memory", None)
+            if arch_memory is not None:
+                if hasattr(arch_memory, "set_phenomenal_sources"):
+                    arch_memory.set_phenomenal_sources(
+                        journal=self.phenomenal_journal,
+                        recall=self.phenomenal_recall,
+                    )
+                else:
+                    setattr(arch_memory, "phenomenal_journal", self.phenomenal_journal)
+                    setattr(arch_memory, "phenomenal_recall", self.phenomenal_recall)
+        except Exception:
+            pass
+        try:
+            setattr(self._meta, "phenomenal_journal", self.phenomenal_journal)
+            setattr(self._meta, "phenomenal_recall", self.phenomenal_recall)
         except Exception:
             pass
         self._job_base_budgets = {
@@ -1197,6 +1229,8 @@ class Orchestrator:
                 lock=self._semantic_lock,
             ),
         )
+        setattr(self.memory, "phenomenal_journal", self.phenomenal_journal)
+        setattr(self.memory, "phenomenal_recall", self.phenomenal_recall)
 
         self.thinking_monitor = getattr(self, "thinking_monitor", None) or ThinkingMonitor()
         self.understanding_agg = getattr(self, "understanding_agg", None) or UnderstandingAggregator()
@@ -2253,12 +2287,31 @@ class Orchestrator:
         if self._last_system_snapshot:
             self.phenomenal_kernel_state["system_snapshot"] = dict(self._last_system_snapshot)
         setattr(self.arch, "phenomenal_kernel_state", self.phenomenal_kernel_state)
+        previous_mode = getattr(self, "current_mode", "travail")
         mode_info = self._mode_manager.update(self.phenomenal_kernel_state, urgent=urgent)
-        self.current_mode = mode_info.get("mode", self.current_mode)
+        self.current_mode = mode_info.get("mode", previous_mode)
         self.phenomenal_kernel_state["mode"] = self.current_mode
         self.phenomenal_kernel_state["flanerie_ratio"] = mode_info.get("flanerie_ratio")
         self.phenomenal_kernel_state["flanerie_budget_remaining"] = mode_info.get("flanerie_budget_remaining")
         self.phenomenal_kernel_state["urgent"] = urgent
+        if getattr(self, "phenomenal_journal", None) is not None:
+            try:
+                justification = None
+                interpretation = self.phenomenal_kernel_state.get("llm_interpretation")
+                if isinstance(interpretation, dict):
+                    justification = interpretation.get("justification")
+                self.phenomenal_journal.record_mode_transition(
+                    previous_mode=previous_mode,
+                    new_mode=self.current_mode,
+                    kernel_state={
+                        key: value
+                        for key, value in self.phenomenal_kernel_state.items()
+                        if isinstance(value, (int, float, str, bool, list, dict))
+                    },
+                    reason=justification,
+                )
+            except Exception:
+                pass
         slowdown = float(self.phenomenal_kernel_state.get("global_slowdown", 0.0) or 0.0)
         try:
             setattr(self.arch, "global_slowdown", slowdown)
@@ -2303,7 +2356,31 @@ class Orchestrator:
             contexts.append(ctx)
 
         self.consolidate()
+        try:
+            self.phenomenal_recall.prime_for_digest(
+                self.memory.store,
+                kernel_state=self.phenomenal_kernel_state,
+                homeostasis=getattr(self._homeostasis, "state", {}),
+            )
+        except Exception:
+            pass
         r_intr, r_extr = self.emotion_homeostasis_cycle()
+        try:
+            self.phenomenal_journal.audit_against(
+                "homeostasis",
+                {
+                    "intrinsic_reward": float(r_intr),
+                    "extrinsic_reward": float(r_extr),
+                    "hedonic_reward": float(self._homeostasis.state.get("hedonic_reward", 0.0)),
+                },
+                tolerance=0.2,
+            )
+        except Exception:
+            pass
+        try:
+            self.phenomenal_questioner.maybe_question(self.phenomenal_kernel_state)
+        except Exception:
+            pass
         assessment, _ = self.meta_cycle()
         self.planning_cycle()
         self.action_cycle()
@@ -3010,6 +3087,33 @@ class Orchestrator:
                             )
                     except Exception:
                         pass
+                    try:
+                        decision_action = (ctx.get("decision", {}) or {}).get("action", {})
+                        if isinstance(decision_action, dict):
+                            action_label = (
+                                decision_action.get("desc")
+                                or decision_action.get("text")
+                                or decision_action.get("name")
+                                or decision_action.get("type")
+                                or "une action"
+                            )
+                        else:
+                            action_label = "une action"
+                        summary = f"J'exécute {action_label}" if action_label else "J'exécute une action"
+                        expected_score = (ctx.get("expected") or {}).get("score")
+                        try:
+                            expected_value = float(expected_score) if expected_score is not None else None
+                        except Exception:
+                            expected_value = None
+                        self._phenomenal_record_action(
+                            stage="ACT",
+                            ctx=ctx,
+                            summary=summary,
+                            expected=expected_value,
+                            obtained=float(obtained_score),
+                        )
+                    except Exception:
+                        pass
                 elif stg is Stage.FEEDBACK:
                     exp = float(ctx["expected"].get("score", 1.0))
                     obt = float((ctx.get("obtained") or {"score": 0.0}).get("score", 0.0))
@@ -3081,6 +3185,19 @@ class Orchestrator:
                     # Renforcement de l'habitude pour (action_type :: contexte)
                     try:
                         EvolutionManager.shared().reinforce(ctx)
+                    except Exception:
+                        pass
+                    try:
+                        feedback_summary = (
+                            "Le résultat confirme mon action" if success else "Le résultat contredit mon action"
+                        )
+                        self._phenomenal_record_action(
+                            stage="FEEDBACK",
+                            ctx=ctx,
+                            summary=f"{feedback_summary} (erreur={err:.2f}, récompense={reward_signal:.2f})",
+                            expected=exp,
+                            obtained=obt,
+                        )
                     except Exception:
                         pass
                 elif stg is Stage.LEARN:
@@ -3195,6 +3312,11 @@ class Orchestrator:
 
                     scratch = ctx.setdefault("scratch", {})
                     scratch["clarification_penalty"] = clarification_penalty
+                    scratch["calibration_gap"] = calibration_gap
+                    scratch["memory_consistency"] = memory_consistency
+                    scratch["transfer_success"] = transfer_success
+                    scratch["explanatory_adequacy"] = explanatory_adequacy
+                    scratch["social_appraisal"] = social_appraisal
                     scratch.setdefault("understanding", {})
                     scratch["understanding"].update(
                         {
@@ -3457,6 +3579,37 @@ class Orchestrator:
                         except Exception:
                             pass
 
+                    try:
+                        understanding_stats = ctx.get("scratch", {}).get("understanding", {})
+                        u_topic = float(understanding_stats.get("U_topic", getattr(U, "U_topic", 0.5)))
+                        u_global = float(understanding_stats.get("U_global", getattr(U, "U_global", 0.5)))
+                        summary = (
+                            f"Je me réévalue : compréhension globale={u_global:.2f},"
+                            f" précision locale={u_topic:.2f}, écart de calibration={calibration_gap:.2f}"
+                        )
+                        self._phenomenal_record_action(
+                            stage="UPDATE",
+                            ctx=ctx,
+                            summary=summary,
+                            expected=None,
+                            obtained=None,
+                        )
+                        if getattr(self, "phenomenal_journal", None) is not None:
+                            try:
+                                self.phenomenal_journal.audit_against(
+                                    "understanding",
+                                    {
+                                        "U_topic": u_topic,
+                                        "U_global": u_global,
+                                        "calibration_gap": float(calibration_gap),
+                                    },
+                                    tolerance=0.1,
+                                )
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
             finally:
                 mem_after = _get_process_memory_kb()
                 duration_ms = 1000.0 * (time.time() - stage_start)
@@ -3484,3 +3637,231 @@ class Orchestrator:
             except Exception:
                 pass
         return ctx
+
+    def _phenomenal_identity_snapshot(self) -> Tuple[List[str], List[str]]:
+        values: List[str] = []
+        principles: List[str] = []
+        try:
+            persona = getattr(self.self_model, "persona", {})
+            if isinstance(persona, dict):
+                raw_values = persona.get("values")
+                if isinstance(raw_values, list):
+                    values.extend(str(val) for val in raw_values if isinstance(val, str))
+            identity = getattr(self.self_model, "identity", {})
+            if isinstance(identity, dict):
+                declared = identity.get("values")
+                if isinstance(declared, list):
+                    values.extend(str(val) for val in declared if isinstance(val, str))
+                principle_items = identity.get("principles")
+                if isinstance(principle_items, list):
+                    principles.extend(str(item) for item in principle_items if isinstance(item, str))
+                commitments = identity.get("commitments", {})
+                if isinstance(commitments, dict):
+                    by_key = commitments.get("by_key")
+                    if isinstance(by_key, dict):
+                        for key, info in by_key.items():
+                            if isinstance(info, dict) and info.get("active"):
+                                principles.append(str(key))
+        except Exception:
+            pass
+        if values:
+            values = sorted({val.strip() for val in values if val})
+        if principles:
+            principles = sorted({val.strip() for val in principles if val})
+        return values, principles
+
+    def _phenomenal_homeostasis_snapshot(self) -> Dict[str, Any]:
+        snapshot: Dict[str, Any] = {}
+        state = getattr(self._homeostasis, "state", {})
+        if isinstance(state, dict):
+            for key in ("intrinsic_reward", "extrinsic_reward", "hedonic_reward"):
+                value = state.get(key)
+                if isinstance(value, (int, float)):
+                    snapshot[key] = float(value)
+            drives = state.get("drives")
+            if isinstance(drives, Mapping):
+                ranked = sorted(
+                    (
+                        (str(name), float(val))
+                        for name, val in drives.items()
+                        if isinstance(val, (int, float))
+                    ),
+                    key=lambda item: item[1],
+                    reverse=True,
+                )
+                if ranked:
+                    snapshot["drives"] = {name: value for name, value in ranked[:5]}
+        return snapshot
+
+    def _phenomenal_emotion_snapshot(self) -> Dict[str, Any]:
+        emotions: Dict[str, Any] = {}
+        try:
+            emo_state = self.emotions.read()
+        except Exception:
+            emo_state = None
+        if emo_state is not None:
+            for key in ("valence", "arousal", "dominance"):
+                try:
+                    emotions[key] = float(getattr(emo_state, key))
+                except Exception:
+                    continue
+            label = getattr(emo_state, "label", None)
+            if not label:
+                label = getattr(emo_state, "state", None)
+            if label:
+                emotions["label"] = str(label)
+        kernel_state = getattr(self, "phenomenal_kernel_state", {})
+        if isinstance(kernel_state, dict):
+            interpretation = kernel_state.get("llm_interpretation")
+            if isinstance(interpretation, dict):
+                state_name = interpretation.get("current_state")
+                if state_name:
+                    emotions.setdefault("narrative", str(state_name))
+        return emotions
+
+    def _phenomenal_sensation_snapshot(self) -> Dict[str, Any]:
+        sensations: Dict[str, Any] = {}
+        kernel_state = getattr(self, "phenomenal_kernel_state", {})
+        if isinstance(kernel_state, dict):
+            for key in (
+                "energy",
+                "arousal",
+                "resonance",
+                "surprise",
+                "fatigue",
+                "hedonic_reward",
+                "global_slowdown",
+            ):
+                value = kernel_state.get(key)
+                if isinstance(value, (int, float)):
+                    sensations[key] = float(value)
+        return sensations
+
+    def _phenomenal_metric_snapshot(self, ctx: Mapping[str, Any]) -> Dict[str, float]:
+        metrics: Dict[str, float] = {}
+        if not isinstance(ctx, Mapping):
+            return metrics
+        scratch = ctx.get("scratch")
+        if isinstance(scratch, Mapping):
+            for key in (
+                "priority",
+                "prediction_error",
+                "sj_reward",
+                "sj_success",
+                "memory_consistency",
+                "transfer_success",
+                "explanatory_adequacy",
+                "social_appraisal",
+                "clarification_penalty",
+                "calibration_gap",
+            ):
+                value = scratch.get(key)
+                if isinstance(value, (int, float)):
+                    metrics[key] = float(value)
+            understanding = scratch.get("understanding")
+            if isinstance(understanding, Mapping):
+                for key in ("U_topic", "U_global"):
+                    value = understanding.get(key)
+                    if isinstance(value, (int, float)):
+                        metrics[key] = float(value)
+        expected = ctx.get("expected")
+        if isinstance(expected, Mapping):
+            uncertainty = expected.get("uncertainty")
+            if isinstance(uncertainty, (int, float)):
+                metrics["uncertainty"] = float(uncertainty)
+        return metrics
+
+    def _phenomenal_action_context(
+        self,
+        ctx: Mapping[str, Any],
+        *,
+        metrics: Optional[Mapping[str, float]] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        trigger = getattr(self, "_current_trigger", None)
+        if trigger is not None:
+            payload["trigger_type"] = getattr(getattr(trigger, "type", None), "name", None)
+            meta = getattr(trigger, "meta", None)
+            if isinstance(meta, Mapping):
+                payload["trigger_meta"] = {
+                    key: meta[key]
+                    for key in ("importance", "immediacy", "reversibility", "source")
+                    if key in meta
+                }
+        if isinstance(ctx, Mapping):
+            scratch = ctx.get("scratch")
+            if isinstance(scratch, Mapping):
+                priority = scratch.get("priority")
+                if isinstance(priority, (int, float)):
+                    payload["priority"] = float(priority)
+                vetoes = scratch.get("policy_vetoes")
+                if isinstance(vetoes, (list, tuple)):
+                    payload["policy_vetoes"] = [str(v) for v in vetoes[:4]]
+                habit_payload = scratch.get("habit_payload")
+                if isinstance(habit_payload, Mapping):
+                    payload["habit"] = {
+                        "name": habit_payload.get("name")
+                        or (habit_payload.get("habit") or {}).get("name"),
+                        "confidence": habit_payload.get("confidence"),
+                    }
+            decision = ctx.get("decision")
+            if isinstance(decision, Mapping):
+                action = decision.get("action")
+                if isinstance(action, Mapping):
+                    payload["action"] = {
+                        "type": action.get("type"),
+                        "desc": action.get("desc") or action.get("text"),
+                    }
+                payload["reason"] = decision.get("reason") or decision.get("rationale")
+            gaps = ctx.get("gaps")
+            if isinstance(gaps, list):
+                payload["gaps"] = [str(g) for g in gaps[:5]]
+        if metrics:
+            payload["metrics"] = {key: float(value) for key, value in metrics.items()}
+        return {k: v for k, v in payload.items() if v is not None}
+
+    def _phenomenal_record_action(
+        self,
+        *,
+        stage: str,
+        ctx: Mapping[str, Any],
+        summary: str,
+        expected: Optional[float],
+        obtained: Optional[float],
+    ) -> None:
+        journal = getattr(self, "phenomenal_journal", None)
+        if journal is None:
+            return
+        try:
+            mode_value = ctx.get("mode") if isinstance(ctx, Mapping) else None
+            if isinstance(mode_value, ActMode):
+                mode = mode_value.name.lower()
+            else:
+                mode = str(mode_value) if mode_value else None
+            topic = ctx.get("topic") if isinstance(ctx, Mapping) else None
+            values, principles = self._phenomenal_identity_snapshot()
+            homeostasis = self._phenomenal_homeostasis_snapshot()
+            emotions = self._phenomenal_emotion_snapshot()
+            sensations = self._phenomenal_sensation_snapshot()
+            metrics = self._phenomenal_metric_snapshot(ctx)
+            context_payload = self._phenomenal_action_context(ctx, metrics=metrics)
+            entry = journal.record_action(
+                stage=stage,
+                mode=mode,
+                topic=str(topic) if topic else None,
+                summary=summary,
+                expected=expected,
+                obtained=obtained,
+                values=values,
+                principles=principles,
+                homeostasis=homeostasis,
+                emotions=emotions,
+                sensations=sensations,
+                context=context_payload,
+            )
+            try:
+                ctx.setdefault("scratch", {})["phenomenal_episode"] = entry
+            except Exception:
+                pass
+        except Exception:
+            pass
