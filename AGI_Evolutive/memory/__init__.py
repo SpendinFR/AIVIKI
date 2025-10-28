@@ -310,7 +310,6 @@ class MemorySystem:
         )
         self._refresh_long_horizon_bindings()
 
-        
         # === MÉMOIRE SENSORIELLE ===
         self.sensory_memory = {
             "iconic": {
@@ -447,6 +446,20 @@ class MemorySystem:
         self._initialize_innate_memories()
 
         print("💾 Système de mémoire initialisé")
+
+    def set_phenomenal_sources(
+        self,
+        *,
+        journal: Optional["PhenomenalJournal"] = None,
+        recall: Optional["PhenomenalRecall"] = None,
+    ) -> "MemorySystem":
+        """Bind or refresh phenomenal journal integrations at runtime."""
+
+        if journal is not None:
+            self.phenomenal_journal = journal
+        if recall is not None:
+            self.phenomenal_recall = recall
+        return self
 
     def add(self, item: Dict[str, Any]) -> str:
         """Ajoute un item dans le store sémantique externe et déclenche la consolidation."""
