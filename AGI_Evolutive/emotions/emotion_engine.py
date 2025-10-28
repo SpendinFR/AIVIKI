@@ -31,7 +31,7 @@ import math
 import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass, field, asdict
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List, Tuple, TYPE_CHECKING
 
 from AGI_Evolutive.utils.llm_service import (
     LLMIntegrationError,
@@ -44,6 +44,10 @@ from AGI_Evolutive.utils.llm_service import (
 
 def clip(x: float, lo: float, hi: float) -> float:
     return lo if x < lo else hi if x > hi else x
+
+
+if TYPE_CHECKING:  # pragma: no cover - typing helpers only
+    from AGI_Evolutive.phenomenology import PhenomenalJournal
 
 
 LOGGER = logging.getLogger(__name__)
@@ -633,6 +637,7 @@ class EmotionEngine:
             "goals": None,
             "language": None,
             "evolution": None,
+            "phenomenal_journal": None,
         }
 
         # Épisodes récents
@@ -656,7 +661,51 @@ class EmotionEngine:
             "language": language,
             "evolution": evolution,
         })
+        try:
+            if arch is not None and getattr(arch, "phenomenal_journal", None) is not None:
+                self.bound["phenomenal_journal"] = getattr(arch, "phenomenal_journal")
+        except Exception:
+            pass
         return self
+
+    def _phenomenal_journal(self) -> Optional["PhenomenalJournal"]:
+        journal = self.bound.get("phenomenal_journal")
+        if journal is None:
+            arch = self.bound.get("arch")
+            if arch is not None:
+                journal = getattr(arch, "phenomenal_journal", None)
+                if journal is not None:
+                    self.bound["phenomenal_journal"] = journal
+        return journal
+
+    def _emit_phenomenal_experience(self, experience: Any, context: Optional[Dict[str, Any]]) -> None:
+        journal = self._phenomenal_journal()
+        if journal is None:
+            return
+        try:
+            arch = self.bound.get("arch")
+            values: List[str] = []
+            principles: List[str] = []
+            if arch is not None and hasattr(arch, "self_model"):
+                self_model = getattr(arch, "self_model", None)
+                persona = getattr(self_model, "persona", {}) if self_model else {}
+                if isinstance(persona, dict):
+                    raw_values = persona.get("values")
+                    if isinstance(raw_values, list):
+                        values.extend(str(val) for val in raw_values if isinstance(val, str))
+                identity = getattr(self_model, "identity", {}) if self_model else {}
+                if isinstance(identity, dict):
+                    declared = identity.get("principles")
+                    if isinstance(declared, list):
+                        principles.extend(str(val) for val in declared if isinstance(val, str))
+            journal.record_emotion(
+                experience,
+                context=context or {},
+                values=values,
+                principles=principles,
+            )
+        except Exception:
+            pass
 
     # ---------- API externe ----------
     def register_event(self, kind: str, intensity: float = 0.4,
@@ -1038,6 +1087,7 @@ class EmotionEngine:
         self._recent_episodes.append(ep)
         if len(self._recent_episodes) > self.max_recent_episodes:
             self._recent_episodes = self._recent_episodes[-self.max_recent_episodes:]
+        self._emit_phenomenal_experience(ep, {"source": source, **meta})
         try:
             with open(self.path_log, "a", encoding="utf-8") as f:
                 f.write(json.dumps(json_sanitize(asdict(ep)), ensure_ascii=False) + "\n")

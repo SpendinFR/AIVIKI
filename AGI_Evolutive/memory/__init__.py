@@ -7,7 +7,7 @@ Intègre mémoire de travail, épisodique, sémantique, procédurale et consolid
 import logging
 import math
 import random
-from typing import Any, Iterable
+from typing import Any, Iterable, TYPE_CHECKING
 try:
     import numpy as np  # type: ignore
 except Exception:  # pragma: no cover - lightweight fallback when numpy is absent
@@ -60,7 +60,7 @@ except Exception:  # pragma: no cover - lightweight fallback when numpy is absen
 import time
 from collections import deque
 from datetime import datetime, timedelta
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 import heapq
@@ -100,6 +100,9 @@ from .semantic_memory_manager import (
 from .semantic_manager import SemanticMemoryManager as _ConceptMemoryManager
 from .alltime import LongTermMemoryHub
 from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+
+if TYPE_CHECKING:  # pragma: no cover - hints only
+    from AGI_Evolutive.phenomenology import PhenomenalJournal, PhenomenalRecall
 
 LOGGER = logging.getLogger(__name__)
 
@@ -210,6 +213,8 @@ class MemorySystem:
 
         architecture = self.cognitive_architecture
         self._preferences = getattr(architecture, "preferences", None) if architecture else None
+        self.phenomenal_journal = getattr(architecture, "phenomenal_journal", None) if architecture else None
+        self.phenomenal_recall = getattr(architecture, "phenomenal_recall", None) if architecture else None
 
         self._salience_scorer = None
         if ENABLE_SALIENCE_SCORER and SalienceScorer:
@@ -291,7 +296,6 @@ class MemorySystem:
         )
         self._refresh_long_horizon_bindings()
 
-        
         # === MÉMOIRE SENSORIELLE ===
         self.sensory_memory = {
             "iconic": {
@@ -428,6 +432,20 @@ class MemorySystem:
         self._initialize_innate_memories()
 
         print("💾 Système de mémoire initialisé")
+
+    def set_phenomenal_sources(
+        self,
+        *,
+        journal: Optional["PhenomenalJournal"] = None,
+        recall: Optional["PhenomenalRecall"] = None,
+    ) -> "MemorySystem":
+        """Bind or refresh phenomenal journal integrations at runtime."""
+
+        if journal is not None:
+            self.phenomenal_journal = journal
+        if recall is not None:
+            self.phenomenal_recall = recall
+        return self
 
     def add(self, item: Dict[str, Any]) -> str:
         """Ajoute un item dans le store sémantique externe et déclenche la consolidation."""
@@ -1243,7 +1261,52 @@ class MemorySystem:
 
         if n <= 0:
             return []
-        return list(self._recent_memories)[-n:]
+        combined: List[Dict[str, Any]] = list(self._recent_memories)[-n:]
+        extras = self._phenomenal_recent_entries(n)
+        if extras:
+            combined.extend(extras)
+            combined.sort(key=lambda item: float(item.get("ts") or item.get("timestamp") or 0.0))
+        if len(combined) > n:
+            combined = combined[-n:]
+        return combined
+
+    def _phenomenal_recent_entries(self, limit: int) -> List[Dict[str, Any]]:
+        journal = getattr(self, "phenomenal_journal", None)
+        if journal is None or not hasattr(journal, "tail") or limit <= 0:
+            return []
+        try:
+            episodes = journal.tail(limit=limit)
+        except Exception:
+            return []
+        entries: List[Dict[str, Any]] = []
+        seen_ids = set()
+        for ep in episodes:
+            if not isinstance(ep, Mapping):
+                continue
+            summary = str(ep.get("summary") or "").strip()
+            if not summary:
+                continue
+            episode_id = ep.get("id") or ep.get("episode_id")
+            if episode_id and episode_id in seen_ids:
+                continue
+            if episode_id:
+                seen_ids.add(episode_id)
+            entry = {
+                "id": episode_id,
+                "kind": ep.get("kind", "phenomenal_episode"),
+                "text": summary,
+                "ts": float(ep.get("ts", 0.0)),
+                "source": "phenomenal_journal",
+                "episode": ep,
+            }
+            if ep.get("mode"):
+                entry["mode"] = ep.get("mode")
+            if isinstance(ep.get("values"), list) and ep.get("values"):
+                entry["values"] = list(ep.get("values"))
+            if isinstance(ep.get("emotions"), Mapping):
+                entry["emotions"] = dict(ep.get("emotions"))
+            entries.append(entry)
+        return entries
     
     def _generate_memory_id(self, content: Any, context: Dict, timestamp: float) -> str:
         """Génère un ID unique pour une mémoire"""
@@ -1740,12 +1803,129 @@ class MemorySystem:
             if memory_id in memories:
                 memories.remove(memory_id)
     
+    def _phenomenal_autobiographical_stream(self, limit: int = 120) -> Optional[Dict[str, Any]]:
+        journal = getattr(self, "phenomenal_journal", None)
+        if journal is None or not hasattr(journal, "tail"):
+            return None
+        try:
+            episodes = journal.tail(limit=limit)
+        except Exception:
+            return None
+        if not episodes:
+            return None
+
+        selected: List[Dict[str, Any]] = []
+        values_set = set()
+        principles_set = set()
+        valence_series: List[float] = []
+        arousal_series: List[float] = []
+        seen_ids = set()
+
+        for raw in episodes:
+            if not isinstance(raw, Mapping):
+                continue
+            summary = str(raw.get("summary") or "").strip()
+            if not summary:
+                continue
+            kind = str(raw.get("kind") or "")
+            if kind not in {"action", "emotion", "mode", "reflection", "doubt", "audit"}:
+                continue
+            episode_id = str(raw.get("id") or raw.get("episode_id") or "")
+            if episode_id and episode_id in seen_ids:
+                continue
+            if episode_id:
+                seen_ids.add(episode_id)
+            extras: List[str] = []
+            vals = raw.get("values")
+            if isinstance(vals, (list, tuple)):
+                kept = [str(val) for val in vals if isinstance(val, str)]
+                if kept:
+                    values_set.update(kept)
+                    extras.append("valeurs=" + ", ".join(kept[:3]))
+            principles = raw.get("principles")
+            if isinstance(principles, (list, tuple)):
+                kept = [str(val) for val in principles if isinstance(val, str)]
+                if kept:
+                    principles_set.update(kept)
+                    extras.append("principes=" + ", ".join(kept[:3]))
+            emotions = raw.get("emotions") if isinstance(raw.get("emotions"), Mapping) else raw.get("emotions")
+            if isinstance(emotions, Mapping):
+                primary = emotions.get("primary") or emotions.get("label")
+                valence = emotions.get("valence")
+                arousal = emotions.get("arousal")
+                if isinstance(primary, str) and primary:
+                    extras.append(f"émotion={primary}")
+                if isinstance(valence, (int, float)):
+                    valence_series.append(float(valence))
+                if isinstance(arousal, (int, float)):
+                    arousal_series.append(float(arousal))
+            context = raw.get("context") if isinstance(raw.get("context"), Mapping) else {}
+            metrics = context.get("metrics") if isinstance(context, Mapping) else {}
+            if isinstance(metrics, Mapping):
+                highlight = []
+                for key in ("priority", "uncertainty", "sj_reward", "calibration_gap"):
+                    value = metrics.get(key)
+                    if isinstance(value, (int, float)):
+                        highlight.append(f"{key}={value:.2f}")
+                if highlight:
+                    extras.append("; ".join(highlight))
+            body = raw.get("body") if isinstance(raw.get("body"), Mapping) else {}
+            if isinstance(body, Mapping):
+                homeo = body.get("homeostasis")
+                if isinstance(homeo, Mapping) and homeo:
+                    top_drive = next(iter(homeo.items()))
+                    try:
+                        extras.append(f"drive {top_drive[0]}={float(top_drive[1]):.2f}")
+                    except Exception:
+                        pass
+            line = summary
+            if extras:
+                line = f"{summary} ({' | '.join(extras)})"
+            selected.append({
+                "ts": float(raw.get("ts", 0.0)),
+                "text": line,
+            })
+
+        if not selected:
+            return None
+        selected.sort(key=lambda item: item["ts"])
+        lines = [item["text"] for item in selected]
+        timestamps = [item["ts"] for item in selected]
+        if len(timestamps) > 1:
+            gaps = [max(0.0, min(1.0, (b - a) / 3_600.0)) for a, b in zip(timestamps, timestamps[1:])]
+            coherence = 1.0 - (sum(gaps) / len(gaps))
+        else:
+            coherence = 1.0
+        coherence = max(0.0, min(1.0, coherence))
+
+        result: Dict[str, Any] = {
+            "narrative": "\n".join(lines),
+            "coherence": coherence,
+            "episodes": len(lines),
+            "source": "phenomenal_journal",
+        }
+        if values_set:
+            result["values"] = sorted(values_set)
+        if principles_set:
+            result["principles"] = sorted(principles_set)
+        if valence_series or arousal_series:
+            span: Dict[str, Tuple[float, float]] = {}
+            if valence_series:
+                span["valence"] = (min(valence_series), max(valence_series))
+            if arousal_series:
+                span["arousal"] = (min(arousal_series), max(arousal_series))
+            result["emotion_span"] = span
+        return result
+
     def form_autobiographical_narrative(self) -> Dict[str, Any]:
+        phenomenal_story = self._phenomenal_autobiographical_stream()
+        if phenomenal_story is not None:
+            return phenomenal_story
         """
         Forme un récit autobiographique à partir des mémoires épisodiques
         """
         episodic_memories = list(self.long_term_memory[MemoryType.EPISODIC].values())
-        
+
         if not episodic_memories:
             return {"narrative": "Aucune expérience mémorable encore.", "coherence": 0.0}
         
