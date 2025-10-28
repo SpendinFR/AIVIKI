@@ -2481,10 +2481,10 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         AVAILABLE_MODELS["fast"],
         extra_instructions=("Retourne pipelines principaux et secondaires.",),
         example_output={
-            "trigger": "EMOTION",
-            "pipelines": ["auto_regulation", "integration_memorielle"],
-            "secondary": ["dialogue_interne"],
-            "notes": "Activation orientée vers l'assimilation de l'expérience plutôt que la réaction défensive.",
+            "trigger": "SELF_JUDGMENT",
+            "pipelines": ["SELF_JUDGMENT", "INTROSPECTION"],
+            "secondary": ["MEMORY_ASSOC"],
+            "notes": "Orientation vers une boucle réflexive qui relie l'évaluation personnelle à l'intégration des expériences clés.",
         },
     ),
     _spec(
