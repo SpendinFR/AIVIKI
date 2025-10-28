@@ -8,7 +8,7 @@ import random
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 try:  # pragma: no cover - optional dependency
-from AGI_Evolutive.cognition.meta_cognition import OnlineLinear
+    from AGI_Evolutive.cognition.meta_cognition import OnlineLinear
 except Exception:  # pragma: no cover - graceful fallback
     OnlineLinear = None  # type: ignore[assignment]
 
