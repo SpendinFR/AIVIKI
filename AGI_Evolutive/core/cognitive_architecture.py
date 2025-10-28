@@ -61,7 +61,7 @@ from AGI_Evolutive.core.persistence import PersistenceManager
 from AGI_Evolutive.core.self_model import SelfModel
 from AGI_Evolutive.core.config import cfg
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
-from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+from AGI_Evolutive.utils.llm_service import is_user_focus_active, try_call_llm_dict
 
 
 logger = logging.getLogger(__name__)
@@ -127,6 +127,8 @@ class CognitiveArchitecture:
         self.reflective_mode = True
         self.last_output_text = "OK"
         self.last_user_id = "default"
+        self._background_pause_until: float = 0.0
+        self._background_pause_source: Optional[str] = None
         self._memory_request_goal_id: Optional[str] = None
         self.rag_adaptive: Optional[RAGAdaptiveController] = None
         self._rag_last_context: Optional[Dict[str, Any]] = None
@@ -2438,6 +2440,9 @@ class CognitiveArchitecture:
             pass
 
     def _tick_background_systems(self) -> None:
+        if is_user_focus_active() or self.background_tasks_paused():
+            return
+
         try:
             if getattr(self, "jobs", None):
                 self.jobs.drain_to_memory(self.memory)
@@ -2496,6 +2501,28 @@ class CognitiveArchitecture:
                 )
         except Exception:
             pass
+
+    def pause_background(self, seconds: float, *, source: Optional[str] = None) -> None:
+        duration = max(0.0, float(seconds or 0.0))
+        if duration <= 0.0:
+            return
+        until = time.time() + duration
+        if until > self._background_pause_until:
+            self._background_pause_until = until
+            self._background_pause_source = source or "unspecified"
+
+    def background_tasks_paused(self) -> bool:
+        if self._background_pause_until <= 0.0:
+            return False
+        return time.time() < self._background_pause_until
+
+    def background_pause_remaining(self) -> float:
+        if not self.background_tasks_paused():
+            return 0.0
+        return max(0.0, self._background_pause_until - time.time())
+
+    def background_pause_until(self) -> float:
+        return self._background_pause_until
 
     def _record_skill(
         self,

@@ -1,10 +1,11 @@
 """Service layer to orchestrate repository-wide LLM integrations."""
 from __future__ import annotations
 
+import contextvars
 import os
 import threading
 import time
-from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Mapping, MutableMapping, Optional, Sequence
 
@@ -12,6 +13,92 @@ from itertools import islice
 
 from .llm_client import LLMCallError, LLMResult, OllamaLLMClient, OllamaModelConfig
 from .llm_specs import LLMIntegrationSpec, get_spec
+from AGI_Evolutive.core.config import cfg
+
+
+class _PriorityToken:
+    """Small RAII helper used by the priority controller."""
+
+    __slots__ = ("_controller", "_is_user", "_released")
+
+    def __init__(self, controller: "LLMPriorityController", is_user: bool) -> None:
+        self._controller = controller
+        self._is_user = is_user
+        self._released = False
+
+    def release(self) -> None:
+        if not self._released:
+            self._controller._release(self._is_user)
+            self._released = True
+
+    def __enter__(self) -> "_PriorityToken":  # pragma: no cover - trivial
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:  # pragma: no cover - trivial
+        self.release()
+
+
+class LLMPriorityController:
+    """Serialises background calls while a user-focused interaction is active."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cond = threading.Condition(self._lock)
+        self._active_user_calls = 0
+
+    def acquire(self, *, is_user: bool, timeout: float | None = None) -> _PriorityToken:
+        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+        with self._cond:
+            if is_user:
+                self._active_user_calls += 1
+                return _PriorityToken(self, True)
+
+            while self._active_user_calls > 0:
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0.0:
+                    raise TimeoutError("LLM busy with user-focused interaction")
+                self._cond.wait(remaining)
+
+            return _PriorityToken(self, False)
+
+    def _release(self, is_user: bool) -> None:
+        with self._cond:
+            if is_user:
+                self._active_user_calls = max(0, self._active_user_calls - 1)
+                if self._active_user_calls == 0:
+                    self._cond.notify_all()
+            else:
+                self._cond.notify_all()
+
+
+_priority_controller = LLMPriorityController()
+_user_focus_flag: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "agi_llm_user_focus", default=False
+)
+
+
+@contextmanager
+def user_focus_scope():
+    """Mark the current thread of execution as serving a user interaction."""
+
+    token = _user_focus_flag.set(True)
+    try:
+        yield
+    finally:
+        _user_focus_flag.reset(token)
+
+
+def _in_user_focus() -> bool:
+    try:
+        return bool(_user_focus_flag.get())
+    except LookupError:  # pragma: no cover - defensive
+        return False
+
+
+def is_user_focus_active() -> bool:
+    """Return True when the current execution context serves a user interaction."""
+
+    return _in_user_focus()
 
 
 def _env_flag(name: str, *, default: bool = False) -> bool:
@@ -119,15 +206,26 @@ class LLMIntegrationManager:
             instructions.extend(instr.strip() for instr in extra_instructions if instr and instr.strip())
         instructions.append("Si tu n'es pas certain, explique l'incertitude dans le champ 'notes'.")
 
+        is_user_focus = _in_user_focus()
         try:
-            result = self._client.generate_json(
-                self._resolve_model(spec.preferred_model),
-                spec.prompt_goal,
-                input_data=input_payload,
-                extra_instructions=instructions,
-                example_output=spec.example_output,
-                max_retries=max_retries,
-            )
+            timeout = None if is_user_focus else float(cfg().get("LLM_BACKGROUND_WAIT_TIMEOUT", 45.0))
+        except Exception:
+            timeout = None if is_user_focus else 45.0
+
+        try:
+            with _priority_controller.acquire(is_user=is_user_focus, timeout=timeout):
+                result = self._client.generate_json(
+                    self._resolve_model(spec.preferred_model),
+                    spec.prompt_goal,
+                    input_data=input_payload,
+                    extra_instructions=instructions,
+                    example_output=spec.example_output,
+                    max_retries=max_retries,
+                )
+        except TimeoutError as exc:
+            raise LLMIntegrationError(
+                "LLM call skipped: background request waited too long during user focus"
+            ) from exc
         except LLMCallError as exc:  # pragma: no cover - delegated to integration error
             raise LLMIntegrationError(f"LLM call failed for spec '{spec_key}': {exc}") from exc
 
@@ -248,9 +346,11 @@ __all__ = [
     "LLMInvocation",
     "LLMCallRecord",
     "LLMUnavailableError",
+    "LLMPriorityController",
     "get_llm_manager",
     "get_recent_llm_activity",
     "is_llm_enabled",
     "set_llm_manager",
     "try_call_llm_dict",
+    "user_focus_scope",
 ]

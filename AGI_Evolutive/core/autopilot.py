@@ -18,7 +18,7 @@ from .persistence import PersistenceManager
 from .question_manager import QuestionManager
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
-from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict, user_focus_scope
 
 
 @dataclass
@@ -148,9 +148,8 @@ class Autopilot:
         self.min_step_interval = float(cfg().get("AUTOPILOT_MIN_STEP_INTERVAL", 0.35))
         self.question_recency_horizon = float(cfg().get("QUESTION_RECENCY_HORIZON", 3600.0))
         self.max_pending_questions = 5
-        self.background_pause_seconds = float(
-            cfg().get("AUTOPILOT_USER_FOCUS_PAUSE", 8.0)
-        )
+        configured_pause = float(cfg().get("AUTOPILOT_USER_FOCUS_PAUSE", 120.0))
+        self.background_pause_seconds = max(120.0, configured_pause)
         self.persistence_drift_threshold = float(cfg().get("PERSISTENCE_DRIFT_THRESHOLD", 0.35))
         self._diagnostics_history: deque[Dict[str, Any]] = deque(maxlen=50)
         self._last_cycle_metrics: Dict[str, Any] = {}
@@ -191,19 +190,18 @@ class Autopilot:
         }
 
         user_has_input = isinstance(user_msg, str) and bool(user_msg.strip())
-        if user_has_input:
-            pause_until = start_ts + max(0.0, self.background_pause_seconds)
-            if pause_until > self._background_pause_until:
-                self._background_pause_until = pause_until
 
         # 1) Integrate any freshly dropped documents.
         ingest_result = self._run_stage("ingest", self.ingest.integrate)
         metrics["stages"]["ingest"] = ingest_result.to_metrics()
 
         # 2) Execute one cognitive cycle.
+        cycle_callable = (
+            self._cycle_stage_user_focus if user_has_input else self._cycle_stage
+        )
         cycle_result = self._run_stage(
             "cycle",
-            self.arch.cycle,
+            cycle_callable,
             kwargs={"user_msg": user_msg, "inbox_docs": None},
         )
         metrics["stages"]["cycle"] = cycle_result.to_metrics()
@@ -224,10 +222,11 @@ class Autopilot:
 
         background_paused = self._background_tasks_paused(start_ts)
 
-        if user_has_input and cycle_result.ok:
-            pause_until = time.time() + max(0.0, self.background_pause_seconds)
-            if pause_until > self._background_pause_until:
-                self._background_pause_until = pause_until
+        if user_has_input:
+            background_paused = True
+            self._extend_background_pause(
+                self.background_pause_seconds, source="user_interaction"
+            )
 
         # 3) Allow the optional orchestrator to do additional coordination.
         if self.orchestrator is not None:
@@ -284,10 +283,36 @@ class Autopilot:
         return out
 
     def _background_tasks_paused(self, now: Optional[float] = None) -> bool:
+        arch_pause_until = None
+        try:
+            pause_accessor = getattr(self.arch, "background_pause_until", None)
+            if callable(pause_accessor):
+                arch_pause_until = float(pause_accessor())
+            else:
+                arch_pause_until = getattr(self.arch, "_background_pause_until", None)
+        except Exception:
+            arch_pause_until = getattr(self.arch, "_background_pause_until", None)
+        if isinstance(arch_pause_until, (int, float)) and arch_pause_until > self._background_pause_until:
+            self._background_pause_until = float(arch_pause_until)
+
         if self._background_pause_until <= 0.0:
             return False
         current = now if now is not None else time.time()
         return current < self._background_pause_until
+
+    def _extend_background_pause(self, seconds: float, *, source: str = "autopilot") -> None:
+        duration = max(0.0, float(seconds or 0.0))
+        if duration <= 0.0:
+            return
+        pause_until = time.time() + duration
+        if pause_until > self._background_pause_until:
+            self._background_pause_until = pause_until
+        pause_background = getattr(self.arch, "pause_background", None)
+        if callable(pause_background):
+            try:
+                pause_background(duration, source=source)
+            except Exception:
+                pass
 
     def _cycle_payload_has_text(self, payload: Any) -> bool:
         if payload is None:
@@ -329,6 +354,15 @@ class Autopilot:
                 if preview:
                     details["text_preview"] = preview[:120]
         return details
+
+    def _cycle_stage(self, *, user_msg: Optional[str], inbox_docs: Any) -> Any:
+        return self.arch.cycle(user_msg=user_msg, inbox_docs=inbox_docs)
+
+    def _cycle_stage_user_focus(
+        self, *, user_msg: Optional[str], inbox_docs: Any
+    ) -> Any:
+        with user_focus_scope():
+            return self.arch.cycle(user_msg=user_msg, inbox_docs=inbox_docs)
 
     def pending_questions(self):
         """Retourne les questions auto-générées, + celles de validation d'apprentissage."""
@@ -374,7 +408,12 @@ class Autopilot:
         base_ranked: List[Dict[str, Any]] = sorted(
             candidates.values(), key=lambda q: q.get("score", 0.0), reverse=True
         )
-        llm_ranked = self._rank_questions_with_llm(base_ranked, now)
+        use_llm_ranking = not self._background_tasks_paused()
+        llm_ranked = (
+            self._rank_questions_with_llm(base_ranked, now)
+            if use_llm_ranking
+            else None
+        )
         ranked = llm_ranked if llm_ranked is not None else base_ranked
         return ranked[: self.max_pending_questions]
 
