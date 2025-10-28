@@ -10,6 +10,7 @@ import os, time, uuid, json, threading, random, math
 
 from AGI_Evolutive.core.config import cfg
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.goals import GoalType, GoalMetadata
 from AGI_Evolutive.autonomy.auto_signals import AutoSignalRegistry, AutoSignal
 from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
@@ -556,29 +557,121 @@ class AutonomyManager:
         item.status = "done"
 
     def _push_to_goal_system(self, item: AgendaItem) -> None:
-        if not self.goals:
+        goals = self.goals
+        if goals is None or not hasattr(goals, "add_goal"):
             return
-        # on tente des API communes sans casser si absentes
-        pushed = False
-        try:
-            if hasattr(self.goals, "add_goal"):
-                self.goals.add_goal({
-                    "id": item.id,
-                    "title": item.title,
-                    "rationale": item.rationale,
-                    "kind": item.kind,
-                    "priority": item.priority,
-                    "payload": item.payload
-                })
-                pushed = True
-            elif hasattr(self.goals, "register_goal"):
-                self.goals.register_goal(item.title, item.payload)
-                pushed = True
-        except Exception as e:
-            self._log(f"⚠️ GoalSystem indisponible: {e}")
 
-        if pushed:
-            self._log(f"📌 Objectif poussé vers GoalSystem: {item.title}")
+        dedupe_tag: Optional[str] = None
+        if item.dedupe_key:
+            dedupe_tag = f"dedupe::{item.dedupe_key}"
+            existing = next(
+                (
+                    goal_id
+                    for goal_id, meta in getattr(goals, "metadata", {}).items()
+                    if isinstance(meta, GoalMetadata) and dedupe_tag in meta.success_criteria
+                ),
+                None,
+            )
+            if existing:
+                self._log(
+                    f"🔁 Objectif déjà présent dans GoalSystem pour la clé {item.dedupe_key}"
+                )
+                return
+
+        description = self._goal_description(item)
+        criteria = self._goal_criteria(item)
+        if dedupe_tag:
+            criteria.append(dedupe_tag)
+
+        goal_kwargs = {
+            "description": description,
+            "goal_type": self._goal_type_from_kind(item.kind),
+            "criteria": criteria,
+            "value": float(max(0.2, min(1.0, item.priority or 0.5))),
+            "competence": 0.55,
+            "curiosity": 0.45,
+            "urgency": float(max(0.2, min(1.0, 0.4 + 0.4 * (item.priority or 0.5)))),
+            "created_by": "autonomy",
+        }
+
+        try:
+            node = goals.add_goal(**goal_kwargs)
+        except Exception as exc:  # pragma: no cover - safety net
+            self._log(f"⚠️ GoalSystem indisponible: {exc}")
+            return
+
+        if not node:
+            return
+
+        metadata = getattr(goals, "metadata", {}).get(getattr(node, "id", None))
+        note = (item.rationale or "").strip()
+        if metadata and note:
+            metadata.llm_notes.append(note[:200])
+            metadata.updated_at = time.time()
+        self._log(f"📌 Objectif poussé vers GoalSystem: {item.title or description}")
+
+    def _goal_description(self, item: AgendaItem) -> str:
+        title = (item.title or "").strip()
+        rationale = (item.rationale or "").strip()
+        if title and rationale:
+            description = f"{title} – {rationale}"
+        else:
+            description = title or rationale or f"Objectif autonomie {item.kind or 'générique'}"
+        return description[:200]
+
+    def _goal_criteria(self, item: AgendaItem) -> List[str]:
+        criteria: List[str] = []
+        rationale = (item.rationale or "").strip()
+        if rationale:
+            criteria.append(rationale[:160])
+        payload = item.payload if isinstance(item.payload, Mapping) else None
+        if payload:
+            signals = payload.get("signals")
+            if isinstance(signals, (list, tuple)):
+                for entry in signals:
+                    if not isinstance(entry, Mapping):
+                        continue
+                    name = str(entry.get("name") or "").strip()
+                    if not name:
+                        continue
+                    target = entry.get("target")
+                    if target is None:
+                        criteria.append(f"signal::{name}")
+                    else:
+                        criteria.append(f"signal::{name}>={target}")
+            summary = self._summarize_payload(payload)
+            criteria.extend(summary)
+        return criteria[:8]
+
+    def _summarize_payload(self, payload: Mapping[str, Any]) -> List[str]:
+        summary: List[str] = []
+        sanitized = json_sanitize(payload)
+        if isinstance(sanitized, Mapping):
+            for key, value in list(sanitized.items())[:4]:
+                if isinstance(value, (str, int, float)):
+                    summary.append(f"payload::{key}={value}")
+                elif isinstance(value, Mapping):
+                    summary.append(
+                        f"payload::{key}[keys]={','.join(list(value.keys())[:3])}"
+                    )
+                elif isinstance(value, list):
+                    summary.append(f"payload::{key}[items]={len(value)}")
+        elif sanitized:
+            try:
+                summary.append(json.dumps(sanitized, ensure_ascii=False)[:160])
+            except Exception:  # pragma: no cover - defensive
+                pass
+        return summary
+
+    def _goal_type_from_kind(self, kind: str) -> GoalType:
+        mapping = {
+            "learning": GoalType.MASTERY,
+            "reasoning": GoalType.COGNITIVE,
+            "intake": GoalType.EXPLORATION,
+            "alignment": GoalType.SOCIAL,
+            "meta": GoalType.SELF_ACTUALISATION,
+        }
+        return mapping.get((kind or "").strip().lower(), GoalType.GROWTH)
 
     # ---------- Utilitaires d'agenda ----------
 

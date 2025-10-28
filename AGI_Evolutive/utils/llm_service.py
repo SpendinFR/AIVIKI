@@ -9,6 +9,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Mapping, MutableMapping, Optional, Sequence
 
+from itertools import islice
+
 from .llm_client import LLMCallError, LLMResult, OllamaLLMClient, OllamaModelConfig
 from .llm_specs import LLMIntegrationSpec, get_spec
 from AGI_Evolutive.core.config import cfg
@@ -128,6 +130,41 @@ class LLMInvocation:
 
     spec: LLMIntegrationSpec
     result: LLMResult
+
+
+@dataclass(frozen=True)
+class LLMCallRecord:
+    """Trace the outcome of an integration attempt for diagnostics."""
+
+    spec_key: str
+    status: str
+    timestamp: float
+    message: Optional[str] = None
+
+
+_ACTIVITY_LOG: deque[LLMCallRecord] = deque(maxlen=200)
+
+
+def _record_activity(spec_key: str, status: str, message: Optional[str] = None) -> None:
+    try:
+        _ACTIVITY_LOG.appendleft(
+            LLMCallRecord(
+                spec_key=spec_key,
+                status=status,
+                timestamp=time.time(),
+                message=message.strip() if isinstance(message, str) else message,
+            )
+        )
+    except Exception:  # pragma: no cover - defensive guard for diagnostics
+        pass
+
+
+def get_recent_llm_activity(limit: int = 20) -> Sequence[LLMCallRecord]:
+    """Return the most recent integration attempts for observability."""
+
+    if limit is None or limit <= 0:
+        limit = len(_ACTIVITY_LOG)
+    return tuple(islice(_ACTIVITY_LOG, 0, limit))
 
 
 class LLMIntegrationManager:
@@ -265,17 +302,21 @@ def try_call_llm_dict(
     """
 
     if not is_llm_enabled():
+        _record_activity(spec_key, "disabled", "LLM integration désactivée")
         return None
 
     try:
         manager = get_llm_manager()
-        return manager.call_dict(
+        payload = manager.call_dict(
             spec_key,
             input_payload=input_payload,
             extra_instructions=extra_instructions,
             max_retries=max_retries,
         )
+        _record_activity(spec_key, "success", None)
+        return payload
     except (LLMUnavailableError, LLMIntegrationError) as exc:
+        _record_activity(spec_key, "error", str(exc))
         if logger is not None:
             try:
                 logger.debug(
@@ -284,15 +325,30 @@ def try_call_llm_dict(
             except Exception:  # pragma: no cover - defensive logging guard
                 pass
         return None
+    except Exception as exc:  # pragma: no cover - unexpected failure safety net
+        _record_activity(spec_key, "error", str(exc))
+        if logger is not None:
+            try:
+                logger.warning(
+                    "Unexpected error while calling LLM integration '%s': %s",
+                    spec_key,
+                    exc,
+                    exc_info=True,
+                )
+            except Exception:
+                pass
+        return None
 
 
 __all__ = [
     "LLMIntegrationError",
     "LLMIntegrationManager",
     "LLMInvocation",
+    "LLMCallRecord",
     "LLMUnavailableError",
     "LLMPriorityController",
     "get_llm_manager",
+    "get_recent_llm_activity",
     "is_llm_enabled",
     "set_llm_manager",
     "try_call_llm_dict",
