@@ -433,6 +433,8 @@ class GlobalWorkspace:
         trace = self._rag_trace.get(str(frame_id))
         if trace:
             self._rag_model.update(trace.get("features", {}), reward)
+        self._rag_trace.pop(str(frame_id), None)
+        self._save_state()
 
     def _apply_llm_ranking(
         self,
@@ -503,5 +505,3 @@ def _truncate_payload(payload: Mapping[str, Any] | None, *, max_items: int = 8) 
         except Exception:
             result[str(key)] = "(unserializable)"
     return result
-            self._rag_trace.pop(str(frame_id), None)
-            self._save_state()
