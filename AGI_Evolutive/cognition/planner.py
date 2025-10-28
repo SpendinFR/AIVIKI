@@ -8,6 +8,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple, Mapping
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_contracts import enforce_llm_contract
 from AGI_Evolutive.utils.llm_service import (
     LLMIntegrationError,
     LLMUnavailableError,
@@ -346,6 +347,9 @@ class Planner:
                 "planner_support",
                 input_payload=payload,
             )
+            cleaned = enforce_llm_contract("planner_support", response)
+            if cleaned is not None:
+                response = cleaned
         except (LLMUnavailableError, LLMIntegrationError):
             LOGGER.debug("LLM planner support unavailable", exc_info=True)
             return None

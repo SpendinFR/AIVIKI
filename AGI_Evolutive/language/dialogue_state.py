@@ -3,6 +3,7 @@ from typing import List, Dict, Any, Optional, Mapping
 import logging
 import time
 
+from AGI_Evolutive.utils.llm_contracts import enforce_llm_contract
 from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 
@@ -119,6 +120,10 @@ class DialogueState:
             input_payload=payload,
             logger=logger,
         )
+
+        cleaned = enforce_llm_contract("dialogue_state", llm_result)
+        if cleaned is not None:
+            llm_result = cleaned
 
         summary: Dict[str, Any]
         if isinstance(llm_result, Mapping):

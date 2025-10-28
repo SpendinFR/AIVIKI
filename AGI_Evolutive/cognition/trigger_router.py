@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Mapping, Optional
 
 from AGI_Evolutive.core.trigger_types import Trigger, TriggerType
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_contracts import enforce_llm_contract
 from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 
@@ -33,6 +34,10 @@ class TriggerRouter:
             input_payload=payload,
             logger=logger,
         )
+
+        cleaned = enforce_llm_contract("trigger_router", llm_result)
+        if cleaned is not None:
+            llm_result = cleaned
 
         pipelines: List[str] = []
         secondary: List[str] = []

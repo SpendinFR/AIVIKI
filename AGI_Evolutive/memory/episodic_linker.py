@@ -12,6 +12,7 @@ except Exception:  # pragma: no cover - learning module optional in some builds
     ThompsonBandit = None  # type: ignore[assignment]
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
+from AGI_Evolutive.utils.llm_contracts import enforce_llm_contract
 from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 
 
@@ -575,6 +576,10 @@ class EpisodicLinker:
                 input_payload=json_sanitize(llm_payload),
                 logger=logger,
             )
+
+            cleaned = enforce_llm_contract("episodic_linker", llm_result)
+            if cleaned is not None:
+                llm_result = cleaned
 
             if isinstance(llm_result, Mapping):
                 links = llm_result.get("links")
