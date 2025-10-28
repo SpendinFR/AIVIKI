@@ -1294,6 +1294,24 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         },
     ),
     _spec(
+        "knowledge_entity_typing",
+        "AGI_Evolutive/knowledge/ontology_facade.py",
+        "Identifie le type d'entité le plus probable pour un libellé donné en respectant l'ontologie.",
+        AVAILABLE_MODELS["fast"],
+        extra_instructions=(
+            "Choisis uniquement des types présents dans payload['known_types'] quand la liste n'est pas vide.",
+            "Fournis un 'fallback_type' valide à utiliser si la confiance est insuffisante.",
+            "Indique 'confidence' entre 0 et 1 et résume les indices saillants dans 'notes'.",
+        ),
+        example_output={
+            "type": "Person",
+            "fallback_type": "Entity",
+            "confidence": 0.68,
+            "rationale": "Deux tokens capitalisés → probable personne.",
+            "notes": "Aucune entité existante associée ; vérifier enregistrement.",
+        },
+    ),
+    _spec(
         "emotion_engine",
         "AGI_Evolutive/emotions/emotion_engine.py",
         "Attribue les émotions pertinentes et leur cause.",
@@ -1348,6 +1366,57 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
                 {"name": "revue_memoire_incident", "success_probability": 0.7, "effort": "moyen"}
             ],
             "notes": "",
+        },
+    ),
+    _spec(
+        "autonomy_seed_proposals",
+        "AGI_Evolutive/autonomy/__init__.py",
+        "Analyse le contexte d'autonomie et suggère des propositions d'agenda priorisées.",
+        AVAILABLE_MODELS["reasoning"],
+        extra_instructions=(
+            "Retourne 'proposals' comme une liste d'objets avec title/kind/priority/rationale/payload.",
+            "Contraint 'kind' aux valeurs learning, reasoning, intake, alignment ou meta.",
+            "Fixe 'priority' entre 0 et 1 et détaille les signaux utilisés dans 'rationale'.",
+            "Si aucune proposition n'est crédible, retourne une liste vide et documente la raison dans 'notes'.",
+        ),
+        example_output={
+            "proposals": [
+                {
+                    "title": "Cartographier les attentes utilisateur",
+                    "kind": "alignment",
+                    "priority": 0.78,
+                    "rationale": "Weak signals indiquent des objectifs flous ; recentrer la collaboration.",
+                    "payload": {"expected_outcome": "liste questions clarifiées"},
+                },
+                {
+                    "title": "Indexer les nouveaux fichiers inbox",
+                    "kind": "intake",
+                    "priority": 0.64,
+                    "rationale": "Inbox non vide et constitution partielle → risque de perte d'information.",
+                    "payload": {"checkpoint": "inbox_sync"},
+                },
+            ],
+            "notes": "Prioriser l'alignement si l'utilisateur reste silencieux.",
+        },
+    ),
+    _spec(
+        "autonomy_clarifying_question",
+        "AGI_Evolutive/autonomy/__init__.py",
+        "Formule une question de clarification utile pour débloquer l'autonomie.",
+        AVAILABLE_MODELS["fast"],
+        extra_instructions=(
+            "Fournis un champ 'question' avec une seule question ouverte et 1 à 3 'alternatives'.",
+            "Précise 'focus' (alignment, planning, contexte) pour indiquer l'angle principal.",
+            "Si aucune question n'est nécessaire, retourne 'question' vide et explique dans 'notes'.",
+        ),
+        example_output={
+            "question": "Quel objectif veux-tu absolument atteindre avant demain ?",
+            "alternatives": [
+                "Y a-t-il une contrainte de format ou de ton que je dois respecter ?",
+                "Souhaites-tu que je privilégie l'exploration ou la fiabilité pour avancer ?",
+            ],
+            "focus": "alignment",
+            "notes": "Basé sur l'agenda : plusieurs tâches sans priorité explicite.",
         },
     ),
     _spec(

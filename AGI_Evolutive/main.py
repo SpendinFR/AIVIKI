@@ -11,7 +11,7 @@ import unicodedata
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict, get_recent_llm_activity
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +120,7 @@ Commandes disponibles :
   /inbox       → liste les fichiers déposés dans ./inbox
   /save        → force une sauvegarde immédiate
   /state       → montre les infos d'état globales
+  /llmstatus   → affiche l'état des dernières intégrations LLM
   /skillacquis [statut|oui/non <action>] → gère les compétences du bac à sable
   /quit        → quitte proprement
   q [channel]  → affiche toutes les questions en attente (channel=primary|immediate)
@@ -620,6 +621,36 @@ def run_cli():
                 blocked = list(blocked_fn())
                 if blocked:
                     print("⛔ Blocage actif sur : " + ", ".join(blocked))
+            continue
+
+        elif msg_lower in {"/llmstatus", "/llm", "llmstatus", "llm"}:
+            manager = get_llm_manager()
+            enabled_flag = getattr(manager, "enabled", False)
+            print(f"LLM activé : {'oui' if enabled_flag else 'non'}")
+            records = get_recent_llm_activity(15)
+            if not records:
+                print("ℹ️  Aucun appel LLM enregistré depuis le lancement.")
+                continue
+
+            print("\n— Historique récent des intégrations LLM —")
+            icon_map = {
+                "success": "✅",
+                "error": "⚠️",
+                "disabled": "⏸️",
+            }
+            for record in records:
+                icon = icon_map.get(record.status.lower(), "•")
+                try:
+                    ts = datetime.fromtimestamp(record.timestamp).strftime("%H:%M:%S")
+                except Exception:
+                    ts = "?"
+                line = f"  {icon} [{ts}] {record.spec_key} → {record.status}"
+                if record.message:
+                    message = record.message.strip()
+                    if len(message) > 120:
+                        message = message[:117] + "..."
+                    line += f" · {message}"
+                print(line)
             continue
 
         elif msg_lower.startswith("/skillacquis"):
