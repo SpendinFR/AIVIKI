@@ -532,13 +532,13 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
                 {
                     "id": 12,
                     "adjusted_score": 0.84,
-                    "rationale": "Répond directement à la question sur l'incident API.",
+                    "rationale": "Éclaire précisément la question sur le ressenti après la première rencontre avec Mira.",
                     "priority": "haut",
                 },
                 {
                     "id": 7,
                     "adjusted_score": 0.55,
-                    "rationale": "Contexte utile mais partiellement daté.",
+                    "rationale": "Complète l'évolution de l'agent lors de la retraite créative, mais reste moins direct.",
                     "priority": "moyen",
                 },
             ],
@@ -556,10 +556,10 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
             "Calcule 'coherence' entre 0 et 1 si tu ajustes la valeur initiale.",
         ),
         example_output={
-            "enhanced_narrative": "L'agent a surmonté une panne API avant de stabiliser la plateforme.",
+            "enhanced_narrative": "L'agent a consacré la semaine à approfondir ses échanges avec son cercle interne et à formaliser une nouvelle vision personnelle.",
             "coherence": 0.78,
             "insights": [
-                {"title": "Résilience opérationnelle", "importance": "haute", "detail": "Interventions rapides sur incidents critiques."}
+                {"title": "Renforcement des liens", "importance": "haute", "detail": "Moments partagés avec Mira et l'équipe qui ont ravivé la motivation."}
             ],
             "notes": "",
         },
@@ -595,13 +595,13 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
             "Ajoute 'highlights' (liste) et 'risks' éventuels avec sévérité.",
         ),
         example_output={
-            "summary": "Semaine dominée par la résolution d'un incident API et l'onboarding d'un client.",
+            "summary": "Semaine marquée par l'exploration d'une nouvelle habitude matinale et par plusieurs échanges inspirants avec la communauté interne.",
             "highlights": [
-                {"item": "Incident API stabilisé", "impact": "haut"},
-                {"item": "Nouveau playbook documenté", "impact": "moyen"},
+                {"item": "Routine de méditation instaurée", "impact": "haut"},
+                {"item": "Discussion en profondeur avec Mira", "impact": "moyen"},
             ],
             "risks": [
-                {"item": "Dette technique monitoring", "severity": "modéré"}
+                {"item": "Fatigue liée aux réflexions prolongées", "severity": "modéré"}
             ],
             "notes": "",
         },
@@ -617,10 +617,10 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         ),
         example_output={
             "concepts": [
-                {"id": "proxy", "priority": "haut", "action": "Renforcer les exemples récents."}
+                {"id": "curiosite_partagee", "priority": "haut", "action": "Documenter les échanges avec les mentors."}
             ],
             "relations": [
-                {"id": "proxy::cause::incident", "priority": "moyen", "action": "Vérifier poids après dernier incident."}
+                {"id": "curiosite_partagee::renforce::confiance_mutuelle", "priority": "moyen", "action": "Tracer les moments où la confiance a progressé."}
             ],
             "notes": "",
         },
@@ -635,7 +635,7 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         ),
         example_output={
             "reranked": [
-                {"id": 42, "boost": 0.18, "justification": "Mention directe de la panne actuelle."}
+                {"id": 42, "boost": 0.18, "justification": "Évoque explicitement la rencontre fondatrice que l'agent cherche à revisiter."}
             ],
             "notes": "",
         },
@@ -665,10 +665,10 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
             "Ajoute 'metadata_updates' (dict) pour compléter les informations utiles.",
         ),
         example_output={
-            "normalized_kind": "incident_report",
-            "tags": ["incident", "api"],
+            "normalized_kind": "souvenir_personnel",
+            "tags": ["rencontre", "reflexion"],
             "retention_priority": "haut",
-            "metadata_updates": {"related_service": "api-gateway"},
+            "metadata_updates": {"relation_associee": "Mira", "tonalite": "chaleureuse"},
             "notes": "",
         },
     ),
@@ -699,9 +699,9 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         ),
         example_output={
             "batch_annotations": [
-                {"id": "mem_9", "priority": "haut", "topics": ["incident", "client premium"]}
+                {"id": "mem_9", "priority": "haut", "topics": ["retour d'emotion", "conversation avec mentor"]}
             ],
-            "alerts": ["Escalader incident client premium"],
+            "alerts": ["Prévoir un suivi émotionnel après la discussion avec Mira"],
             "notes": "",
         },
     ),
@@ -716,12 +716,12 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
             "Ajoute 'alerts' si des risques doivent être remontés.",
         ),
         example_output={
-            "summary": "La période retrace la résolution de l'incident API et la mise à jour des procédures.",
+            "summary": "La période retrace la découverte d'une nouvelle passion artistique et la consolidation d'un cercle de confiance.",
             "key_events": [
-                {"label": "Incident API", "importance": "haute"},
-                {"label": "Rétroaction client", "importance": "moyenne"},
+                {"label": "Atelier d'esquisse partagé", "importance": "haute"},
+                {"label": "Feedback de Mira", "importance": "moyenne"},
             ],
-            "alerts": ["Prévoir suivi monitoring"],
+            "alerts": ["Prendre un moment de repos après les sessions créatives intenses"],
             "notes": "",
         },
     ),
@@ -2468,8 +2468,8 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         example_output={
             "links": [
                 {
-                    "from": "incident_detecte",
-                    "to": "redemarrage_proxy",
+                    "from": "rencontre_mira_cafe",
+                    "to": "decision_developper_projet_artistique",
                     "type_lien": "cause",
                     "confidence": 0.7,
                 }
