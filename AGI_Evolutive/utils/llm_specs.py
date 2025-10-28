@@ -2377,14 +2377,21 @@ LLM_INTEGRATION_SPECS: tuple[LLMIntegrationSpec, ...] = (
         example_output={
             "actions": [
                 {
-                    "name": "analyser_logs",
-                    "impact": 0.8,
-                    "effort": 0.3,
+                    "name": "cartographier_ressenti",
+                    "impact": 0.7,
+                    "effort": 0.4,
+                    "risk": 0.1,
+                    "rationale": "clarifie les émotions dominantes avant d'agir",
+                },
+                {
+                    "name": "imaginer_scenario_partage",
+                    "impact": 0.6,
+                    "effort": 0.2,
                     "risk": 0.2,
-                    "rationale": "identifie la cause",
-                }
+                    "rationale": "explore comment exprimer la découverte avec un pair",
+                },
             ],
-            "notes": "",
+            "notes": "Favoriser des pistes d'expression ou d'introspection collaborative.",
         },
     ),
     _spec(
