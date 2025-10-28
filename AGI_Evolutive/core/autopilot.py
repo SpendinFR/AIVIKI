@@ -18,7 +18,7 @@ from .persistence import PersistenceManager
 from .question_manager import QuestionManager
 
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
-from AGI_Evolutive.utils.llm_service import try_call_llm_dict
+from AGI_Evolutive.utils.llm_service import try_call_llm_dict, user_focus_scope
 
 
 @dataclass
@@ -148,12 +148,15 @@ class Autopilot:
         self.min_step_interval = float(cfg().get("AUTOPILOT_MIN_STEP_INTERVAL", 0.35))
         self.question_recency_horizon = float(cfg().get("QUESTION_RECENCY_HORIZON", 3600.0))
         self.max_pending_questions = 5
+        configured_pause = float(cfg().get("AUTOPILOT_USER_FOCUS_PAUSE", 120.0))
+        self.background_pause_seconds = max(120.0, configured_pause)
         self.persistence_drift_threshold = float(cfg().get("PERSISTENCE_DRIFT_THRESHOLD", 0.35))
         self._diagnostics_history: deque[Dict[str, Any]] = deque(maxlen=50)
         self._last_cycle_metrics: Dict[str, Any] = {}
         self._step_counter = 0
         self._last_step_ts = 0.0
         self._last_auto_attempt_ts = 0.0
+        self._background_pause_until = 0.0
 
         try:
             self.persist.load()
@@ -186,14 +189,19 @@ class Autopilot:
             "stages": {},
         }
 
+        user_has_input = isinstance(user_msg, str) and bool(user_msg.strip())
+
         # 1) Integrate any freshly dropped documents.
         ingest_result = self._run_stage("ingest", self.ingest.integrate)
         metrics["stages"]["ingest"] = ingest_result.to_metrics()
 
         # 2) Execute one cognitive cycle.
+        cycle_callable = (
+            self._cycle_stage_user_focus if user_has_input else self._cycle_stage
+        )
         cycle_result = self._run_stage(
             "cycle",
-            self.arch.cycle,
+            cycle_callable,
             kwargs={"user_msg": user_msg, "inbox_docs": None},
         )
         metrics["stages"]["cycle"] = cycle_result.to_metrics()
@@ -212,13 +220,26 @@ class Autopilot:
             )
             raise StageExecutionError("cycle", error_result)
 
+        background_paused = self._background_tasks_paused(start_ts)
+
+        if user_has_input:
+            background_paused = True
+            self._extend_background_pause(
+                self.background_pause_seconds, source="user_interaction"
+            )
+
         # 3) Allow the optional orchestrator to do additional coordination.
         if self.orchestrator is not None:
-            orchestrator_result = self._run_stage(
-                "orchestrator",
-                self._call_orchestrator,
-                kwargs={"user_msg": user_msg, "cycle_metrics": metrics},
-            )
+            if background_paused:
+                orchestrator_result = StageResult.skipped(
+                    "orchestrator", reason="user_focus"
+                )
+            else:
+                orchestrator_result = self._run_stage(
+                    "orchestrator",
+                    self._call_orchestrator,
+                    kwargs={"user_msg": user_msg, "cycle_metrics": metrics},
+                )
         else:
             orchestrator_result = StageResult.skipped(
                 "orchestrator", reason="not_configured"
@@ -226,12 +247,15 @@ class Autopilot:
         metrics["stages"]["orchestrator"] = orchestrator_result.to_metrics()
 
         # 4) Maybe create follow-up questions for the user.
-        questions_result = self._run_stage(
-            "questions", self.questions.maybe_generate_questions
-        )
+        if background_paused:
+            questions_result = StageResult.skipped("questions", reason="user_focus")
+        else:
+            questions_result = self._run_stage(
+                "questions", self.questions.maybe_generate_questions
+            )
         metrics["stages"]["questions"] = questions_result.to_metrics()
         blocked_channels = self._sync_question_block_state()
-        if blocked_channels:
+        if blocked_channels and not background_paused:
             self._attempt_autonomous_resolution(blocked_channels)
 
         # 5) Persist the current state regularly.
@@ -257,6 +281,38 @@ class Autopilot:
             raise StageExecutionError("cycle", cycle_result)
 
         return out
+
+    def _background_tasks_paused(self, now: Optional[float] = None) -> bool:
+        arch_pause_until = None
+        try:
+            pause_accessor = getattr(self.arch, "background_pause_until", None)
+            if callable(pause_accessor):
+                arch_pause_until = float(pause_accessor())
+            else:
+                arch_pause_until = getattr(self.arch, "_background_pause_until", None)
+        except Exception:
+            arch_pause_until = getattr(self.arch, "_background_pause_until", None)
+        if isinstance(arch_pause_until, (int, float)) and arch_pause_until > self._background_pause_until:
+            self._background_pause_until = float(arch_pause_until)
+
+        if self._background_pause_until <= 0.0:
+            return False
+        current = now if now is not None else time.time()
+        return current < self._background_pause_until
+
+    def _extend_background_pause(self, seconds: float, *, source: str = "autopilot") -> None:
+        duration = max(0.0, float(seconds or 0.0))
+        if duration <= 0.0:
+            return
+        pause_until = time.time() + duration
+        if pause_until > self._background_pause_until:
+            self._background_pause_until = pause_until
+        pause_background = getattr(self.arch, "pause_background", None)
+        if callable(pause_background):
+            try:
+                pause_background(duration, source=source)
+            except Exception:
+                pass
 
     def _cycle_payload_has_text(self, payload: Any) -> bool:
         if payload is None:
@@ -298,6 +354,15 @@ class Autopilot:
                 if preview:
                     details["text_preview"] = preview[:120]
         return details
+
+    def _cycle_stage(self, *, user_msg: Optional[str], inbox_docs: Any) -> Any:
+        return self.arch.cycle(user_msg=user_msg, inbox_docs=inbox_docs)
+
+    def _cycle_stage_user_focus(
+        self, *, user_msg: Optional[str], inbox_docs: Any
+    ) -> Any:
+        with user_focus_scope():
+            return self.arch.cycle(user_msg=user_msg, inbox_docs=inbox_docs)
 
     def pending_questions(self):
         """Retourne les questions auto-générées, + celles de validation d'apprentissage."""
@@ -343,7 +408,12 @@ class Autopilot:
         base_ranked: List[Dict[str, Any]] = sorted(
             candidates.values(), key=lambda q: q.get("score", 0.0), reverse=True
         )
-        llm_ranked = self._rank_questions_with_llm(base_ranked, now)
+        use_llm_ranking = not self._background_tasks_paused()
+        llm_ranked = (
+            self._rank_questions_with_llm(base_ranked, now)
+            if use_llm_ranking
+            else None
+        )
         ranked = llm_ranked if llm_ranked is not None else base_ranked
         return ranked[: self.max_pending_questions]
 
@@ -371,6 +441,8 @@ class Autopilot:
         return blocked
 
     def _attempt_autonomous_resolution(self, blocked_channels: Iterable[str]) -> None:
+        if self._background_tasks_paused():
+            return
         now = time.time()
         if now - self._last_auto_attempt_ts < 20.0:
             return

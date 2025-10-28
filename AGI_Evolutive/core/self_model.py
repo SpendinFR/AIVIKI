@@ -502,6 +502,7 @@ class SelfModel:
         *,
         question_manager: Optional[Any] = None,
         now: Optional[float] = None,
+        bypass_question_manager: bool = False,
     ) -> Dict[str, Any]:
         self.ensure_identity_paths()
         story = self.life_story()
@@ -509,24 +510,28 @@ class SelfModel:
         status = story.awakening_status(now=now_ts)
         asked_prompt = None
         pending_prompts = status.get("pending_prompts", []) or []
-        if question_manager is not None and pending_prompts:
+        if pending_prompts:
             prompt = pending_prompts[0]
             prompt_id = prompt.get("id")
             prompt_text = prompt.get("prompt")
             if prompt_id and prompt_text:
-                metadata = {
-                    "source": "self_model.awakening",
-                    "type": "identity_foundation",
-                    "topic": f"awakening::{prompt_id}",
-                    "immediacy": 0.85,
-                }
+                if question_manager is not None and not bypass_question_manager:
+                    metadata = {
+                        "source": "self_model.awakening",
+                        "type": "identity_foundation",
+                        "topic": f"awakening::{prompt_id}",
+                        "immediacy": 0.85,
+                    }
+                    try:
+                        question_manager.record_information_need(
+                            f"awakening::{prompt_id}",
+                            float(prompt.get("urgency", 0.7) or 0.7),
+                            metadata=metadata,
+                            explicit_question=prompt_text,
+                        )
+                    except Exception:
+                        pass
                 try:
-                    question_manager.record_information_need(
-                        f"awakening::{prompt_id}",
-                        float(prompt.get("urgency", 0.7) or 0.7),
-                        metadata=metadata,
-                        explicit_question=prompt_text,
-                    )
                     asked_prompt = story.mark_checkpoint_prompted(prompt_id, asked_at=now_ts)
                 except Exception:
                     asked_prompt = None

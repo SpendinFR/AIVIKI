@@ -8,6 +8,7 @@ from collections import deque, defaultdict
 import logging
 import os, time, uuid, json, threading, random, math
 
+from AGI_Evolutive.core.config import cfg
 from AGI_Evolutive.utils.jsonsafe import json_sanitize
 from AGI_Evolutive.autonomy.auto_signals import AutoSignalRegistry, AutoSignal
 from AGI_Evolutive.utils.llm_service import try_call_llm_dict
@@ -262,6 +263,18 @@ class AutonomyManager:
         self.auto_evolution_stream: deque[Dict[str, Any]] = deque(maxlen=120)
         self._last_weak_capabilities: List[Dict[str, float]] = []
 
+        self._interaction_depth = 0
+        self._interaction_stack: List[Dict[str, Any]] = []
+        self._active_interaction_priority = 0.0
+        self._signal_focus_until = 0.0
+        self._signal_focus_priority = 0.0
+        self._signal_focus_meta: Dict[str, Any] = {}
+
+        config = cfg()
+        self.user_focus_cooldown = float(config.get("AUTONOMY_USER_FOCUS_COOLDOWN", 10.0))
+        self._user_focus_until = 0.0
+        self._last_user_activity = 0.0
+
         # Journal
         self.log_dir = "./logs"
         self.log_path = os.path.join(self.log_dir, "autonomy.log")
@@ -269,6 +282,101 @@ class AutonomyManager:
         self._log("🔧 AutonomyManager prêt (SELF_SEED=True, fallback activé)")
 
     # ---------- Public API ----------
+
+    def notify_user_activity(self) -> None:
+        """Suspend heavy autonomous work for a short window after user input."""
+
+        cooldown = max(0.0, float(self.user_focus_cooldown))
+        now = time.time()
+        focus_until = now + cooldown
+        with self._lock:
+            self._last_user_activity = now
+            if focus_until > self._user_focus_until:
+                self._user_focus_until = focus_until
+            if self._signal_focus_until < focus_until:
+                self._signal_focus_until = focus_until
+
+    def begin_user_interaction(
+        self,
+        *,
+        trigger: Optional[str] = None,
+        priority: float = 1.0,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> str:
+        token = uuid.uuid4().hex
+        info = {
+            "id": token,
+            "reason": (trigger or "user_input"),
+            "priority": max(0.0, float(priority)),
+            "metadata": dict(metadata or {}),
+            "started_at": time.time(),
+        }
+        cooldown = max(0.0, float(self.user_focus_cooldown))
+        focus_until = info["started_at"] + cooldown
+        with self._lock:
+            self._interaction_depth += 1
+            self._interaction_stack.append(info)
+            self._active_interaction_priority = max(
+                self._active_interaction_priority,
+                info["priority"],
+            )
+            if focus_until > self._user_focus_until:
+                self._user_focus_until = focus_until
+            if focus_until > self._signal_focus_until:
+                self._signal_focus_until = focus_until
+        return token
+
+    def end_user_interaction(self, token: Optional[str]) -> None:
+        if not token:
+            return
+        with self._lock:
+            for idx in range(len(self._interaction_stack) - 1, -1, -1):
+                if self._interaction_stack[idx].get("id") == token:
+                    self._interaction_stack.pop(idx)
+                    break
+            if self._interaction_depth > 0:
+                self._interaction_depth -= 1
+            if not self._interaction_stack:
+                self._active_interaction_priority = 0.0
+                resume_at = time.time() + 0.75
+                if self._user_focus_until > resume_at:
+                    self._user_focus_until = resume_at
+            else:
+                self._active_interaction_priority = max(
+                    item.get("priority", 0.0) for item in self._interaction_stack
+                )
+
+    def register_signal_focus(
+        self,
+        signal: Optional[Mapping[str, Any]],
+        *,
+        priority: float = 1.0,
+        hold_seconds: Optional[float] = None,
+    ) -> None:
+        hold = hold_seconds
+        if hold is None:
+            hold = max(self.user_focus_cooldown, 8.0)
+        hold = max(0.0, float(hold))
+        now = time.time()
+        focus_until = now + hold
+        meta = dict(signal or {})
+        with self._lock:
+            if focus_until > self._signal_focus_until:
+                self._signal_focus_until = focus_until
+            if focus_until > self._user_focus_until:
+                self._user_focus_until = focus_until
+            if priority > self._signal_focus_priority:
+                self._signal_focus_priority = float(priority)
+            if meta:
+                self._signal_focus_meta = meta
+
+    def _signal_focus_active(self, now: Optional[float] = None) -> bool:
+        current = now if now is not None else time.time()
+        if self._signal_focus_until <= current:
+            self._signal_focus_priority = 0.0
+            self._signal_focus_meta = {}
+            return False
+        return self._signal_focus_priority > 0.0
 
     def tick(self) -> None:
         """
@@ -280,6 +388,9 @@ class AutonomyManager:
         """
         with self._lock:
             now = time.time()
+            self._signal_focus_active(now)
+            if now < self._user_focus_until or self._interaction_depth > 0:
+                return
             if now - self.last_tick < 0.5:
                 return  # évite le spam si le cycle est très rapide
             self.last_tick = now
@@ -530,6 +641,14 @@ class AutonomyManager:
             status="queued",
             dedupe_key=dedupe_key
         )
+        now = time.time()
+        if self._signal_focus_active(now):
+            desired_priority = max(self._signal_focus_priority, itm.priority)
+            itm.priority = min(1.0, desired_priority)
+            if self._signal_focus_meta:
+                payload = dict(itm.payload or {})
+                payload.setdefault("signal_focus", self._signal_focus_meta)
+                itm.payload = payload
         self.agenda.append(itm)
         self.recent_keys.append(dedupe_key)
         return True
