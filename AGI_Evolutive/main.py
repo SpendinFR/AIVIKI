@@ -1,4 +1,5 @@
 # 🚀 main.py - Point d'entrée AGI Évolutive
+import argparse
 import glob
 import json
 import logging
@@ -311,16 +312,47 @@ def list_inbox(inbox_dir="inbox"):
     else:
         print("📁 Inbox :", ", ".join(files))
 
-def run_cli():
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Interface en ligne de commande pour AGI Évolutive",
+    )
+    parser.add_argument(
+        "--boot-minimal",
+        action="store_true",
+        help="Initialise l'architecture en mode minimal pour accélérer le démarrage.",
+    )
+    parser.add_argument(
+        "--no-auto-llm",
+        action="store_true",
+        help="Désactive l'activation automatique du LLM au démarrage.",
+    )
+    parser.add_argument(
+        "--boot-progress",
+        action="store_true",
+        help="Affiche les étapes de chargement de l'architecture cognitive.",
+    )
+    return parser
+
+
+def run_cli(argv: Optional[List[str]] = None):
     log_path = configure_logging()
     logger = logging.getLogger(__name__)
+
+    parser = _build_arg_parser()
+    args = parser.parse_args(argv)
 
     print(BANNER)
     print(f"📝 Journaux: {log_path}")
     print("Chargement de l'architecture cognitive…")
+    if args.boot_minimal:
+        print("⚡ Mode minimal activé : certaines capacités avancées sont désactivées pour un démarrage rapide.")
+    print(
+        "⏳ Initialisation en cours. L'invite `>` apparaîtra une fois la phrase "
+        "`✅ AGI initialisée` affichée. Cela peut prendre plusieurs minutes lors du premier lancement."
+    )
 
     llm_auto_enabled = False
-    if not os.getenv("AGI_DISABLE_LLM"):
+    if not args.no_auto_llm and not os.getenv("AGI_DISABLE_LLM"):
         try:
             manager = get_llm_manager()
             if not manager.enabled:
@@ -337,7 +369,10 @@ def run_cli():
     logger.info("Démarrage de la CLI AGI Évolutive", extra={"log_path": str(log_path)})
     logger.info("Initialisation de l'architecture cognitive")
     try:
-        arch = CognitiveArchitecture()
+        arch = CognitiveArchitecture(
+            boot_minimal=args.boot_minimal,
+            enable_boot_telemetry=args.boot_progress,
+        )
         arch.prioritizer = getattr(arch, "prioritizer", GoalPrioritizer(arch))
         from AGI_Evolutive.cognition.trigger_bus import TriggerBus  # déjà importable
         from AGI_Evolutive.cognition.evolution_manager import EvolutionManager

@@ -70,8 +70,14 @@ logger = logging.getLogger(__name__)
 class CognitiveArchitecture:
     """Central coordinator for the agent's cognitive subsystems."""
 
-    def __init__(self, boot_minimal: bool = False):
+    def __init__(
+        self,
+        boot_minimal: bool = False,
+        *,
+        enable_boot_telemetry: bool = False,
+    ):
         self.boot_minimal = boot_minimal
+        self._boot_telemetry_enabled = bool(enable_boot_telemetry)
         logger.info(
             "Initialisation de la CognitiveArchitecture",
             extra={"boot_minimal": bool(boot_minimal)},
@@ -79,6 +85,11 @@ class CognitiveArchitecture:
         # Observability
         self.logger = JSONLLogger("runtime/agent_events.jsonl")
         self.telemetry = Telemetry()
+        if self._boot_telemetry_enabled:
+            try:
+                self.telemetry.enable_console(True)
+            except Exception:
+                pass
         self.style_policy = StylePolicy()
         self.intent_model = IntentModel()
         self.question_manager = QuestionManager(self)
@@ -319,7 +330,10 @@ class CognitiveArchitecture:
         def _arch_factory(overrides: Dict[str, Any]) -> "CognitiveArchitecture":
             fresh: "CognitiveArchitecture"
             try:
-                fresh = self.__class__(boot_minimal=True)
+                fresh = self.__class__(
+                    boot_minimal=True,
+                    enable_boot_telemetry=self._boot_telemetry_enabled,
+                )
             except Exception:
                 fresh = self
             try:
