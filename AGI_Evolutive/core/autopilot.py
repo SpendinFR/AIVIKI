@@ -148,12 +148,16 @@ class Autopilot:
         self.min_step_interval = float(cfg().get("AUTOPILOT_MIN_STEP_INTERVAL", 0.35))
         self.question_recency_horizon = float(cfg().get("QUESTION_RECENCY_HORIZON", 3600.0))
         self.max_pending_questions = 5
+        self.background_pause_seconds = float(
+            cfg().get("AUTOPILOT_USER_FOCUS_PAUSE", 8.0)
+        )
         self.persistence_drift_threshold = float(cfg().get("PERSISTENCE_DRIFT_THRESHOLD", 0.35))
         self._diagnostics_history: deque[Dict[str, Any]] = deque(maxlen=50)
         self._last_cycle_metrics: Dict[str, Any] = {}
         self._step_counter = 0
         self._last_step_ts = 0.0
         self._last_auto_attempt_ts = 0.0
+        self._background_pause_until = 0.0
 
         try:
             self.persist.load()
@@ -186,6 +190,12 @@ class Autopilot:
             "stages": {},
         }
 
+        user_has_input = isinstance(user_msg, str) and bool(user_msg.strip())
+        if user_has_input:
+            pause_until = start_ts + max(0.0, self.background_pause_seconds)
+            if pause_until > self._background_pause_until:
+                self._background_pause_until = pause_until
+
         # 1) Integrate any freshly dropped documents.
         ingest_result = self._run_stage("ingest", self.ingest.integrate)
         metrics["stages"]["ingest"] = ingest_result.to_metrics()
@@ -212,13 +222,25 @@ class Autopilot:
             )
             raise StageExecutionError("cycle", error_result)
 
+        background_paused = self._background_tasks_paused(start_ts)
+
+        if user_has_input and cycle_result.ok:
+            pause_until = time.time() + max(0.0, self.background_pause_seconds)
+            if pause_until > self._background_pause_until:
+                self._background_pause_until = pause_until
+
         # 3) Allow the optional orchestrator to do additional coordination.
         if self.orchestrator is not None:
-            orchestrator_result = self._run_stage(
-                "orchestrator",
-                self._call_orchestrator,
-                kwargs={"user_msg": user_msg, "cycle_metrics": metrics},
-            )
+            if background_paused:
+                orchestrator_result = StageResult.skipped(
+                    "orchestrator", reason="user_focus"
+                )
+            else:
+                orchestrator_result = self._run_stage(
+                    "orchestrator",
+                    self._call_orchestrator,
+                    kwargs={"user_msg": user_msg, "cycle_metrics": metrics},
+                )
         else:
             orchestrator_result = StageResult.skipped(
                 "orchestrator", reason="not_configured"
@@ -226,12 +248,15 @@ class Autopilot:
         metrics["stages"]["orchestrator"] = orchestrator_result.to_metrics()
 
         # 4) Maybe create follow-up questions for the user.
-        questions_result = self._run_stage(
-            "questions", self.questions.maybe_generate_questions
-        )
+        if background_paused:
+            questions_result = StageResult.skipped("questions", reason="user_focus")
+        else:
+            questions_result = self._run_stage(
+                "questions", self.questions.maybe_generate_questions
+            )
         metrics["stages"]["questions"] = questions_result.to_metrics()
         blocked_channels = self._sync_question_block_state()
-        if blocked_channels:
+        if blocked_channels and not background_paused:
             self._attempt_autonomous_resolution(blocked_channels)
 
         # 5) Persist the current state regularly.
@@ -257,6 +282,12 @@ class Autopilot:
             raise StageExecutionError("cycle", cycle_result)
 
         return out
+
+    def _background_tasks_paused(self, now: Optional[float] = None) -> bool:
+        if self._background_pause_until <= 0.0:
+            return False
+        current = now if now is not None else time.time()
+        return current < self._background_pause_until
 
     def _cycle_payload_has_text(self, payload: Any) -> bool:
         if payload is None:
@@ -371,6 +402,8 @@ class Autopilot:
         return blocked
 
     def _attempt_autonomous_resolution(self, blocked_channels: Iterable[str]) -> None:
+        if self._background_tasks_paused():
+            return
         now = time.time()
         if now - self._last_auto_attempt_ts < 20.0:
             return
