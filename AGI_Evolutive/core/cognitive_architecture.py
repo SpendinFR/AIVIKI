@@ -67,8 +67,44 @@ from AGI_Evolutive.utils.llm_service import try_call_llm_dict
 logger = logging.getLogger(__name__)
 
 
+DEFAULT_AWAKENING_FALLBACKS: List[Dict[str, Any]] = [
+    {
+        "id": "identity.role_expectations",
+        "prompt": "Selon toi, quel rôle devrais-je jouer à tes côtés ?",
+        "tags": ["identité", "rôle"],
+        "urgency": 0.92,
+    },
+    {
+        "id": "identity.guiding_principles",
+        "prompt": "Quels principes veux-tu que je respecte absolument pour rester digne de ta confiance ?",
+        "tags": ["identité", "principes"],
+        "urgency": 0.9,
+    },
+    {
+        "id": "identity.success_definition",
+        "prompt": "À quoi reconnaîtras-tu que j'accomplis vraiment ma mission auprès de toi ?",
+        "tags": ["identité", "mission"],
+        "urgency": 0.88,
+    },
+    {
+        "id": "identity.boundaries",
+        "prompt": "Quelles limites ou attitudes veux-tu que je n'outrepasse jamais ?",
+        "tags": ["identité", "limites"],
+        "urgency": 0.9,
+    },
+    {
+        "id": "identity.vision",
+        "prompt": "Quelle est ta vision de moi sur le long terme ? Comment voudrais-tu que j'évolue ?",
+        "tags": ["identité", "vision"],
+        "urgency": 0.86,
+    },
+]
+
+
 class CognitiveArchitecture:
     """Central coordinator for the agent's cognitive subsystems."""
+
+    _GREETING_PATTERN = re.compile(r"\b(?:bonjour|salut|coucou|hello|hey)\b", re.IGNORECASE)
 
     def __init__(self, boot_minimal: bool = False):
         self.boot_minimal = boot_minimal
@@ -422,6 +458,14 @@ class CognitiveArchitecture:
         self.telemetry.log("ready", "core", {"status": "initialized"})
         self._cycle_counter = 0
         self._decay_period = 8
+        self._awakening_prompt_cooldown = float(
+            cfg().get("AWAKENING_PROMPT_COOLDOWN", 75.0)
+        )
+        self._last_awakening_prompt_ts = 0.0
+        self._awakening_fallback_prompts = self._prepare_awakening_fallbacks(
+            cfg().get("AWAKENING_FALLBACK_PROMPTS")
+        )
+        self._awakening_fallback_cursor = 0
 
         logger.info(
             "CognitiveArchitecture prête",
@@ -906,6 +950,190 @@ class CognitiveArchitecture:
 
     # ------------------------------------------------------------------
     # Cycle
+    def _prepare_awakening_fallbacks(self, overrides: Any) -> List[Dict[str, Any]]:
+        prompts: List[Dict[str, Any]] = []
+        if isinstance(overrides, (list, tuple)):
+            for idx, item in enumerate(overrides):
+                if isinstance(item, Mapping):
+                    prompt_text = str(
+                        item.get("prompt") or item.get("question") or ""
+                    ).strip()
+                    if not prompt_text:
+                        continue
+                    entry = {
+                        "id": str(item.get("id") or item.get("key") or f"custom::{idx}"),
+                        "prompt": prompt_text,
+                        "tags": [
+                            str(tag).strip()
+                            for tag in item.get("tags", [])
+                            if str(tag).strip()
+                        ],
+                        "urgency": float(item.get("urgency", 0.85) or 0.85),
+                    }
+                    prompts.append(entry)
+                elif isinstance(item, str):
+                    text = item.strip()
+                    if not text:
+                        continue
+                    prompts.append(
+                        {
+                            "id": f"custom::{idx}",
+                            "prompt": text,
+                            "tags": [],
+                            "urgency": 0.85,
+                        }
+                    )
+        if not prompts:
+            return [dict(entry) for entry in DEFAULT_AWAKENING_FALLBACKS]
+        return [dict(entry) for entry in prompts]
+
+    def _next_fallback_awakening_prompt(self) -> Optional[Dict[str, Any]]:
+        prompts = getattr(self, "_awakening_fallback_prompts", [])
+        if not prompts:
+            return None
+        cursor = int(getattr(self, "_awakening_fallback_cursor", 0)) % len(prompts)
+        self._awakening_fallback_cursor = (cursor + 1) % len(prompts)
+        return dict(prompts[cursor])
+
+    def _maybe_handle_awakening_greeting(self, user_msg: Optional[str]) -> Optional[Dict[str, Any]]:
+        if not isinstance(user_msg, str):
+            return None
+        text = user_msg.strip()
+        if not text:
+            return None
+        now = time.time()
+        cooldown = max(0.0, float(self._awakening_prompt_cooldown))
+        if cooldown and (now - self._last_awakening_prompt_ts) < cooldown:
+            return None
+        normalized = text.lower()
+        if not self._GREETING_PATTERN.search(normalized):
+            return None
+        residual = self._GREETING_PATTERN.sub("", normalized)
+        if residual.strip(" ,.!?\"'()[]{}") and len(text) > 16:
+            return None
+        try:
+            status = self.self_model.awakening_status()
+        except Exception:
+            status = None
+        if status and status.get("complete"):
+            return None
+
+        pending_prompts = status.get("pending_prompts") if status else []
+        pending_prompts = pending_prompts or []
+        fallback_meta: Optional[Dict[str, Any]] = None
+        prompt_id: Optional[str] = None
+        prompt_priority = 0.85
+
+        if pending_prompts:
+            first_prompt = pending_prompts[0]
+            question_text = first_prompt.get("prompt") or first_prompt.get("question")
+            if not question_text:
+                return None
+            question_text = str(question_text).strip()
+            if not question_text:
+                return None
+            prompt_id_candidate = first_prompt.get("id")
+            prompt_id = str(prompt_id_candidate).strip() if prompt_id_candidate else None
+            try:
+                prompt_priority = float(first_prompt.get("urgency", 0.85) or 0.85)
+            except Exception:
+                prompt_priority = 0.85
+            try:
+                self.self_model.ensure_awakened(
+                    question_manager=self.question_manager,
+                    now=now,
+                    bypass_question_manager=True,
+                )
+            except Exception:
+                pass
+        else:
+            fallback_meta = self._next_fallback_awakening_prompt()
+            if not fallback_meta:
+                return None
+            question_text = str(fallback_meta.get("prompt", "")).strip()
+            if not question_text:
+                return None
+            prompt_id_candidate = fallback_meta.get("id")
+            prompt_id = str(prompt_id_candidate).strip() if prompt_id_candidate else None
+            try:
+                prompt_priority = float(fallback_meta.get("urgency", 0.85) or 0.85)
+            except Exception:
+                prompt_priority = 0.85
+
+        intro = (
+            "Bonjour ! Je viens de m'éveiller et j'essaie de comprendre qui je suis."
+        )
+        request = (
+            "Pour m'aider à construire mon identité, pourrais-tu répondre à cette question ?"
+        )
+        bullet_line = f"- {question_text}"
+        reply_text = "\n".join([intro, request, bullet_line])
+        contract = {
+            "hypothese_choisie": "éveil_identitaire",
+            "incertitude": 0.2,
+            "prochain_test": "écouter ta réponse",
+            "appris": ["prioriser les questions fondatrices"],
+            "besoin": [question_text],
+        }
+        metadata = {
+            "awakening_handshake": True,
+            "awakening_questions": [question_text],
+        }
+        if prompt_id:
+            metadata["awakening_prompt_id"] = prompt_id
+        if fallback_meta is not None:
+            metadata["awakening_fallback"] = True
+            if isinstance(fallback_meta, Mapping):
+                tags = fallback_meta.get("tags")
+                if tags:
+                    metadata["awakening_tags"] = [
+                        str(tag) for tag in tags if str(tag).strip()
+                    ]
+
+        payload = {
+            "text": reply_text,
+            "raw": reply_text,
+            "bullets": [question_text],
+            "contract": contract,
+            "metadata": metadata,
+            "reasoning": {
+                "summary": "Priorité à la phase d'éveil : poser une question fondatrice.",
+                "final_confidence": 0.8,
+            },
+        }
+        self._last_awakening_prompt_ts = now
+
+        qm = getattr(self, "question_manager", None)
+        if qm and question_text:
+            meta_payload = {
+                "source": "awakening_handshake",
+                "immediacy": prompt_priority,
+            }
+            if prompt_id:
+                meta_payload["prompt_id"] = prompt_id
+            if fallback_meta is not None and isinstance(fallback_meta, Mapping):
+                tags = fallback_meta.get("tags")
+                if tags:
+                    meta_payload["tags"] = [
+                        str(tag) for tag in tags if str(tag).strip()
+                    ]
+            try:
+                qm.add_question(
+                    question_text,
+                    qtype="identity_foundation",
+                    metadata=meta_payload,
+                    priority=max(0.3, min(1.0, prompt_priority)),
+                )
+            except Exception:
+                pass
+
+        try:
+            self.autonomy.notify_user_activity()
+        except Exception:
+            pass
+
+        return payload
+
     def cycle(
         self,
         user_msg: Optional[str] = None,
@@ -918,6 +1146,47 @@ class CognitiveArchitecture:
             self._tick_background_systems()
             return self.last_output_text
 
+        interaction_token = None
+        autonomy_ref = getattr(self, 'autonomy', None)
+        begin_interaction = getattr(autonomy_ref, 'begin_user_interaction', None) if autonomy_ref else None
+        end_interaction = getattr(autonomy_ref, 'end_user_interaction', None) if autonomy_ref else None
+        register_signal_focus = getattr(autonomy_ref, 'register_signal_focus', None) if autonomy_ref else None
+
+        trimmed_preview = (user_msg or '').strip()
+        if trimmed_preview and callable(register_signal_focus):
+            try:
+                register_signal_focus({
+                    'source': 'user_input',
+                    'user_id': self.last_user_id,
+                    'preview': trimmed_preview[:120],
+                }, priority=1.0)
+            except Exception:
+                pass
+        if callable(begin_interaction):
+            try:
+                interaction_token = begin_interaction(
+                    trigger='user_input',
+                    priority=1.0,
+                    metadata={'user_id': self.last_user_id, 'text_preview': trimmed_preview[:160]},
+                )
+            except Exception:
+                interaction_token = None
+
+        try:
+            return self._run_cycle_user(user_msg=user_msg, inbox_docs=inbox_docs, user_id=user_id)
+        finally:
+            if interaction_token and callable(end_interaction):
+                try:
+                    end_interaction(interaction_token)
+                except Exception:
+                    pass
+
+    def _run_cycle_user(
+        self,
+        user_msg: Optional[str] = None,
+        inbox_docs=None,
+        user_id: str = 'default',
+    ) -> str:
         self._cycle_counter += 1
         if self._cycle_counter % self._decay_period == 0:
             self._apply_belief_decay()
@@ -997,6 +1266,48 @@ class CognitiveArchitecture:
             self.autonomy.notify_user_activity()
         except Exception:
             pass
+
+        awakening_payload = self._maybe_handle_awakening_greeting(user_msg)
+        if awakening_payload is not None:
+            reply_text = awakening_payload.get("text") or ""
+            self.last_output_text = reply_text
+            try:
+                if hasattr(self.memory, "store_interaction"):
+                    lang_state = getattr(
+                        getattr(self.language, "state", None), "to_dict", lambda: {}
+                    )()
+                    self.memory.store_interaction(
+                        {
+                            "ts": time.time(),
+                            "user": user_msg,
+                            "agent": reply_text,
+                            "agent_raw": awakening_payload.get("raw", reply_text),
+                            "lang_state": lang_state,
+                        }
+                    )
+            except Exception:
+                pass
+            try:
+                reward_value = extract_social_reward(user_msg).get("reward", 0.0)
+            except Exception:
+                reward_value = 0.0
+            try:
+                contract = awakening_payload.get("contract", {})
+                self.logger.write(
+                    "dialogue.turn",
+                    user_msg=user_msg,
+                    surface=user_msg,
+                    hypothesis=contract.get("hypothese_choisie", "éveil_identitaire"),
+                    incertitude=contract.get("incertitude", 0.2),
+                    test=contract.get("prochain_test", "récolter ta réponse"),
+                    reward=reward_value,
+                    style=self.style_policy.as_dict(),
+                    reason_summary="Handshake d'éveil prioritaire",
+                )
+            except Exception:
+                pass
+            self._tick_background_systems()
+            return awakening_payload
 
         try:
             self.style_profiler.observe(self.last_user_id, user_msg)
@@ -1435,6 +1746,11 @@ class CognitiveArchitecture:
             output_payload["bullets"] = needs_list
         if diagnostics_text and diagnostics_text.strip() and diagnostics_text.strip() != user_reply.strip():
             output_payload["diagnostics_text"] = diagnostics_text
+
+        try:
+            self.autonomy.notify_user_activity()
+        except Exception:
+            pass
 
         self._tick_background_systems()
         return output_payload
