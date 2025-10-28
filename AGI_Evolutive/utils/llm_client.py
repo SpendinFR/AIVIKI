@@ -64,7 +64,7 @@ class OllamaModelConfig:
     name: str
     temperature: float = 0.2
     top_p: float = 0.9
-    request_timeout: float = 180.0
+    request_timeout: float = 300.0
     system_prompt: Optional[str] = None
 
 
